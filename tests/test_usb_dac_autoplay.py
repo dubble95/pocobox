@@ -59,13 +59,16 @@ class TestUsbDacAutoplay(unittest.TestCase):
     def test_attach_switches_to_dac_and_resumes_queue(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             env_file = Path(td) / "squeezelite.env"
+            state_file = Path(td) / "audio-state.json"
             fake_client = MagicMock()
             fake_client.list_players.return_value = [
                 {"playerid": "02:70:6f:63:6f:01", "name": "pocobox", "connected": 1}
             ]
             fake_client.player_status.return_value = {"mode": "pause", "playlist_tracks": 5}
 
-            with patch.object(dac_mod, "SQUEEZELITE_ENV", env_file), \
+            with patch.dict(os.environ, {"ENABLE_AEC": "0"}), \
+                 patch.object(dac_mod, "SQUEEZELITE_ENV", env_file), \
+                 patch.object(dac_mod, "AUDIO_STATE_FILE", state_file), \
                  patch.object(dac_mod, "find_usb_audio_cards", return_value=[(1, "D10s")]), \
                  patch.object(dac_mod, "restart_squeezelite") as mock_restart:
                 new_state = dac_mod.apply_state(fake_client, active_dac=None, is_startup=False)
@@ -75,13 +78,47 @@ class TestUsbDacAutoplay(unittest.TestCase):
             self.assertIn("SQUEEZELITE_OUTPUT=plughw:CARD=D10s,DEV=0", env_file.read_text())
             fake_client.play.assert_called_once_with("02:70:6f:63:6f:01")
 
+    def test_attach_with_webrtc_aec_routes_through_aec_sink(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            env_file = Path(td) / "squeezelite.env"
+            state_file = Path(td) / "audio-state.json"
+            fake_client = MagicMock()
+            fake_client.list_players.return_value = [
+                {"playerid": "02:70:6f:63:6f:01", "name": "pocobox", "connected": 1}
+            ]
+            fake_client.player_status.return_value = {"mode": "pause", "playlist_tracks": 3}
+
+            with patch.dict(os.environ, {"ENABLE_AEC": "1"}), \
+                 patch.object(dac_mod, "SQUEEZELITE_ENV", env_file), \
+                 patch.object(dac_mod, "AUDIO_STATE_FILE", state_file), \
+                 patch.object(dac_mod, "find_usb_audio_cards", return_value=[(1, "DAC")]), \
+                 patch.object(dac_mod, "stop_squeezelite") as mock_stop, \
+                 patch.object(dac_mod, "setup_pulse_aec", return_value=True) as mock_aec, \
+                 patch.object(dac_mod, "restart_squeezelite") as mock_restart, \
+                 patch.object(dac_mod, "restart_voice_if_active") as mock_voice:
+                new_state = dac_mod.apply_state(fake_client, active_dac=None, is_startup=False)
+
+            self.assertEqual(new_state, "DAC")
+            mock_stop.assert_called_once()
+            mock_aec.assert_called_once_with("DAC")
+            mock_restart.assert_called_once()
+            mock_voice.assert_called_once()
+            env_text = env_file.read_text()
+            self.assertIn("SQUEEZELITE_OUTPUT=pulse", env_text)
+            self.assertIn("PULSE_SINK=pocobox_aec_sink", env_text)
+            self.assertIn('"aec": true', state_file.read_text())
+            fake_client.play.assert_called_once_with("02:70:6f:63:6f:01")
+
     def test_detach_pauses_and_restores_pulse(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             env_file = Path(td) / "squeezelite.env"
+            state_file = Path(td) / "audio-state.json"
             fake_client = MagicMock()
             fake_client.resolve_player_id.return_value = "02:70:6f:63:6f:01"
 
-            with patch.object(dac_mod, "SQUEEZELITE_ENV", env_file), \
+            with patch.dict(os.environ, {"ENABLE_AEC": "0"}), \
+                 patch.object(dac_mod, "SQUEEZELITE_ENV", env_file), \
+                 patch.object(dac_mod, "AUDIO_STATE_FILE", state_file), \
                  patch.object(dac_mod, "find_usb_audio_cards", return_value=[]), \
                  patch.object(dac_mod, "restart_squeezelite") as mock_restart:
                 new_state = dac_mod.apply_state(fake_client, active_dac="D10s", is_startup=False)

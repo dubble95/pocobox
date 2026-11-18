@@ -47,6 +47,7 @@ _KEY_VOLUMEUP = 115
 _INPUT_EVENT_FMT = "qqHHi"
 _INPUT_EVENT_SIZE = struct.calcsize(_INPUT_EVENT_FMT)
 SQUEEZELITE_ENV = Path("/etc/pocobox/squeezelite.env")
+AUDIO_STATE_FILE = Path("/etc/pocobox/audio-state.json")
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -57,6 +58,15 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def _read_audio_output_label() -> str:
+    if AUDIO_STATE_FILE.exists():
+        try:
+            st = json.loads(AUDIO_STATE_FILE.read_text(encoding="utf-8"))
+            aec = " · AEC" if st.get("aec") else ""
+            if st.get("mode") == "usb_dac" and st.get("card_id"):
+                return f"🎧 USB DAC ({st['card_id']}){aec}"
+            return f"🔊 내장 스피커{aec}"
+        except Exception:
+            pass
     if not SQUEEZELITE_ENV.exists():
         return "🔊 내장 스피커"
     for line in SQUEEZELITE_ENV.read_text(encoding="utf-8", errors="ignore").splitlines():

@@ -1,7 +1,7 @@
 [Unit]
-Description=PocoBox USB DAC Hotplug & Auto-Play Daemon
-After=network-online.target docker.service pocobox-squeezelite.service sound.target
-Wants=pocobox-squeezelite.service
+Description=PocoBox USB DAC Hotplug, WebRTC AEC & Auto-Play Daemon
+After=network-online.target docker.service pocobox-pulseaudio.service pocobox-squeezelite.service sound.target
+Wants=pocobox-pulseaudio.service pocobox-squeezelite.service
 
 [Service]
 Type=simple
