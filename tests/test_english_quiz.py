@@ -511,6 +511,11 @@ class TestEnglishQuizDaemonIntegration(unittest.TestCase):
             self.assertTrue(started["ok"])
             self.assertTrue(started["details"]["quiz"]["active"])
 
+            code, skipped = req("POST", "/quiz/start", {"topic": "all", "count": 3, "skip_if_active": True, "dry_run": True})
+            self.assertEqual(code, 200)
+            self.assertTrue(skipped["ok"])
+            self.assertTrue(skipped.get("skipped"))
+
             code, ans = req("POST", "/quiz/answer", {"text": "힌트", "dry_run": True, "use_cloud": False})
             self.assertEqual(code, 200)
             self.assertEqual(ans["details"]["quiz_event"], "hint")
@@ -521,6 +526,15 @@ class TestEnglishQuizDaemonIntegration(unittest.TestCase):
         finally:
             server.shutdown()
             server.server_close()
+
+    def test_daily_quiz_systemd_timer_config(self) -> None:
+        timer_txt = (REPO_ROOT / "infra" / "voice" / "pocobox-daily-quiz.timer").read_text(encoding="utf-8")
+        svc_txt = (REPO_ROOT / "infra" / "voice" / "pocobox-daily-quiz.service").read_text(encoding="utf-8")
+        self.assertIn("OnCalendar=*-*-* 07:45:00 Asia/Seoul", timer_txt)
+        self.assertIn("Persistent=false", timer_txt)
+        self.assertIn("/quiz/start", svc_txt)
+        self.assertIn("voice_loop", svc_txt)
+        self.assertIn("skip_if_active", svc_txt)
 
 
 if __name__ == "__main__":
