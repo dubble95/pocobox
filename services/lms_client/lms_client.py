@@ -34,10 +34,10 @@ def _score_candidate(item: dict[str, Any], query: str) -> float:
         score += overlap * 40.0
     if item.get("isaudio"):
         score += 5.0
-    # Slightly penalize karaoke / instrumental / cover unless explicitly requested
-    for noise in ("karaoke", "instrumental", "tribute", "lullaby", "ringtone"):
+    # Penalize karaoke / instrumental / tribute / cover versions unless explicitly requested
+    for noise in ("karaoke", "instrumental", "tribute", "lullaby", "ringtone", "originally perf", "made famous", "in the style of"):
         if noise in name_l and noise not in query_l:
-            score -= 25.0
+            score -= 35.0
     return score
 
 

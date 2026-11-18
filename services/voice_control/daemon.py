@@ -23,7 +23,12 @@ for _p in (str(_HERE.parent), str(_HERE.parent / "lms_client"), "/srv/pocobox/bi
         sys.path.insert(0, _p)
 
 from lms_client import LMSClient  # noqa: E402
-from voice_control.audio_capture import analyze_wav_bytes, record_utterance_wav, trim_silence_wav  # noqa: E402
+from voice_control.audio_capture import (  # noqa: E402
+    analyze_wav_bytes,
+    normalize_wav_gain,
+    record_utterance_wav,
+    trim_silence_wav,
+)
 from voice_control.cloud_stt_intent import HybridVoiceInterpreter  # noqa: E402
 from voice_control.continuous_listener import ContinuousVoiceListener  # noqa: E402
 from voice_control.display_ui import DISPLAY_HTML  # noqa: E402
@@ -75,6 +80,7 @@ class VoiceController:
         self.interpreter = HybridVoiceInterpreter()
         self.require_wake_word = _env_bool("REQUIRE_WAKE_WORD", True)
         self.continuous_enabled = _env_bool("CONTINUOUS_LISTEN", True)
+        self.vad_threshold = float(os.environ.get("VOICE_VAD_THRESHOLD", "45.0"))
 
         self._listen_lock = threading.Lock()
         self._manual_busy = False
@@ -100,7 +106,7 @@ class VoiceController:
         return res
 
     def handle_wav(self, wav_bytes: bytes, dry_run: bool = False, enforce_wake_word: bool = False) -> ExecutionResult:
-        metrics = analyze_wav_bytes(wav_bytes)
+        metrics = analyze_wav_bytes(wav_bytes, speech_threshold=self.vad_threshold)
         if not metrics.has_speech:
             res = ExecutionResult(
                 ok=False,
@@ -111,9 +117,10 @@ class VoiceController:
             self.last_result = res.to_dict()
             return res
 
-        trimmed = trim_silence_wav(wav_bytes)
+        trimmed = trim_silence_wav(wav_bytes, threshold=max(20.0, self.vad_threshold * 0.7))
+        boosted = normalize_wav_gain(trimmed)
         try:
-            intent = self.interpreter.interpret_audio(trimmed)
+            intent = self.interpreter.interpret_audio(boosted)
         except Exception as exc:
             res = ExecutionResult(
                 ok=False,
@@ -160,7 +167,7 @@ class VoiceController:
             wav_bytes, metrics = record_utterance_wav(
                 max_duration_sec=float(os.environ.get("VOICE_MAX_SEC", "8.0")),
                 silence_timeout_sec=float(os.environ.get("VOICE_SILENCE_SEC", "1.2")),
-                min_threshold=float(os.environ.get("VOICE_VAD_THRESHOLD", "350.0")),
+                min_threshold=self.vad_threshold,
                 source=os.environ.get("VOICE_PULSE_SOURCE") or None,
             )
             if not metrics.has_speech:

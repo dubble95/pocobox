@@ -78,7 +78,7 @@ def analyze_wav_bytes(wav_bytes: bytes, speech_threshold: float = 350.0) -> VadM
     )
 
 
-def trim_silence_wav(wav_bytes: bytes, threshold: float = 300.0, pad_chunks: int = 2) -> bytes:
+def trim_silence_wav(wav_bytes: bytes, threshold: float = 40.0, pad_chunks: int = 3) -> bytes:
     """Trim leading and trailing silence from a 16-bit mono WAV."""
     with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
         rate = wf.getframerate()
@@ -93,6 +93,29 @@ def trim_silence_wav(wav_bytes: bytes, threshold: float = 300.0, pad_chunks: int
     start = max(0, active[0] - pad_chunks)
     end = min(len(chunks), active[-1] + pad_chunks + 1)
     return pcm_to_wav_bytes(b"".join(chunks[start:end]), sample_rate=rate, channels=ch)
+
+
+def normalize_wav_gain(wav_bytes: bytes, target_peak: float = 20000.0, max_gain: float = 40.0) -> bytes:
+    """Amplify quiet microphone captures cleanly without clipping so cloud STT hears them clearly."""
+    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+        rate = wf.getframerate()
+        ch = wf.getnchannels()
+        raw = wf.readframes(wf.getnframes())
+
+    count = len(raw) // 2
+    if count == 0:
+        return wav_bytes
+    samples = struct.unpack(f"<{count}h", raw[: count * 2])
+    peak = max((abs(s) for s in samples), default=0)
+    if peak < 10 or peak >= target_peak:
+        return wav_bytes
+
+    gain = min(max_gain, target_peak / float(peak))
+    if gain <= 1.2:
+        return wav_bytes
+
+    boosted = [max(-32767, min(32767, int(s * gain))) for s in samples]
+    return pcm_to_wav_bytes(struct.pack(f"<{count}h", *boosted), sample_rate=rate, channels=ch)
 
 
 def record_utterance_wav(

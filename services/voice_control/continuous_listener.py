@@ -26,9 +26,9 @@ class ContinuousVoiceListener:
         self.on_utterance = on_utterance
         self.is_paused_fn = is_paused_fn or (lambda: False)
 
-        self.min_threshold = float(os.environ.get("VOICE_VAD_THRESHOLD", "350.0"))
-        self.speech_multiplier = float(os.environ.get("VOICE_VAD_MULTIPLIER", "2.3"))
-        self.onset_chunks = max(2, int(float(os.environ.get("VOICE_ONSET_SEC", "0.3")) * 1000 // CHUNK_MS))
+        self.min_threshold = float(os.environ.get("VOICE_VAD_THRESHOLD", "45.0"))
+        self.speech_multiplier = float(os.environ.get("VOICE_VAD_MULTIPLIER", "3.5"))
+        self.onset_chunks = max(2, int(float(os.environ.get("VOICE_ONSET_SEC", "0.2")) * 1000 // CHUNK_MS))
         self.silence_chunks = max(4, int(float(os.environ.get("VOICE_SILENCE_SEC", "1.0")) * 1000 // CHUNK_MS))
         self.max_chunks = max(15, int(float(os.environ.get("VOICE_MAX_SEC", "7.0")) * 1000 // CHUNK_MS))
         self.preroll_chunks = max(2, int(float(os.environ.get("VOICE_PREROLL_SEC", "0.5")) * 1000 // CHUNK_MS))
