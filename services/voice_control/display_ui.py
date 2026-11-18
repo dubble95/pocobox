@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-UI_VERSION = "3"
+UI_VERSION = "4"
 
 DISPLAY_HTML = """<!doctype html>
 <html lang="ko">
@@ -162,7 +162,21 @@ DISPLAY_HTML = """<!doctype html>
   .subtitle-card.recording { border-color: rgba(239, 68, 68, 0.85); }
   .subtitle-card.processing { border-color: rgba(245, 158, 11, 0.85); }
   .subtitle-card.ok { border-color: rgba(34, 197, 94, 0.8); }
+  .subtitle-card.quiz { border-color: rgba(129, 140, 248, 0.9); background: rgba(15, 20, 42, 0.92); }
   .subtitle-card.ambient { border-color: rgba(148, 163, 184, 0.45); background: rgba(10, 14, 24, 0.76); }
+
+  .quiz-score-bar {
+    display: none;
+    align-items: center; justify-content: center; gap: 10px;
+    margin-top: 10px;
+    padding: 8px 16px; border-radius: 999px;
+    background: rgba(79, 70, 229, 0.34);
+    border: 1px solid rgba(129, 140, 248, 0.65);
+    font-size: 14px; font-weight: 700; color: #e0e7ff;
+    backdrop-filter: blur(12px);
+    align-self: center;
+  }
+  .quiz-score-bar.active { display: inline-flex; }
 
   .sub-header {
     display: inline-flex; align-items: center; justify-content: center; gap: 8px;
@@ -172,6 +186,7 @@ DISPLAY_HTML = """<!doctype html>
   .subtitle-card.recording .sub-header { color: #fca5a5; }
   .subtitle-card.processing .sub-header { color: #fcd34d; }
   .subtitle-card.ok .sub-header { color: #86efac; }
+  .subtitle-card.quiz .sub-header { color: #a5b4fc; }
   .subtitle-card.ambient .sub-header { color: #94a3b8; }
 
   .sub-text {
@@ -179,6 +194,7 @@ DISPLAY_HTML = """<!doctype html>
     font-weight: 800; line-height: 1.32;
     color: #ffffff;
     word-break: keep-all;
+    white-space: pre-line;
   }
   .subtitle-card.ambient .sub-text {
     font-size: clamp(16px, 4.2vw, 21px);
@@ -236,6 +252,7 @@ DISPLAY_HTML = """<!doctype html>
       <div class="pill"><span id="micDot" class="dot"></span><span id="micText">상시 음성 대기</span></div>
       <div class="pill" id="outputBadge">🔊 출력 확인 중</div>
     </div>
+    <div id="quizScoreBar" class="quiz-score-bar">🎧 영어 퀴즈 1/5 · ⭐ 0점</div>
 
     <div class="center">
       <div class="art-wrap">
@@ -321,17 +338,49 @@ DISPLAY_HTML = """<!doctype html>
     }
   }
 
+  let quizActive = false;
+
+  function updateQuizBadge(q) {
+    const bar = document.getElementById("quizScoreBar");
+    quizActive = Boolean(q && q.active);
+    if (!bar) return;
+    if (quizActive) {
+      bar.classList.add("active");
+      const streakTxt = q.streak >= 2 ? (" · 🔥 " + q.streak + "연속") : "";
+      bar.textContent = "🎧 영어 퀴즈 (" + (q.topic_label || "기초") + ")  " + (q.question_num || 1) + "/" + (q.total || 5) + "  ·  ⭐ " + (q.score || 0) + "점" + streakTxt;
+    } else {
+      bar.classList.remove("active");
+    }
+  }
+
   function handleVoiceEvent(ev) {
     if (!ev || !ev.type) return;
+
+    if (ev.type === "quiz") {
+      updateQuizBadge(ev.quiz);
+      const isOk = ev.event === "correct" || ev.event === "finished";
+      const mode = isOk ? "ok" : "quiz";
+      const autoHide = ev.active ? 0 : 14000;
+      showSubtitle(mode, ev.header || "🎧 영어 리스닝 퀴즈", ev.text || "", ev.status || "", autoHide);
+      document.getElementById("voiceBanner").textContent = (ev.header ? ev.header + " — " : "") + (ev.text || "").replace(/\n+/g, " ");
+      return;
+    }
+
+    if (ev.type === "quiz_ready") {
+      updateQuizBadge(ev.quiz);
+      const statusEl = document.getElementById("subStatus");
+      if (statusEl) statusEl.textContent = "🔔 띵동! 지금 말씀해 주세요...";
+      return;
+    }
 
     if (ev.type === "state") {
       setMicBadge(ev.state, true);
       if (ev.state === "recording") {
         showSubtitle(
           "recording",
-          '<span class="wave"><span></span><span></span><span></span><span></span></span> 음성 감지 중',
-          "듣고 있습니다...",
-          "말씀을 마치면 자동으로 인식합니다",
+          '<span class="wave"><span></span><span></span><span></span><span></span></span> ' + (quizActive ? "🔔 지금 대답해 주세요!" : "음성 감지 중"),
+          quizActive ? "정답을 말씀해 주세요..." : "듣고 있습니다...",
+          quizActive ? '"다시", "천천히", "힌트", "패스", "그만"' : "말씀을 마치면 자동으로 인식합니다",
           0
         );
       } else if (ev.state === "processing") {
@@ -434,6 +483,7 @@ DISPLAY_HTML = """<!doctype html>
       document.getElementById("lmsLink").href = "http://" + location.hostname + ":9000/material/";
       setMicBadge(s.voice.listening_state || "stopped", Boolean(s.voice.continuous_listen));
       document.getElementById("outputBadge").textContent = s.audio_output_label || "🔊 오디오";
+      updateQuizBadge(s.quiz);
 
       const np = s.now_playing || {};
       const hasTrack = Boolean(np.title);

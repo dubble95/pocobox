@@ -12,6 +12,7 @@ import uuid
 from typing import Any
 
 from .aliases import expand_tidal_queries, strip_wake_prefix
+from .english_quiz import QuizQuestion, classify_quiz_command, is_local_answer_match, parse_quiz_options
 from .intent_schema import IntentAction, VoiceIntent
 from .rule_parser import parse_command
 
@@ -32,7 +33,7 @@ Listen to the audio (or read the text) and return ONLY a valid JSON object match
   "transcript": "<exact spoken words only; empty string if only instrumental/noise>",
   "is_music_only": false,
   "wake_word_detected": true,
-  "action": "play_search | play_mix | play_favorite | pause | resume | next | previous | volume_set | volume_up | volume_down | mute | unmute | now_playing | answer_qa | unknown",
+  "action": "play_search | play_mix | play_favorite | pause | resume | next | previous | volume_set | volume_up | volume_down | mute | unmute | now_playing | answer_qa | start_quiz | stop_quiz | unknown",
   "query": "<primary TIDAL-friendly search query for play_search, else empty string>",
   "fallback_queries": ["<alternative query 1>", "<original Korean query>"],
   "search_type": "track | artist | album | playlist | any",
@@ -45,6 +46,7 @@ Listen to the audio (or read the text) and return ONLY a valid JSON object match
 Rules:
 - Strip the wake word ("포코야", "포코박스", "Hey Poco", etc.) from "query" and set "wake_word_detected": true ONLY if the speaker actually said the wake word.
 - Use action="answer_qa" when the user asks a general question, trivia, math, definition, recommendation, music/artist info, greeting, or time/date question (e.g. "콜드플레이가 어떤 밴드야?", "프랑스 수도가 어디야?", "38 곱하기 17은?", "저녁 메뉴 추천해줘", "내일 무슨 요일이야?"). Keep "answer" short, accurate, and natural to read aloud (1-2 sentences, Korean unless the user asked in English).
+- Use action="start_quiz" when the user asks to start an English quiz or English listening quiz (e.g. "영어 퀴즈 시작해줘", "영어 문제 내줘", "동물 영어 퀴즈 하자", "English quiz"). Use action="stop_quiz" when they ask to stop/end the quiz.
 - If the speaker did NOT specify a song/artist/genre/mix/question (e.g. only said "포코야" or vague "이 노래 틀어줘"), return action="unknown" unless they clearly said "다시 틀어줘" (resume) or "아무거나 틀어줘" (play_mix).
 - For Korean artists/songs, put the official TIDAL English/canonical name in "query" and Korean/shorter variants in "fallback_queries" (e.g. "포코야 아이유 밤편지 틀어줘" -> query: "IU Through the Night", fallback_queries: ["밤편지", "IU"]).
 - For playback controls (pause, resume, next, previous, volume_set/up/down, mute, unmute, now_playing), set query and answer to "".
@@ -99,6 +101,11 @@ def _intent_from_llm_payload(payload: dict[str, Any], provider: str, raw_fallbac
         and any(w in transcript.lower() for w in ("포코", "포쿠", "쿠쿠", "poco"))
     )
 
+    quiz_topic = ""
+    quiz_count: int | None = None
+    if action_str == IntentAction.START_QUIZ.value:
+        quiz_topic, quiz_count = parse_quiz_options(transcript or query)
+
     return VoiceIntent(
         action=IntentAction(action_str) if action_str in {a.value for a in IntentAction} else IntentAction.UNKNOWN,
         raw_text=transcript,
@@ -111,6 +118,8 @@ def _intent_from_llm_payload(payload: dict[str, Any], provider: str, raw_fallbac
         provider=provider,
         wake_word_detected=wake_detected,
         answer=str(payload.get("answer") or "").strip(),
+        quiz_topic=quiz_topic,
+        quiz_count=quiz_count,
     )
 
 
@@ -264,6 +273,184 @@ class HybridVoiceInterpreter:
         )
         out = data["choices"][0]["message"]["content"]
         return _intent_from_llm_payload(_parse_json_response(out), provider="openai", raw_fallback=text)
+
+    def transcribe_blind_audio(self, wav_bytes: bytes) -> str:
+        """Strictly literal Korean/English STT with ZERO quiz-answer context (prevents answer hallucination)."""
+        if self.provider == "gemini" and self.gemini_api_key:
+            b64 = base64.b64encode(wav_bytes).decode("ascii")
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.gemini_model}:generateContent?key={self.gemini_api_key}"
+            sys_prompt = (
+                "You are a strictly literal Korean/English speech-to-text transcriber.\n"
+                "Rules:\n"
+                "- Output ONLY JSON: {\"transcript\": \"<exact words spoken, or empty string if silence/noise>\"}\n"
+                "- Transcribe EXACTLY what the speaker actually said in Korean or English, even if it is nonsense, gibberish, or unrelated words.\n"
+                "- NEVER guess, invent, or autocorrect unclear speech into a meaningful word.\n"
+                "- If there is only background noise, coughing, breathing, or silence, return {\"transcript\": \"\"}."
+            )
+            body = {
+                "system_instruction": {"parts": [{"text": sys_prompt}]},
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [
+                            {"inline_data": {"mime_type": "audio/wav", "data": b64}},
+                            {"text": "Transcribe the spoken Korean or English words verbatim as JSON."},
+                        ],
+                    }
+                ],
+                "generationConfig": {
+                    "temperature": 0.0,
+                    "responseMimeType": "application/json",
+                },
+            }
+            data = self._http_json(url, body)
+            raw = data["candidates"][0]["content"]["parts"][0]["text"]
+            parsed = _parse_json_response(raw)
+            return str(parsed.get("transcript") or "").strip()
+        if self.provider == "openai" and self.openai_api_key:
+            return self._openai_transcribe(wav_bytes)
+        raise RuntimeError("Cloud STT API key not configured for voice quiz.")
+
+    def transcribe_and_grade_quiz_audio(
+        self,
+        wav_bytes: bytes,
+        *,
+        english_text: str,
+        korean_meaning: str,
+        accepted_answers: tuple[str, ...] | list[str],
+        kind: str = "story_quiz",
+    ) -> dict[str, Any]:
+        """2-step anti-hallucination quiz audio pipeline: blind literal STT first, then objective grading."""
+        transcript = self.transcribe_blind_audio(wav_bytes)
+        if not transcript:
+            return {"transcript": "", "command": "none", "is_correct": None}
+
+        cmd = classify_quiz_command(transcript)
+        if cmd is not None:
+            return {"transcript": transcript, "command": cmd, "is_correct": None}
+
+        # Instant local exact/synonym check first (avoids unnecessary 2nd LLM call when clearly right)
+        probe_q = QuizQuestion(
+            id="_probe",
+            category="all",
+            kind=kind,
+            english_text=english_text,
+            korean_meaning=korean_meaning,
+            accepted_answers=tuple(accepted_answers),
+            hint_ko="",
+            explanation_ko="",
+        )
+        if is_local_answer_match(transcript, probe_q):
+            return {"transcript": transcript, "command": "answer", "is_correct": True}
+
+        # Strict semantic fallback ONLY on the blind transcript (never leaks answer into STT!)
+        is_correct = self.grade_quiz_text_answer(
+            transcript,
+            english_text=english_text,
+            korean_meaning=korean_meaning,
+            accepted_answers=accepted_answers,
+            kind=kind,
+        )
+        return {"transcript": transcript, "command": "answer", "is_correct": bool(is_correct)}
+
+    def grade_quiz_text_answer(
+        self,
+        user_text: str,
+        *,
+        english_text: str,
+        korean_meaning: str,
+        accepted_answers: tuple[str, ...] | list[str],
+        kind: str = "story_quiz",
+    ) -> bool | None:
+        """Strict semantic LLM grading fallback on a blind transcript when local matching did not match."""
+        if not user_text.strip() or self.provider == "local":
+            return None
+        prompt = (
+            "You strictly grade a user's answer to an English listening quiz.\n"
+            "Rules:\n"
+            "- Return is_correct=true ONLY if the user's answer clearly names or directly means the EXACT expected answer (in Korean or English, allowing natural synonyms or polite Korean endings).\n"
+            "- Return is_correct=false for wrong answers, random words, gibberish, vague guesses, or anything that does not actually mean the expected answer.\n"
+            f"English question: {english_text}\n"
+            f"Expected answer: {korean_meaning} (accepted: {', '.join(accepted_answers)})\n"
+            f"User's spoken transcript: {user_text}\n"
+            'Return ONLY JSON: {"is_correct": true} or {"is_correct": false}'
+        )
+        try:
+            if self.provider == "gemini" and self.gemini_api_key:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.gemini_model}:generateContent?key={self.gemini_api_key}"
+                body = {
+                    "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                    "generationConfig": {"temperature": 0.0, "responseMimeType": "application/json"},
+                }
+                data = self._http_json(url, body)
+                parsed = _parse_json_response(data["candidates"][0]["content"]["parts"][0]["text"])
+                return bool(parsed.get("is_correct")) if isinstance(parsed.get("is_correct"), bool) else None
+            if self.provider == "openai" and self.openai_api_key:
+                body = {
+                    "model": self.openai_chat_model,
+                    "temperature": 0.0,
+                    "response_format": {"type": "json_object"},
+                    "messages": [{"role": "user", "content": prompt}],
+                }
+                data = self._http_json(
+                    "https://api.openai.com/v1/chat/completions",
+                    body,
+                    extra_headers={"Authorization": f"Bearer {self.openai_api_key}"},
+                )
+                parsed = _parse_json_response(data["choices"][0]["message"]["content"])
+                return bool(parsed.get("is_correct")) if isinstance(parsed.get("is_correct"), bool) else None
+        except Exception:
+            return None
+        return None
+
+    def generate_kids_quiz_questions(
+        self,
+        topic: str = "all",
+        count: int = 5,
+        exclude_english: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Optionally generate fresh kids/beginner English listening questions via Gemini/OpenAI."""
+        if self.provider == "local":
+            return []
+        excluded = ", ".join((exclude_english or [])[:25]) or "none"
+        prompt = (
+            f"Create {count} fun, engaging English listening quiz questions for Korean elementary/beginner-intermediate (A2) learners.\n"
+            f"Topic: {topic}\n"
+            f"Avoid these already-used English texts: {excluded}\n"
+            "Each 'english_text' MUST be 2 to 3 natural, vivid English sentences (a short mini-story, description, or riddle) ending with a clear question (e.g. 'What animal am I?', 'Where did he go?', 'What am I?').\n"
+            "Provide both English and Korean in 'korean_meaning' (e.g. 'Umbrella (우산)') and include both English and Korean variants in 'accepted_answers'.\n"
+            "Keep 'hint_ko' and 'explanation_ko' in warm, encouraging Korean (1-2 short sentences, no markdown).\n"
+            'Return ONLY JSON: {"questions": [{"kind": "story_quiz", "category": "...", "english_text": "...", "korean_meaning": "...", "accepted_answers": ["..."], "hint_ko": "...", "explanation_ko": "..."}]}'
+        )
+        try:
+            if self.provider == "gemini" and self.gemini_api_key:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.gemini_model}:generateContent?key={self.gemini_api_key}"
+                body = {
+                    "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                    "generationConfig": {"temperature": 0.7, "responseMimeType": "application/json"},
+                }
+                data = self._http_json(url, body)
+                parsed = _parse_json_response(data["candidates"][0]["content"]["parts"][0]["text"])
+                qs = parsed.get("questions")
+                return qs if isinstance(qs, list) else []
+            if self.provider == "openai" and self.openai_api_key:
+                body = {
+                    "model": self.openai_chat_model,
+                    "temperature": 0.7,
+                    "response_format": {"type": "json_object"},
+                    "messages": [{"role": "user", "content": prompt}],
+                }
+                data = self._http_json(
+                    "https://api.openai.com/v1/chat/completions",
+                    body,
+                    extra_headers={"Authorization": f"Bearer {self.openai_api_key}"},
+                )
+                parsed = _parse_json_response(data["choices"][0]["message"]["content"])
+                qs = parsed.get("questions")
+                return qs if isinstance(qs, list) else []
+        except Exception:
+            return []
+        return []
 
     def _http_json(
         self,

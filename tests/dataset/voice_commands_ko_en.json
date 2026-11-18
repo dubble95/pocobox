@@ -90,6 +90,12 @@
   {"id": "qa_02", "category": "qa_time_date", "text": "포코야 오늘 며칠이야?", "expected_action": "answer_qa", "expected_wake": true},
   {"id": "qa_03", "category": "qa_time_date", "text": "Hey Poco what time is it", "expected_action": "answer_qa", "expected_wake": true},
 
+  {"id": "quiz_01", "category": "english_quiz", "text": "포코야 영어 퀴즈 시작해줘", "expected_action": "start_quiz", "expected_wake": true},
+  {"id": "quiz_02", "category": "english_quiz", "text": "동물 영어 퀴즈 3문제 해줘", "expected_action": "start_quiz"},
+  {"id": "quiz_03", "category": "english_quiz", "text": "Hey Poco start English quiz", "expected_action": "start_quiz", "expected_wake": true},
+  {"id": "quiz_04", "category": "english_quiz", "text": "영어 퀴즈 그만", "expected_action": "stop_quiz"},
+  {"id": "quiz_05", "category": "english_quiz", "text": "퀴즈 종료해줘", "expected_action": "stop_quiz"},
+
   {"id": "neg_01", "category": "negative_non_commands", "text": "오늘 날씨 어때?", "expected_action": "unknown"},
   {"id": "neg_02", "category": "negative_non_commands", "text": "배고프다 저녁 뭐 먹지", "expected_action": "unknown"},
   {"id": "neg_03", "category": "negative_non_commands", "text": "그냥 지나가는 말이에요", "expected_action": "unknown"},

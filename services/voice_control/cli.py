@@ -44,6 +44,20 @@ def main() -> int:
     p_listen = sub.add_parser("listen", help="Trigger microphone recording and execute command")
     p_listen.add_argument("--dry-run", action="store_true")
 
+    p_quiz = sub.add_parser("quiz", help="Control the kids/beginner English listening quiz")
+    q_sub = p_quiz.add_subparsers(dest="quiz_cmd", required=True)
+    q_start = q_sub.add_parser("start", help="Start an English listening quiz")
+    q_start.add_argument("--topic", default="all", help="Topic: all|animals|food|colors_numbers|family_school|daily|riddles")
+    q_start.add_argument("--count", type=int, default=3, help="Number of questions (1-10)")
+    q_start.add_argument("--voice", action="store_true", help="Run hands-free voice conversation loop")
+    q_start.add_argument("--dry-run", action="store_true")
+    q_ans = q_sub.add_parser("answer", help="Submit a text answer or quiz command (다시/힌트/패스/그만)")
+    q_ans.add_argument("text")
+    q_ans.add_argument("--dry-run", action="store_true")
+    q_ans.add_argument("--no-cloud", action="store_true")
+    q_sub.add_parser("stop", help="Stop the current quiz")
+    q_sub.add_parser("status", help="Show current quiz state and score")
+
     args = parser.parse_args()
     base = args.url.rstrip("/")
 
@@ -63,6 +77,28 @@ def main() -> int:
     elif args.cmd == "listen":
         qs = "?dry_run=1" if args.dry_run else ""
         code, res = _request(f"{base}/voice/listen{qs}", data=b"{}")
+    elif args.cmd == "quiz":
+        if args.quiz_cmd == "status":
+            code, res = _request(f"{base}/quiz/state")
+        elif args.quiz_cmd == "start":
+            payload = json.dumps({
+                "topic": args.topic,
+                "count": args.count,
+                "voice_loop": args.voice,
+                "dry_run": args.dry_run,
+            }).encode("utf-8")
+            code, res = _request(f"{base}/quiz/start", data=payload)
+        elif args.quiz_cmd == "answer":
+            payload = json.dumps({
+                "text": args.text,
+                "dry_run": args.dry_run,
+                "use_cloud": not args.no_cloud,
+            }).encode("utf-8")
+            code, res = _request(f"{base}/quiz/answer", data=payload)
+        elif args.quiz_cmd == "stop":
+            code, res = _request(f"{base}/quiz/stop", data=b"{}")
+        else:
+            parser.error(f"Unknown quiz command: {args.quiz_cmd}")
     else:
         parser.error(f"Unknown command: {args.cmd}")
 

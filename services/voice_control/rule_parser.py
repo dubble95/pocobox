@@ -32,6 +32,7 @@ from .aliases import (
     parse_korean_number,
     strip_wake_prefix,
 )
+from .english_quiz import parse_quiz_options
 from .intent_schema import IntentAction, VoiceIntent
 
 # Trailing command verbs/phrases to strip from play queries (Korean & English)
@@ -86,6 +87,34 @@ def parse_command(raw_text: str) -> VoiceIntent:
         )
 
     low = text.lower()
+
+    # 0. ENGLISH LISTENING QUIZ start / stop (check before pause/play so "play english quiz" or "퀴즈 멈춰" routes properly)
+    if re.search(
+        r"((?:영어\s*(?:리스닝\s*|단어\s*|듣기\s*|문장\s*)?)?퀴즈\s*(?:그만|종료|끝|끝내|중단|멈춰|나가기|꺼)|(?:stop|quit|exit|end)\s+(?:the\s+)?(?:english\s+)?quiz)",
+        low,
+    ):
+        return VoiceIntent(
+            action=IntentAction.STOP_QUIZ,
+            raw_text=raw_text,
+            confidence=0.98,
+            wake_word_detected=wake_detected,
+            language=lang,
+        )
+
+    if re.search(
+        r"(영어\s*(?:리스닝\s*|듣기\s*|단어\s*|문장\s*|회화\s*)?퀴즈|리스닝\s*퀴즈|영어\s*(?:문제|단어\s*문제)\s*(?:내\s*줘|내줘|풀|시작|해\s*줘|해줘)|(?:english|listening)\s+quiz|quiz\s+me\s+(?:in\s+)?english)",
+        low,
+    ):
+        topic, count = parse_quiz_options(text)
+        return VoiceIntent(
+            action=IntentAction.START_QUIZ,
+            raw_text=raw_text,
+            quiz_topic=topic,
+            quiz_count=count,
+            confidence=0.98,
+            wake_word_detected=wake_detected,
+            language=lang,
+        )
 
     # 1. NOW PLAYING queries
     if re.search(

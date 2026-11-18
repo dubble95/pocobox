@@ -22,6 +22,8 @@ class IntentAction(str, Enum):
     UNMUTE = "unmute"
     NOW_PLAYING = "now_playing"
     ANSWER_QA = "answer_qa"
+    START_QUIZ = "start_quiz"
+    STOP_QUIZ = "stop_quiz"
     UNKNOWN = "unknown"
 
 
@@ -42,6 +44,8 @@ class VoiceIntent:
     wake_word_detected: bool = False
     language: str = "ko"
     answer: str = ""
+    quiz_topic: str = ""
+    quiz_count: int | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.action, str):

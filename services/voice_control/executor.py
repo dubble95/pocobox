@@ -43,6 +43,16 @@ class VoiceExecutor:
                 return done(False, "질문에 대한 답변을 생성하지 못했습니다.")
             return done(True, answer, {"answer": answer})
 
+        if intent.action == IntentAction.START_QUIZ:
+            return done(
+                True,
+                "영어 리스닝 퀴즈를 시작합니다.",
+                {"quiz_topic": intent.quiz_topic or "all", "quiz_count": intent.quiz_count or 3},
+            )
+
+        if intent.action == IntentAction.STOP_QUIZ:
+            return done(True, "영어 리스닝 퀴즈를 종료합니다.")
+
         try:
             player_id = self.lms.resolve_player_id(self.player_name)
         except Exception as exc:

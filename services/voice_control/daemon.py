@@ -34,10 +34,32 @@ from voice_control.cloud_stt_intent import HybridVoiceInterpreter  # noqa: E402
 from voice_control.continuous_listener import ContinuousVoiceListener  # noqa: E402
 from voice_control.dashboard_ui import DASHBOARD_HTML  # noqa: E402
 from voice_control.display_ui import DISPLAY_HTML, UI_VERSION  # noqa: E402
+from voice_control.english_quiz import (  # noqa: E402
+    DEFAULT_QUIZ_COUNT,
+    EnglishQuizSession,
+    QuizTurnResponse,
+    TOPIC_LABELS,
+    classify_quiz_command,
+    is_local_answer_match,
+    question_from_dict,
+)
 from voice_control.executor import VoiceExecutor  # noqa: E402
-from voice_control.feedback import play_chime  # noqa: E402
+from voice_control.feedback import (  # noqa: E402
+    get_internal_speaker_volume,
+    play_chime,
+    set_internal_speaker_volume,
+)
 from voice_control.intent_schema import ExecutionResult, IntentAction  # noqa: E402
-from voice_control.tts import speak_text  # noqa: E402
+from voice_control.telemetry import VoiceTelemetryLogger  # noqa: E402
+from voice_control.tts import (  # noqa: E402
+    AVAILABLE_VOICES,
+    VALID_VOICE_IDS,
+    default_english_tts_voice,
+    default_tts_voice,
+    edge_tts_available,
+    speak_segments,
+    speak_text,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -130,7 +152,38 @@ class VoiceController:
         self.duck_volume = max(5, min(60, int(os.environ.get("VOICE_DUCK_VOLUME", "18"))))
         self.use_bandpass = _env_bool("VOICE_USE_BANDPASS", True)
 
+        # Built-in speaker volume, chime, and TTS voice settings (persisted across restarts)
+        self._prefs_path = Path(os.environ.get("VOICE_PREFS_FILE", "/srv/pocobox/logs/voice_prefs.json"))
+        self.enable_chime = _env_bool("ENABLE_CHIME", True)
+        self.chime_volume = max(0.05, min(1.0, float(os.environ.get("VOICE_CHIME_VOLUME", "0.25"))))
+        self.enable_tts = _env_bool("ENABLE_TTS", True)
+        self.tts_voice = default_tts_voice()
+        self.tts_rate_pct = max(-30, min(30, int(os.environ.get("TTS_RATE_PCT", "0"))))
+        self.tts_pitch_hz = max(-15, min(15, int(os.environ.get("TTS_PITCH_HZ", "0"))))
+        self.speaker_volume = get_internal_speaker_volume()
+        self._default_speaker_config: dict[str, Any] = {
+            "speaker_volume": 100,
+            "enable_chime": self.enable_chime,
+            "chime_volume_pct": int(round(self.chime_volume * 100)),
+            "enable_tts": self.enable_tts,
+            "tts_voice": self.tts_voice,
+            "tts_rate_pct": self.tts_rate_pct,
+            "tts_pitch_hz": self.tts_pitch_hz,
+        }
+        self._load_voice_prefs()
+
         self.events = EventHub()
+        self.telemetry = VoiceTelemetryLogger()
+        self.quiz = EnglishQuizSession()
+        self.quiz_en_voice = default_english_tts_voice()
+        self.quiz_en_rate_pct = max(-30, min(10, int(os.environ.get("QUIZ_EN_RATE_PCT", "-8"))))
+        self.quiz_listen_max_sec = float(os.environ.get("QUIZ_LISTEN_MAX_SEC", "7.0"))
+        self.quiz_silence_sec = float(os.environ.get("QUIZ_SILENCE_SEC", "1.2"))
+        self._quiz_loop_stop = threading.Event()
+        self._quiz_loop_active = False
+        self._quiz_thread: threading.Thread | None = None
+        self._quiz_paused_lms: str | None = None
+
         self._listen_lock = threading.Lock()
         self._duck_lock = threading.Lock()
         self._duck_saved: tuple[str, int] | None = None
@@ -143,12 +196,68 @@ class VoiceController:
         if self.continuous_enabled:
             self.continuous_listener = ContinuousVoiceListener(
                 on_utterance=self.handle_continuous_wav,
-                is_paused_fn=lambda: (self._manual_busy or self._tts_speaking),
+                is_paused_fn=lambda: (self._manual_busy or self._tts_speaking or self._quiz_loop_active),
                 on_state_change=self._on_listener_state,
                 is_music_playing_fn=self._is_music_playing,
                 on_wake_detected=self.handle_wake_detected,
                 on_wake_utterance=self.handle_wake_utterance,
+                telemetry=self.telemetry,
             )
+
+        self._default_runtime_config: dict[str, Any] = {
+            "require_wake_word": self.require_wake_word,
+            "duck_enabled": self.duck_enabled,
+            "duck_volume": self.duck_volume,
+            "quiet_threshold": self.vad_threshold,
+            "playing_threshold": self.continuous_listener.playing_min_threshold if self.continuous_listener else float(os.environ.get("VOICE_PLAYING_VAD_THRESHOLD", "180.0")),
+            "speech_multiplier": self.continuous_listener.speech_multiplier if self.continuous_listener else float(os.environ.get("VOICE_VAD_MULTIPLIER", "3.0")),
+            "playing_multiplier": self.continuous_listener.playing_multiplier if self.continuous_listener else float(os.environ.get("VOICE_PLAYING_MULTIPLIER", "2.1")),
+            "rms_fallback_during_music": self.continuous_listener.rms_fallback_during_music if self.continuous_listener else _env_bool("VOICE_RMS_FALLBACK_DURING_MUSIC", False),
+            "aec3_delay_ms": (self.continuous_listener.aec3.delay_ms if (self.continuous_listener and self.continuous_listener.aec3) else int(os.environ.get("VOICE_AEC3_DELAY_MS", "60"))),
+        }
+
+    def _load_voice_prefs(self) -> None:
+        if not self._prefs_path.exists():
+            return
+        try:
+            data = json.loads(self._prefs_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(data, dict):
+            return
+        if "enable_chime" in data:
+            self.enable_chime = bool(data["enable_chime"])
+        if "chime_volume_pct" in data:
+            self.chime_volume = max(0.05, min(1.0, float(data["chime_volume_pct"]) / 100.0))
+        if "enable_tts" in data:
+            self.enable_tts = bool(data["enable_tts"])
+        if "tts_voice" in data and str(data["tts_voice"]) in VALID_VOICE_IDS:
+            self.tts_voice = str(data["tts_voice"])
+        if "tts_rate_pct" in data:
+            self.tts_rate_pct = max(-30, min(30, int(data["tts_rate_pct"])))
+        if "tts_pitch_hz" in data:
+            self.tts_pitch_hz = max(-15, min(15, int(data["tts_pitch_hz"])))
+        if "speaker_volume" in data:
+            self.speaker_volume = set_internal_speaker_volume(int(data["speaker_volume"]))
+
+    def _save_voice_prefs(self) -> None:
+        payload = {
+            "speaker_volume": self.speaker_volume,
+            "enable_chime": self.enable_chime,
+            "chime_volume_pct": int(round(self.chime_volume * 100)),
+            "enable_tts": self.enable_tts,
+            "tts_voice": self.tts_voice,
+            "tts_rate_pct": self.tts_rate_pct,
+            "tts_pitch_hz": self.tts_pitch_hz,
+        }
+        try:
+            self._prefs_path.parent.mkdir(parents=True, exist_ok=True)
+            self._prefs_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+
+    def _play_chime(self, kind: str = "listen") -> None:
+        play_chime(kind, volume=self.chime_volume, enabled=self.enable_chime)
 
     def _is_music_playing(self) -> bool:
         try:
@@ -202,7 +311,7 @@ class VoiceController:
     def handle_wake_detected(self, phrase: str) -> None:
         """Fired immediately when local Vosk spots '포코야'/'헤이 포코'."""
         self._begin_duck()
-        threading.Thread(target=play_chime, args=("listen",), daemon=True).start()
+        threading.Thread(target=self._play_chime, args=("listen",), daemon=True).start()
         self.events.publish({
             "type": "transcript",
             "text": f"🎤 포코야! 명령을 말씀하세요... ({phrase})",
@@ -212,27 +321,387 @@ class VoiceController:
 
     def _speak_answer(self, text: str) -> None:
         """Speak Q&A / Now-Playing answer via TTS while pausing mic and keeping music ducked."""
-        if not text:
+        if not text or not self.enable_tts:
             return
         already_ducked = self._duck_saved is not None
         did_duck = False if already_ducked else self._begin_duck()
         self._tts_speaking = True
         try:
-            speak_text(text)
+            speak_text(
+                text,
+                voice=self.tts_voice,
+                rate_pct=self.tts_rate_pct,
+                pitch_hz=self.tts_pitch_hz,
+                enabled=self.enable_tts,
+            )
         finally:
             self._tts_speaking = False
             if did_duck:
                 self._restore_duck(skip_restore=False)
 
+    def test_speaker(self, text: str | None = None) -> dict[str, Any]:
+        """Play a test chime + TTS sample directly on the built-in speaker."""
+        sample = (text or "").strip() or f"안녕하세요, 포코박스입니다. 현재 내장 스피커 음량은 {self.speaker_volume}퍼센트입니다."
+        self._play_chime("ok")
+        spoken = False
+        if self.enable_tts:
+            self._tts_speaking = True
+            try:
+                spoken = speak_text(
+                    sample,
+                    voice=self.tts_voice,
+                    rate_pct=self.tts_rate_pct,
+                    pitch_hz=self.tts_pitch_hz,
+                    enabled=True,
+                )
+            finally:
+                self._tts_speaking = False
+        return {
+            "ok": True,
+            "spoken": spoken,
+            "voice": self.tts_voice,
+            "speaker_volume": self.speaker_volume,
+            "text": sample,
+        }
+
     def _is_spoken_action(self, action: str) -> bool:
         return action in (IntentAction.ANSWER_QA.value, IntentAction.NOW_PLAYING.value)
+
+    def _is_quiz_action(self, action: str) -> bool:
+        return action in (IntentAction.START_QUIZ.value, IntentAction.STOP_QUIZ.value, "quiz_turn")
+
+    def _pause_lms_for_quiz(self) -> None:
+        if self._quiz_paused_lms is not None:
+            return
+        try:
+            pid = self.lms.resolve_player_id(self.player_name)
+            st = self.lms.player_status(pid)
+            if st.get("mode") == "play":
+                self.lms.pause(pid, 1)
+                self._quiz_paused_lms = pid
+                log.info("Paused LMS player %s for English listening quiz", pid)
+        except Exception as exc:
+            log.debug("LMS pause for quiz skipped: %s", exc)
+
+    def _resume_lms_after_quiz(self) -> None:
+        pid = self._quiz_paused_lms
+        self._quiz_paused_lms = None
+        if not pid:
+            return
+        try:
+            self.lms.play(pid)
+            log.info("Resumed LMS player %s after English listening quiz", pid)
+        except Exception as exc:
+            log.warning("Failed to resume LMS after quiz: %s", exc)
+
+    def _publish_quiz_event(self, turn: QuizTurnResponse, *, user_text: str = "") -> None:
+        self.events.publish({
+            "type": "quiz",
+            "event": turn.event,
+            "active": turn.active,
+            "header": turn.display_header,
+            "text": turn.display_text,
+            "status": turn.display_status,
+            "user_text": user_text,
+            "quiz": turn.state,
+            "ts": time.time(),
+        })
+
+    def _speak_quiz_response(self, turn: QuizTurnResponse, *, play_ready_cue: bool = True) -> None:
+        self._tts_speaking = True
+        try:
+            if turn.chime:
+                self._play_chime(turn.chime)
+            if turn.segments and self.enable_tts:
+                speak_segments(
+                    turn.segments,
+                    ko_voice=self.tts_voice,
+                    en_voice=self.quiz_en_voice,
+                    ko_rate_pct=self.tts_rate_pct,
+                    en_rate_pct=self.quiz_en_rate_pct,
+                    slow_en_rate_pct=max(-30, self.quiz_en_rate_pct - 10),
+                    pitch_hz=self.tts_pitch_hz,
+                    enabled=self.enable_tts,
+                )
+            if play_ready_cue and turn.expect_response and turn.active:
+                time.sleep(0.15)
+                self._play_chime("quiz_prompt")
+                self.events.publish({
+                    "type": "quiz_ready",
+                    "quiz": turn.state,
+                    "ts": time.time(),
+                })
+        finally:
+            self._tts_speaking = False
+
+    def _quiz_turn_to_result(self, turn: QuizTurnResponse, action: str, raw_text: str = "") -> ExecutionResult:
+        res = ExecutionResult(
+            ok=turn.ok,
+            action=action,
+            message=turn.spoken_summary,
+            intent={"action": action, "raw_text": raw_text},
+            details={
+                "quiz_event": turn.event,
+                "quiz": turn.state,
+                "display_header": turn.display_header,
+                "display_text": turn.display_text,
+                "display_status": turn.display_status,
+            },
+        )
+        self.last_result = res.to_dict()
+        return res
+
+    def _maybe_generate_custom_quiz_questions(self, topic: str, count: int) -> list[Any] | None:
+        # Use curated offline bank for standard topics; only ask Gemini when user requests an unknown custom topic
+        # or if QUIZ_USE_LLM_GENERATION=1 is explicitly enabled.
+        want_llm = _env_bool("QUIZ_USE_LLM_GENERATION", False) or (topic not in TOPIC_LABELS and topic != "all")
+        if not want_llm or self.interpreter.provider == "local":
+            return None
+        try:
+            raw_list = self.interpreter.generate_kids_quiz_questions(
+                topic=topic,
+                count=count,
+                exclude_english=self.quiz.recent_english_texts(),
+            )
+            parsed = [q for i, item in enumerate(raw_list) if isinstance(item, dict) and (q := question_from_dict(item, i)) is not None]
+            return parsed or None
+        except Exception as exc:
+            log.warning("Dynamic quiz generation skipped (using offline bank): %s", exc)
+            return None
+
+    def start_quiz(
+        self,
+        topic: str = "all",
+        count: int = DEFAULT_QUIZ_COUNT,
+        *,
+        voice_loop: bool = False,
+        dry_run: bool = False,
+        raw_text: str = "",
+    ) -> ExecutionResult:
+        # Stop any prior voice loop cleanly before starting a fresh session
+        self._quiz_loop_stop.set()
+        if not dry_run:
+            self._pause_lms_for_quiz()
+
+        custom_qs = None if dry_run else self._maybe_generate_custom_quiz_questions(topic, count)
+        turn = self.quiz.start(topic=topic, count=count, custom_questions=custom_qs)
+        self._publish_quiz_event(turn)
+        res = self._quiz_turn_to_result(turn, IntentAction.START_QUIZ.value, raw_text=raw_text)
+
+        if not dry_run and turn.ok and turn.active:
+            if voice_loop:
+                self._launch_quiz_voice_loop(turn)
+            else:
+                threading.Thread(target=self._speak_quiz_response, args=(turn,), daemon=True).start()
+        elif not turn.active and not dry_run:
+            self._resume_lms_after_quiz()
+        return res
+
+    def answer_quiz_text(
+        self,
+        text: str,
+        *,
+        dry_run: bool = False,
+        use_cloud: bool = True,
+        speak: bool = True,
+    ) -> ExecutionResult:
+        q = self.quiz.current_question()
+        llm_is_correct: bool | None = None
+        if q is not None and use_cloud and classify_quiz_command(text) is None and not is_local_answer_match(text, q):
+            llm_is_correct = self.interpreter.grade_quiz_text_answer(
+                text,
+                english_text=q.english_text,
+                korean_meaning=q.korean_meaning,
+                accepted_answers=q.accepted_answers,
+                kind=q.kind,
+            )
+
+        turn = self.quiz.handle_input(text, llm_is_correct=llm_is_correct)
+        self._publish_quiz_event(turn, user_text=text)
+        res = self._quiz_turn_to_result(turn, "quiz_turn", raw_text=text)
+
+        if not turn.active:
+            self._quiz_loop_stop.set()
+
+        if not dry_run and speak:
+            def _speak_and_cleanup() -> None:
+                self._speak_quiz_response(turn)
+                if not turn.active:
+                    self._resume_lms_after_quiz()
+
+            threading.Thread(target=_speak_and_cleanup, daemon=True).start()
+        elif not turn.active and not dry_run:
+            self._resume_lms_after_quiz()
+        return res
+
+    def stop_quiz(self, *, dry_run: bool = False, speak: bool = True, reason: str = "user") -> ExecutionResult:
+        self._quiz_loop_stop.set()
+        turn = self.quiz.stop(reason=reason)
+        self._publish_quiz_event(turn)
+        res = self._quiz_turn_to_result(turn, IntentAction.STOP_QUIZ.value)
+        if not dry_run and speak:
+            def _speak_and_resume() -> None:
+                self._speak_quiz_response(turn)
+                self._resume_lms_after_quiz()
+
+            threading.Thread(target=_speak_and_resume, daemon=True).start()
+        elif not dry_run:
+            self._resume_lms_after_quiz()
+        return res
+
+    def _launch_quiz_voice_loop(self, initial_turn: QuizTurnResponse) -> None:
+        self._quiz_loop_stop.clear()
+        self._quiz_loop_active = True
+        t = threading.Thread(
+            target=self._run_quiz_voice_loop,
+            args=(initial_turn,),
+            name="english-quiz-voice-loop",
+            daemon=True,
+        )
+        self._quiz_thread = t
+        t.start()
+
+    def _run_quiz_voice_loop(self, initial_turn: QuizTurnResponse) -> None:
+        """Hands-free conversational voice loop: speak English prompt -> listen -> grade -> repeat."""
+        self._quiz_loop_active = True
+        silent_streak = 0
+        try:
+            self._speak_quiz_response(initial_turn)
+            while self.quiz.active and not self._quiz_loop_stop.is_set():
+                q = self.quiz.current_question()
+                if q is None:
+                    break
+                if self.interpreter.provider == "local":
+                    log.warning("Voice quiz loop paused: no cloud STT API key configured (use text API or configure GEMINI_API_KEY).")
+                    break
+
+                # Ready chime ("quiz_prompt") was just played by _speak_quiz_response right before opening the mic
+                self.events.publish({"type": "state", "state": "recording", "rms": 0.0, "ts": time.time()})
+                wav_bytes, metrics = record_utterance_wav(
+                    max_duration_sec=self.quiz_listen_max_sec,
+                    silence_timeout_sec=self.quiz_silence_sec,
+                    min_threshold=self.vad_threshold,
+                    source=os.environ.get("VOICE_PULSE_SOURCE") or None,
+                )
+                if self._quiz_loop_stop.is_set() or not self.quiz.active:
+                    break
+
+                if not metrics.has_speech:
+                    silent_streak += 1
+                    if silent_streak == 1:
+                        retry_turn = QuizTurnResponse(
+                            ok=True,
+                            event="repeat",
+                            active=True,
+                            chime=None,
+                            segments=[
+                                ("en", "Take your time. Let's listen again."),
+                                ("pause", "0.25"),
+                                ("en_slow", q.english_text),
+                                ("pause", "0.2"),
+                                ("en", "What is your answer?"),
+                            ],
+                            display_header=f"🎧 영어 리스닝 퀴즈 ({self.quiz.public_state()['question_num']}/{self.quiz.public_state()['total']} · ⭐ {self.quiz.score}점)",
+                            display_text="🔁 Take your time! Listen again.",
+                            display_status="🔔 신호음 후 대답하거나 '힌트', '패스', '그만'이라고 해보세요",
+                            spoken_summary="천천히 다시 들려드릴게요!",
+                            state=self.quiz.public_state(),
+                            expect_response=True,
+                        )
+                        self._publish_quiz_event(retry_turn)
+                        self._speak_quiz_response(retry_turn)
+                        continue
+                    timeout_turn = self.quiz.stop(reason="timeout")
+                    self._publish_quiz_event(timeout_turn)
+                    self._quiz_turn_to_result(timeout_turn, IntentAction.STOP_QUIZ.value)
+                    self._speak_quiz_response(timeout_turn)
+                    break
+
+                self.events.publish({"type": "state", "state": "processing", "rms": 0.0, "ts": time.time()})
+                prepared = filter_wav_speech_band(wav_bytes) if self.use_bandpass else wav_bytes
+                trimmed = trim_silence_wav(prepared, threshold=max(20.0, self.vad_threshold * 0.7))
+                boosted = normalize_wav_gain(trimmed)
+                try:
+                    stt = self.interpreter.transcribe_and_grade_quiz_audio(
+                        boosted,
+                        english_text=q.english_text,
+                        korean_meaning=q.korean_meaning,
+                        accepted_answers=q.accepted_answers,
+                        kind=q.kind,
+                    )
+                except Exception as exc:
+                    log.warning("Quiz audio STT failed: %s", exc)
+                    silent_streak += 1
+                    if silent_streak >= 2:
+                        break
+                    continue
+
+                if self._quiz_loop_stop.is_set() or not self.quiz.active:
+                    break
+
+                transcript = str(stt.get("transcript") or "").strip()
+                cmd = str(stt.get("command") or "").strip().lower() or None
+                is_correct = stt.get("is_correct") if isinstance(stt.get("is_correct"), bool) else None
+
+                if not transcript:
+                    silent_streak += 1
+                    if silent_streak == 1:
+                        retry_turn = QuizTurnResponse(
+                            ok=True,
+                            event="repeat",
+                            active=True,
+                            chime=None,
+                            segments=[
+                                ("en", "Sorry, I didn't catch that. Let's listen again."),
+                                ("pause", "0.25"),
+                                ("en_slow", q.english_text),
+                                ("pause", "0.2"),
+                                ("en", "What is your answer?"),
+                            ],
+                            display_header=f"🎧 영어 리스닝 퀴즈 ({self.quiz.public_state()['question_num']}/{self.quiz.public_state()['total']} · ⭐ {self.quiz.score}점)",
+                            display_text="🔁 잘 못 들었어요! 다시 한 번 말씀해 주세요",
+                            display_status="🔔 신호음 후 대답하거나 '힌트', '패스', '그만'이라고 해보세요",
+                            spoken_summary="잘 못 들었어요! 다시 한 번 들려드릴게요.",
+                            state=self.quiz.public_state(),
+                            expect_response=True,
+                        )
+                        self._publish_quiz_event(retry_turn)
+                        self._speak_quiz_response(retry_turn)
+                        continue
+                    timeout_turn = self.quiz.stop(reason="timeout")
+                    self._publish_quiz_event(timeout_turn)
+                    self._quiz_turn_to_result(timeout_turn, IntentAction.STOP_QUIZ.value)
+                    self._speak_quiz_response(timeout_turn)
+                    break
+
+                silent_streak = 0
+                self.events.publish({"type": "transcript", "text": transcript, "wake": True, "ts": time.time()})
+                turn = self.quiz.handle_input(transcript, llm_command=cmd, llm_is_correct=is_correct)
+                self._publish_quiz_event(turn, user_text=transcript)
+                self._quiz_turn_to_result(turn, "quiz_turn", raw_text=transcript)
+                log.info("QUIZ VOICE '%s' -> event=%s active=%s score=%d", transcript, turn.event, turn.active, self.quiz.score)
+                self._speak_quiz_response(turn)
+                if not turn.active:
+                    break
+        except Exception as exc:
+            log.error("Quiz voice loop error: %s", exc)
+        finally:
+            self._quiz_loop_active = False
+            if not self.quiz.active:
+                self._resume_lms_after_quiz()
+            self.events.publish({"type": "state", "state": "waiting", "rms": 0.0, "ts": time.time()})
 
     def handle_wake_utterance(self, wav_bytes: bytes | None, phrase: str) -> None:
         """Process the clean post-wake command captured while music was ducked."""
         skip_restore = False
+        wake_meta = dict(self.continuous_listener.last_wake_meta) if self.continuous_listener else {"phrase": phrase}
+        wake_meta.setdefault("phrase", phrase)
+        clip_path = wake_meta.pop("clip_path", None)
         try:
             if wav_bytes is None:
                 log.info("Wake word '%s' timed out with no follow-up speech.", phrase)
+                new_clip = self.telemetry.relabel_wake_clip(clip_path, "fp", {"fp_reason": "timeout_no_speech"})
+                self.telemetry.record("wake_timeout_false_alarm", clip_path=new_clip, **wake_meta)
                 self.events.publish({
                     "type": "result",
                     "text": "",
@@ -251,7 +720,31 @@ class VoiceController:
                 dry_run=False,
                 enforce_wake_word=False,
                 apply_bandpass=False,  # already bandpass-filtered in ContinuousVoiceListener
+                start_quiz_voice_loop=True,
             )
+            transcript = (res.intent or {}).get("raw_text", "") if isinstance(res.intent, dict) else ""
+            if res.ok and res.action != IntentAction.UNKNOWN.value:
+                new_clip = self.telemetry.relabel_wake_clip(
+                    clip_path, "tp", {"transcript": transcript, "action": res.action}
+                )
+                self.telemetry.record(
+                    "wake_command_ok",
+                    clip_path=new_clip,
+                    transcript=transcript,
+                    action=res.action,
+                    **wake_meta,
+                )
+            else:
+                new_clip = self.telemetry.relabel_wake_clip(
+                    clip_path, "fp", {"fp_reason": "empty_or_unknown", "transcript": transcript, "action": res.action}
+                )
+                self.telemetry.record(
+                    "wake_command_empty",
+                    clip_path=new_clip,
+                    transcript=transcript,
+                    action=res.action,
+                    **wake_meta,
+                )
             if res.action in (
                 IntentAction.VOLUME_SET.value,
                 IntentAction.VOLUME_UP.value,
@@ -260,10 +753,12 @@ class VoiceController:
                 IntentAction.UNMUTE.value,
             ):
                 skip_restore = True
-            if res.ok and self._is_spoken_action(res.action):
+            if self._is_quiz_action(res.action):
+                pass  # quiz handler already speaks bilingual TTS + chime
+            elif res.ok and self._is_spoken_action(res.action):
                 self._speak_answer(res.message)
             elif res.ok:
-                play_chime("ok")
+                self._play_chime("ok")
         finally:
             self._restore_duck(skip_restore=skip_restore)
 
@@ -273,7 +768,33 @@ class VoiceController:
 
     def handle_text(self, text: str, dry_run: bool = False, use_cloud: bool = True) -> ExecutionResult:
         self.events.publish({"type": "transcript", "text": text, "wake": True, "ts": time.time()})
+        # If an English listening quiz is active, route utterances straight to the quiz session
+        if self.quiz.active:
+            local_intent = self.interpreter.interpret_text(text, use_cloud_fallback=False)
+            if local_intent.action == IntentAction.START_QUIZ:
+                return self.start_quiz(
+                    topic=local_intent.quiz_topic or "all",
+                    count=local_intent.quiz_count or DEFAULT_QUIZ_COUNT,
+                    voice_loop=False,
+                    dry_run=dry_run,
+                    raw_text=text,
+                )
+            if local_intent.action == IntentAction.STOP_QUIZ:
+                return self.stop_quiz(dry_run=dry_run)
+            return self.answer_quiz_text(text, dry_run=dry_run, use_cloud=use_cloud)
+
         intent = self.interpreter.interpret_text(text, use_cloud_fallback=use_cloud)
+        if intent.action == IntentAction.START_QUIZ:
+            return self.start_quiz(
+                topic=intent.quiz_topic or "all",
+                count=intent.quiz_count or DEFAULT_QUIZ_COUNT,
+                voice_loop=False,
+                dry_run=dry_run,
+                raw_text=intent.raw_text or text,
+            )
+        if intent.action == IntentAction.STOP_QUIZ:
+            return self.stop_quiz(dry_run=dry_run)
+
         res = self.executor.execute(intent, dry_run=dry_run)
         self.last_result = res.to_dict()
         self.events.publish({
@@ -296,6 +817,7 @@ class VoiceController:
         dry_run: bool = False,
         enforce_wake_word: bool = False,
         apply_bandpass: bool = True,
+        start_quiz_voice_loop: bool = False,
     ) -> ExecutionResult:
         prepared = filter_wav_speech_band(wav_bytes) if (apply_bandpass and self.use_bandpass) else wav_bytes
         metrics = analyze_wav_bytes(prepared, speech_threshold=self.vad_threshold)
@@ -312,6 +834,41 @@ class VoiceController:
 
         trimmed = trim_silence_wav(prepared, threshold=max(20.0, self.vad_threshold * 0.7))
         boosted = normalize_wav_gain(trimmed)
+
+        # If an English quiz is currently active, evaluate the audio directly as a quiz answer!
+        if self.quiz.active:
+            q = self.quiz.current_question()
+            if q is not None:
+                try:
+                    stt = self.interpreter.transcribe_and_grade_quiz_audio(
+                        boosted,
+                        english_text=q.english_text,
+                        korean_meaning=q.korean_meaning,
+                        accepted_answers=q.accepted_answers,
+                        kind=q.kind,
+                    )
+                except Exception as exc:
+                    return ExecutionResult(ok=False, action="quiz_turn", message=str(exc), details={"vad": metrics.__dict__})
+                transcript = str(stt.get("transcript") or "").strip()
+                cmd = str(stt.get("command") or "").strip().lower() or None
+                is_correct = stt.get("is_correct") if isinstance(stt.get("is_correct"), bool) else None
+                if not transcript:
+                    return ExecutionResult(ok=False, action="quiz_turn", message="음성을 인식하지 못했습니다.", details={"vad": metrics.__dict__})
+                self.events.publish({"type": "transcript", "text": transcript, "wake": True, "ts": time.time()})
+                turn = self.quiz.handle_input(transcript, llm_command=cmd, llm_is_correct=is_correct)
+                self._publish_quiz_event(turn, user_text=transcript)
+                res = self._quiz_turn_to_result(turn, "quiz_turn", raw_text=transcript)
+                res.details["vad"] = metrics.__dict__
+                if not dry_run:
+                    def _speak_and_maybe_resume() -> None:
+                        self._speak_quiz_response(turn)
+                        if not turn.active:
+                            self._resume_lms_after_quiz()
+                    threading.Thread(target=_speak_and_maybe_resume, daemon=True).start()
+                elif not turn.active:
+                    self._resume_lms_after_quiz()
+                return res
+
         try:
             intent = self.interpreter.interpret_audio(boosted)
         except Exception as exc:
@@ -329,6 +886,14 @@ class VoiceController:
             # Feed music/ambient RMS back into continuous listener so playing music stops re-triggering!
             if self.continuous_listener is not None:
                 self.continuous_listener.notify_ambient_rms(metrics.rms_mean)
+            self.telemetry.record(
+                "rms_ignored_music",
+                rms_mean=metrics.rms_mean,
+                rms_peak=metrics.rms_peak,
+                duration_sec=metrics.duration_sec,
+                transcript=intent.raw_text,
+                music_playing=bool(self.continuous_listener.music_playing) if self.continuous_listener else False,
+            )
             log.info("Ignored ambient/music audio (rms=%.1f): '%s'", metrics.rms_mean, intent.raw_text)
             self.events.publish({
                 "type": "result",
@@ -379,6 +944,22 @@ class VoiceController:
                 details={"vad": metrics.__dict__, "wake_only": True},
             )
 
+        if intent.action == IntentAction.START_QUIZ:
+            res = self.start_quiz(
+                topic=intent.quiz_topic or "all",
+                count=intent.quiz_count or DEFAULT_QUIZ_COUNT,
+                voice_loop=(start_quiz_voice_loop and not dry_run),
+                dry_run=dry_run,
+                raw_text=intent.raw_text,
+            )
+            res.details["vad"] = metrics.__dict__
+            return res
+
+        if intent.action == IntentAction.STOP_QUIZ:
+            res = self.stop_quiz(dry_run=dry_run)
+            res.details["vad"] = metrics.__dict__
+            return res
+
         res = self.executor.execute(intent, dry_run=dry_run)
         res.details["vad"] = metrics.__dict__
         self.last_result = res.to_dict()
@@ -402,24 +983,34 @@ class VoiceController:
                 self._last_nokey_warn = now
             return
         # Audio from ContinuousVoiceListener is already RNNoise + bandpass filtered
-        res = self.handle_wav(wav_bytes, dry_run=False, enforce_wake_word=True, apply_bandpass=False)
+        res = self.handle_wav(
+            wav_bytes,
+            dry_run=False,
+            enforce_wake_word=True,
+            apply_bandpass=False,
+            start_quiz_voice_loop=True,
+        )
         if res.action == "wake_only":
             # User said just "포코야" -> duck music to 18%, chime, and capture the command cleanly!
             self.listen_once(dry_run=False)
             return
+        if self._is_quiz_action(res.action):
+            return
         if res.ok and self._is_spoken_action(res.action):
             self._speak_answer(res.message)
         elif res.ok:
-            play_chime("ok")
+            self._play_chime("ok")
 
     def listen_once(self, dry_run: bool = False) -> ExecutionResult:
+        if self._quiz_loop_active:
+            return ExecutionResult(ok=False, action="busy", message="영어 퀴즈가 이미 음성으로 진행 중입니다.")
         if not self._listen_lock.acquire(blocking=False):
             return ExecutionResult(ok=False, action="busy", message="이미 음성 명령을 듣는 중입니다.")
         self._manual_busy = True
         skip_restore = False
         try:
             self._begin_duck()
-            play_chime("listen")
+            self._play_chime("listen")
             self.events.publish({"type": "state", "state": "recording", "rms": 0.0, "ts": time.time()})
             wav_bytes, metrics = record_utterance_wav(
                 max_duration_sec=float(os.environ.get("VOICE_MAX_SEC", "6.0")),
@@ -428,7 +1019,7 @@ class VoiceController:
                 source=os.environ.get("VOICE_PULSE_SOURCE") or None,
             )
             if not metrics.has_speech:
-                play_chime("error")
+                self._play_chime("error")
                 res = ExecutionResult(
                     ok=False,
                     action=IntentAction.UNKNOWN.value,
@@ -439,7 +1030,13 @@ class VoiceController:
                 self.events.publish({"type": "result", "text": "", "ok": False, "message": res.message, "ignored_no_wake": False})
                 return res
             self.events.publish({"type": "state", "state": "processing", "rms": 0.0, "ts": time.time()})
-            res = self.handle_wav(wav_bytes, dry_run=dry_run, enforce_wake_word=False, apply_bandpass=True)
+            res = self.handle_wav(
+                wav_bytes,
+                dry_run=dry_run,
+                enforce_wake_word=False,
+                apply_bandpass=True,
+                start_quiz_voice_loop=not dry_run,
+            )
             if res.action in (
                 IntentAction.VOLUME_SET.value,
                 IntentAction.VOLUME_UP.value,
@@ -448,10 +1045,12 @@ class VoiceController:
                 IntentAction.UNMUTE.value,
             ):
                 skip_restore = True
-            if not dry_run and res.ok and self._is_spoken_action(res.action):
+            if self._is_quiz_action(res.action):
+                pass
+            elif not dry_run and res.ok and self._is_spoken_action(res.action):
                 self._speak_answer(res.message)
             else:
-                play_chime("ok" if res.ok else "error")
+                self._play_chime("ok" if res.ok else "error")
             return res
         finally:
             self._restore_duck(skip_restore=skip_restore)
@@ -460,6 +1059,61 @@ class VoiceController:
             self._listen_lock.release()
 
     def update_runtime_config(self, data: dict[str, Any]) -> dict[str, Any]:
+        if data.get("reset_defaults"):
+            d = self._default_runtime_config
+            self.require_wake_word = bool(d["require_wake_word"])
+            self.duck_enabled = bool(d["duck_enabled"])
+            self.duck_volume = int(d["duck_volume"])
+            self.vad_threshold = float(d["quiet_threshold"])
+            if self.continuous_listener:
+                self.continuous_listener.min_threshold = float(d["quiet_threshold"])
+                self.continuous_listener.playing_min_threshold = float(d["playing_threshold"])
+                self.continuous_listener.speech_multiplier = float(d["speech_multiplier"])
+                self.continuous_listener.playing_multiplier = float(d["playing_multiplier"])
+                self.continuous_listener.rms_fallback_during_music = bool(d["rms_fallback_during_music"])
+                if self.continuous_listener.aec3:
+                    self.continuous_listener.aec3.set_delay_ms(int(d["aec3_delay_ms"]))
+            return {"ok": True, "reset": True, "voice": self.display_state()["voice"]}
+
+        if data.get("reset_speaker_defaults"):
+            sd = self._default_speaker_config
+            self.speaker_volume = set_internal_speaker_volume(int(sd["speaker_volume"]))
+            self.enable_chime = bool(sd["enable_chime"])
+            self.chime_volume = max(0.05, min(1.0, float(sd["chime_volume_pct"]) / 100.0))
+            self.enable_tts = bool(sd["enable_tts"])
+            self.tts_voice = str(sd["tts_voice"])
+            self.tts_rate_pct = int(sd["tts_rate_pct"])
+            self.tts_pitch_hz = int(sd["tts_pitch_hz"])
+            self._save_voice_prefs()
+            return {"ok": True, "reset": True, "voice": self.display_state()["voice"]}
+
+        prefs_changed = False
+        if "speaker_volume" in data:
+            self.speaker_volume = set_internal_speaker_volume(int(float(data["speaker_volume"])))
+            prefs_changed = True
+        if "enable_chime" in data:
+            self.enable_chime = bool(data["enable_chime"])
+            prefs_changed = True
+        if "chime_volume_pct" in data:
+            self.chime_volume = max(0.05, min(1.0, float(data["chime_volume_pct"]) / 100.0))
+            prefs_changed = True
+        if "enable_tts" in data:
+            self.enable_tts = bool(data["enable_tts"])
+            prefs_changed = True
+        if "tts_voice" in data:
+            v = str(data["tts_voice"]).strip()
+            if v in VALID_VOICE_IDS:
+                self.tts_voice = v
+                prefs_changed = True
+        if "tts_rate_pct" in data:
+            self.tts_rate_pct = max(-30, min(30, int(float(data["tts_rate_pct"]))))
+            prefs_changed = True
+        if "tts_pitch_hz" in data:
+            self.tts_pitch_hz = max(-15, min(15, int(float(data["tts_pitch_hz"]))))
+            prefs_changed = True
+        if prefs_changed:
+            self._save_voice_prefs()
+
         if "require_wake_word" in data:
             self.require_wake_word = bool(data["require_wake_word"])
         if "duck_enabled" in data:
@@ -477,6 +1131,10 @@ class VoiceController:
             m = max(1.2, min(8.0, float(data["multiplier"])))
             self.continuous_listener.speech_multiplier = m
             self.continuous_listener.playing_multiplier = m
+        if "rms_fallback_during_music" in data and self.continuous_listener:
+            self.continuous_listener.rms_fallback_during_music = bool(data["rms_fallback_during_music"])
+        if "aec3_delay_ms" in data and self.continuous_listener and self.continuous_listener.aec3:
+            self.continuous_listener.aec3.set_delay_ms(int(float(data["aec3_delay_ms"])))
         if data.get("reset_ambient") and self.continuous_listener:
             self.continuous_listener.ambient_rms = 10.0
         return {"ok": True, "voice": self.display_state()["voice"]}
@@ -513,6 +1171,15 @@ class VoiceController:
         voice_info["require_wake_word"] = self.require_wake_word
         voice_info["duck_enabled"] = self.duck_enabled
         voice_info["duck_volume"] = self.duck_volume
+        voice_info["speaker_volume"] = self.speaker_volume
+        voice_info["enable_chime"] = self.enable_chime
+        voice_info["chime_volume_pct"] = int(round(self.chime_volume * 100))
+        voice_info["enable_tts"] = self.enable_tts
+        voice_info["tts_voice"] = self.tts_voice
+        voice_info["tts_rate_pct"] = self.tts_rate_pct
+        voice_info["tts_pitch_hz"] = self.tts_pitch_hz
+        voice_info["edge_tts_available"] = edge_tts_available()
+        voice_info["available_voices"] = list(AVAILABLE_VOICES)
         voice_info["last_result"] = self.last_result
         return {
             "ok": True,
@@ -520,6 +1187,7 @@ class VoiceController:
             "now_playing": np,
             "audio_output_label": _read_audio_output_label(),
             "voice": voice_info,
+            "quiz": self.quiz.public_state(),
         }
 
     def fetch_cover_art(self) -> tuple[bytes, str] | None:
@@ -563,6 +1231,7 @@ class VoiceController:
                 {"name": p.get("name"), "playerid": p.get("playerid"), "connected": p.get("connected")}
                 for p in players
             ],
+            "quiz": self.quiz.public_state(),
             "last_result": self.last_result,
         }
 
@@ -651,6 +1320,27 @@ def make_handler(controller: VoiceController) -> type[BaseHTTPRequestHandler]:
             if path == "/display/state":
                 self._send_json(200, controller.display_state())
                 return
+            if path == "/quiz/state":
+                self._send_json(200, {"ok": True, "quiz": controller.quiz.public_state(), "topics": TOPIC_LABELS})
+                return
+            if path == "/telemetry/stats":
+                hours = 24.0
+                if "hours=" in self.path:
+                    try:
+                        hours = float(self.path.split("hours=", 1)[1].split("&", 1)[0])
+                    except ValueError:
+                        hours = 24.0
+                self._send_json(200, controller.telemetry.summarize(hours=hours))
+                return
+            if path == "/telemetry/recent":
+                limit = 50
+                if "limit=" in self.path:
+                    try:
+                        limit = max(1, min(500, int(self.path.split("limit=", 1)[1].split("&", 1)[0])))
+                    except ValueError:
+                        limit = 50
+                self._send_json(200, {"ok": True, "events": controller.telemetry.read_recent(limit=limit)})
+                return
             if path == "/display/events":
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -734,6 +1424,53 @@ def make_handler(controller: VoiceController) -> type[BaseHTTPRequestHandler]:
                 dry_run = "dry_run=1" in self.path or "dry_run=true" in self.path
                 res = controller.listen_once(dry_run=dry_run)
                 self._send_json(200 if res.ok else 422, res.to_dict())
+                return
+
+            if path == "/voice/test_speaker":
+                try:
+                    data = json.loads(body.decode("utf-8")) if body else {}
+                except json.JSONDecodeError:
+                    data = {}
+                res = controller.test_speaker(text=data.get("text"))
+                self._send_json(200, res)
+                return
+
+            if path == "/quiz/start":
+                try:
+                    data = json.loads(body.decode("utf-8")) if body else {}
+                except json.JSONDecodeError:
+                    self._send_json(400, {"ok": False, "error": "Invalid JSON"})
+                    return
+                res = controller.start_quiz(
+                    topic=str(data.get("topic") or "all"),
+                    count=int(data.get("count") or DEFAULT_QUIZ_COUNT),
+                    voice_loop=bool(data.get("voice_loop", False)),
+                    dry_run=bool(data.get("dry_run", False)),
+                )
+                self._send_json(200 if res.ok else 422, res.to_dict())
+                return
+
+            if path == "/quiz/answer":
+                try:
+                    data = json.loads(body.decode("utf-8")) if body else {}
+                except json.JSONDecodeError:
+                    self._send_json(400, {"ok": False, "error": "Invalid JSON"})
+                    return
+                res = controller.answer_quiz_text(
+                    str(data.get("text", "")),
+                    dry_run=bool(data.get("dry_run", False)),
+                    use_cloud=bool(data.get("use_cloud", True)),
+                )
+                self._send_json(200 if res.ok else 422, res.to_dict())
+                return
+
+            if path == "/quiz/stop":
+                try:
+                    data = json.loads(body.decode("utf-8")) if body else {}
+                except json.JSONDecodeError:
+                    data = {}
+                res = controller.stop_quiz(dry_run=bool(data.get("dry_run", False)))
+                self._send_json(200, res.to_dict())
                 return
 
             self._send_json(404, {"ok": False, "error": "Not found"})
