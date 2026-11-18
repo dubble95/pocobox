@@ -123,6 +123,35 @@ def format_command_failure(result: ExecutionResult) -> str:
     return "죄송해요, 명령을 실행하지 못했어요."
 
 
+_NP_HANGUL_RE = re.compile(r"[가-힣]")
+_NP_LATIN_RE = re.compile(r"[A-Za-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u024F\u1E00-\u1EFF]")
+
+
+def format_now_playing_response(info: dict, language: str = "ko") -> str:
+    """Format a natural spoken Now-Playing response optimized for bilingual Korean/English TTS."""
+    title = str(info.get("title") or "").strip()
+    artist = str(info.get("artist") or "").strip()
+    mode = str(info.get("mode") or "stop").strip().lower()
+    lang = (language or "ko").strip().lower()
+
+    if lang == "en":
+        if not title:
+            return "Nothing is currently playing."
+        prefix = "Currently paused on" if mode == "pause" else "Now playing"
+        if artist:
+            return f"{prefix} {title}, by {artist}."
+        return f"{prefix} {title}."
+
+    if not title:
+        return "현재 재생 중인 곡이 없습니다."
+    prefix = "일시정지 중인 곡은" if mode == "pause" else "지금 나오는 곡은"
+    if artist:
+        if _NP_HANGUL_RE.search(artist) and not _NP_LATIN_RE.search(artist):
+            return f"{prefix} {artist}의 {title}입니다."
+        return f"{prefix} {title}, 아티스트는 {artist}입니다."
+    return f"{prefix} {title}입니다."
+
+
 class VoiceExecutor:
     def __init__(
         self,
@@ -338,10 +367,7 @@ class VoiceExecutor:
 
             if act == IntentAction.NOW_PLAYING:
                 info = self.lms.now_playing(player_id)
-                if info.get("title"):
-                    msg = f"현재 곡: {info['artist']} - {info['title']} ({info['mode']})"
-                else:
-                    msg = f"현재 재생 중인 곡이 없습니다 (상태: {info.get('mode')})"
+                msg = format_now_playing_response(info, language=intent.language)
                 return done(True, msg, info)
 
             return done(False, f"지원하지 않는 명령입니다: {act}")

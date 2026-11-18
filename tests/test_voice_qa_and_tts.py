@@ -20,10 +20,19 @@ from voice_control.executor import (  # noqa: E402
     VoiceExecutor,
     format_command_ack,
     format_command_failure,
+    format_now_playing_response,
 )
 from voice_control.intent_schema import ExecutionResult, IntentAction, VoiceIntent  # noqa: E402
 from voice_control.rule_parser import _format_kst_date, _format_kst_time, parse_command  # noqa: E402
-from voice_control.tts import clean_for_speech, split_tts_chunks  # noqa: E402
+from voice_control.tts import (  # noqa: E402
+    _trim_pcm_silence,
+    clean_for_speech,
+    resolve_bilingual_voices,
+    speak_text,
+    split_bilingual_segments,
+    split_tts_chunks,
+    synthesize_bilingual_pcm,
+)
 
 
 class _FakeLMS:
@@ -310,6 +319,291 @@ class TestVoiceQAAndTTS(unittest.TestCase):
 
         mock_speak.assert_not_called()
         mock_chime.assert_called_once_with("ok")
+
+    def test_bilingual_tts_segmentation_for_now_playing_and_general_speech(self) -> None:
+        # Pure Korean & pure English fast paths
+        self.assertEqual(
+            split_bilingual_segments("프랑스의 수도는 파리입니다."),
+            [("ko", "프랑스의 수도는 파리입니다.")],
+        )
+        self.assertEqual(
+            split_bilingual_segments("Now playing Rachmaninoff: Piano Concerto No. 2, by Valentina Lisitsa."),
+            [("en", "Now playing Rachmaninoff: Piano Concerto No. 2, by Valentina Lisitsa.")],
+        )
+
+        # Classical music with opus numbers, movements, colons, commas, and performer name
+        self.assertEqual(
+            split_bilingual_segments(
+                "지금 나오는 곡은 Rachmaninoff: Piano Concerto No. 2 in C Minor, Op. 18: 1. Moderato, 아티스트는 Valentina Lisitsa입니다."
+            ),
+            [
+                ("ko", "지금 나오는 곡은"),
+                ("en", "Rachmaninoff: Piano Concerto No. 2 in C Minor, Op. 18: 1. Moderato"),
+                ("ko", "아티스트는"),
+                ("en", "Valentina Lisitsa"),
+                ("ko", "입니다."),
+            ],
+        )
+
+        # Musical sharps (#) and accented European composer/artist names stay intact in English
+        self.assertEqual(
+            clean_for_speech("### 제목: Moonlight Sonata in C# Minor"),
+            "제목: Moonlight Sonata in C# Minor",
+        )
+        self.assertEqual(
+            split_bilingual_segments(
+                "지금 나오는 곡은 Moonlight Sonata in C# Minor, Op. 27, No. 2, 아티스트는 Frédéric Chopin입니다."
+            ),
+            [
+                ("ko", "지금 나오는 곡은"),
+                ("en", "Moonlight Sonata in C# Minor, Op. 27, No. 2"),
+                ("ko", "아티스트는"),
+                ("en", "Frédéric Chopin"),
+                ("ko", "입니다."),
+            ],
+        )
+        self.assertEqual(
+            split_bilingual_segments("지금 나오는 곡은 APT., 아티스트는 ROSÉ & Bruno Mars입니다."),
+            [
+                ("ko", "지금 나오는 곡은"),
+                ("en", "APT."),
+                ("ko", "아티스트는"),
+                ("en", "ROSÉ & Bruno Mars"),
+                ("ko", "입니다."),
+            ],
+        )
+
+        # Leading/trailing bare numbers in titles vs Korean counters (년/번/악장)
+        self.assertEqual(
+            split_bilingual_segments("지금 나오는 곡은 7 Rings, 아티스트는 Ariana Grande입니다."),
+            [
+                ("ko", "지금 나오는 곡은"),
+                ("en", "7 Rings"),
+                ("ko", "아티스트는"),
+                ("en", "Ariana Grande"),
+                ("ko", "입니다."),
+            ],
+        )
+        self.assertEqual(
+            split_bilingual_segments("지금 나오는 곡은 24K Magic, 아티스트는 Bruno Mars입니다."),
+            [
+                ("ko", "지금 나오는 곡은"),
+                ("en", "24K Magic"),
+                ("ko", "아티스트는"),
+                ("en", "Bruno Mars"),
+                ("ko", "입니다."),
+            ],
+        )
+        self.assertEqual(
+            split_bilingual_segments("네, Piano Concerto No. 1 틀어드릴게요."),
+            [
+                ("ko", "네,"),
+                ("en", "Piano Concerto No. 1"),
+                ("ko", "틀어드릴게요."),
+            ],
+        )
+        self.assertEqual(
+            split_bilingual_segments("Coldplay 2024년 콘서트와 Beethoven 9번 교향곡입니다."),
+            [
+                ("en", "Coldplay"),
+                ("ko", "2024년 콘서트와"),
+                ("en", "Beethoven"),
+                ("ko", "9번 교향곡입니다."),
+            ],
+        )
+
+        # Parenthesized English subtitle & Remastered year
+        self.assertEqual(
+            split_bilingual_segments("지금 나오는 곡은 밤편지 (Through the Night), 아티스트는 IU입니다."),
+            [
+                ("ko", "지금 나오는 곡은 밤편지"),
+                ("en", "Through the Night"),
+                ("ko", "아티스트는"),
+                ("en", "IU"),
+                ("ko", "입니다."),
+            ],
+        )
+        self.assertEqual(
+            split_bilingual_segments("지금 나오는 곡은 Bohemian Rhapsody (Remastered 2011), 아티스트는 Queen입니다."),
+            [
+                ("ko", "지금 나오는 곡은"),
+                ("en", "Bohemian Rhapsody (Remastered 2011)"),
+                ("ko", "아티스트는"),
+                ("en", "Queen"),
+                ("ko", "입니다."),
+            ],
+        )
+
+        # General Q&A mixed English terms (including quoted terms & classical subtitles)
+        self.assertEqual(
+            split_bilingual_segments("OpenAI가 만든 ChatGPT는 인공지능입니다."),
+            [
+                ("en", "OpenAI"),
+                ("ko", "가 만든"),
+                ("en", "ChatGPT"),
+                ("ko", "는 인공지능입니다."),
+            ],
+        )
+        self.assertEqual(
+            split_bilingual_segments("비틀즈의 “Hey Jude”는 명곡입니다."),
+            [
+                ("ko", "비틀즈의"),
+                ("en", "Hey Jude"),
+                ("ko", "는 명곡입니다."),
+            ],
+        )
+        self.assertEqual(
+            split_bilingual_segments(
+                "지금 나오는 곡은 Symphony No. 9 in E Minor, Op. 95 'From the New World', 아티스트는 Antonín Dvořák입니다."
+            ),
+            [
+                ("ko", "지금 나오는 곡은"),
+                ("en", "Symphony No. 9 in E Minor, Op. 95 'From the New World'"),
+                ("ko", "아티스트는"),
+                ("en", "Antonín Dvořák"),
+                ("ko", "입니다."),
+            ],
+        )
+
+        # Korean measurement units and single isolated letters must NOT trigger jarring English switches
+        self.assertEqual(
+            split_bilingual_segments("분당의 현재 기온은 15°C이고 풍속은 3m/s, 거리는 10km, 샘플레이트는 48kHz입니다."),
+            [("ko", "분당의 현재 기온은 15°C이고 풍속은 3m/s, 거리는 10km, 샘플레이트는 48kHz입니다.")],
+        )
+        self.assertEqual(
+            split_bilingual_segments("A팀과 B형 학생의 K팝 공연입니다."),
+            [("ko", "A팀과 B형 학생의 K팝 공연입니다.")],
+        )
+
+    def test_bilingual_voice_resolution_and_pcm_silence_trimming(self) -> None:
+        with mock.patch("voice_control.tts.edge_tts_available", return_value=True), mock.patch.dict(
+            os.environ, {"TTS_EN_VOICE": "", "QUIZ_EN_VOICE": ""}, clear=False
+        ):
+            self.assertEqual(resolve_bilingual_voices("ko-KR-SunHiNeural"), ("ko-KR-SunHiNeural", "en-US-JennyNeural"))
+            self.assertEqual(resolve_bilingual_voices("ko-KR-InJoonNeural"), ("ko-KR-InJoonNeural", "en-US-GuyNeural"))
+            self.assertEqual(
+                resolve_bilingual_voices("ko-KR-HyunsuMultilingualNeural"),
+                ("ko-KR-HyunsuMultilingualNeural", "ko-KR-HyunsuMultilingualNeural"),
+            )
+            self.assertEqual(resolve_bilingual_voices("en-US-JennyNeural"), ("ko-KR-SunHiNeural", "en-US-JennyNeural"))
+            self.assertEqual(resolve_bilingual_voices("en-US-GuyNeural"), ("ko-KR-InJoonNeural", "en-US-GuyNeural"))
+            self.assertEqual(resolve_bilingual_voices("google"), ("google", "google"))
+
+        with mock.patch("voice_control.tts.edge_tts_available", return_value=True), mock.patch.dict(
+            os.environ, {"TTS_EN_VOICE": "en-US-GuyNeural"}, clear=False
+        ):
+            self.assertEqual(resolve_bilingual_voices("ko-KR-SunHiNeural"), ("ko-KR-SunHiNeural", "en-US-GuyNeural"))
+
+        # Trim 200ms leading silence + 300ms trailing silence around 100ms tone at 24kHz s16le
+        import struct
+
+        sr = 24000
+        lead = b"\x00\x00" * (sr * 200 // 1000)
+        tone = struct.pack("<h", 4000) * (sr * 100 // 1000)
+        trail = b"\x00\x00" * (sr * 300 // 1000)
+        trimmed = _trim_pcm_silence(lead + tone + trail, sample_rate=sr)
+        self.assertGreaterEqual(len(trimmed), len(tone))
+        self.assertLess(len(trimmed), len(lead + tone + trail) // 2)
+
+        # Pure silence returns untouched (never wipes quiet audio)
+        only_silence = b"\x00\x00" * (sr * 100 // 1000)
+        self.assertEqual(_trim_pcm_silence(only_silence, sample_rate=sr), only_silence)
+
+    def test_speak_text_routes_mixed_and_pure_english_natively(self) -> None:
+        calls: list[tuple[str, str, str, int, int]] = []
+        played: list[bytes] = []
+
+        def fake_synth(text: str, lang: str, voice: str, rate_pct: int, pitch_hz: int) -> bytes:
+            calls.append((text, lang, voice, rate_pct, pitch_hz))
+            # Distinct non-silent 2-byte aligned marker bytes
+            return b"\x00\x20" * 300
+
+        def fake_play(pcm: bytes, sink: str | None = None, env: dict | None = None) -> tuple[bool, str | None]:
+            played.append(pcm)
+            return True, sink
+
+        with mock.patch("voice_control.tts.edge_tts_available", return_value=True), mock.patch(
+            "voice_control.tts.synthesize_pcm", side_effect=fake_synth
+        ), mock.patch("voice_control.tts.play_pcm", side_effect=fake_play), mock.patch(
+            "voice_control.tts.resolve_internal_speaker_sink", return_value="fake-sink"
+        ), mock.patch.dict(os.environ, {"TTS_LANG": "", "TTS_EN_VOICE": "", "QUIZ_EN_VOICE": ""}, clear=False):
+            # Mixed Korean + English speaks via parallel bilingual synthesis and ONE single play_pcm call
+            ok = speak_text(
+                "지금 나오는 곡은 Yellow, 아티스트는 Coldplay입니다.",
+                voice="ko-KR-SunHiNeural",
+                rate_pct=0,
+                pitch_hz=0,
+                enabled=True,
+            )
+            self.assertTrue(ok)
+            self.assertEqual(len(played), 1)
+            self.assertEqual(
+                {(t, l, v) for t, l, v, _, _ in calls},
+                {
+                    ("지금 나오는 곡은", "ko", "ko-KR-SunHiNeural"),
+                    ("Yellow", "en", "en-US-JennyNeural"),
+                    ("아티스트는", "ko", "ko-KR-SunHiNeural"),
+                    ("Coldplay", "en", "en-US-JennyNeural"),
+                    ("입니다.", "ko", "ko-KR-SunHiNeural"),
+                },
+            )
+
+            # Pure English text automatically uses native English voice even when TTS voice is SunHi
+            calls.clear()
+            played.clear()
+            ok_en = speak_text("Now playing Fix You, by Coldplay.", voice="ko-KR-SunHiNeural", enabled=True)
+            self.assertTrue(ok_en)
+            self.assertEqual(calls, [("Now playing Fix You, by Coldplay.", "en", "en-US-JennyNeural", 0, 0)])
+
+            # HyunsuMultilingualNeural uses single native multilingual call without splitting
+            calls.clear()
+            pcm_multi = synthesize_bilingual_pcm(
+                "지금 나오는 곡은 Yellow, 아티스트는 Coldplay입니다.",
+                voice="ko-KR-HyunsuMultilingualNeural",
+            )
+            self.assertTrue(pcm_multi)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][2], "ko-KR-HyunsuMultilingualNeural")
+
+    def test_format_now_playing_response_and_controller_bilingual_pronunciation(self) -> None:
+        self.assertEqual(
+            format_now_playing_response(
+                {
+                    "title": "Rachmaninoff: Piano Concerto No. 2 in C Minor, Op. 18: 1. Moderato",
+                    "artist": "Valentina Lisitsa",
+                    "mode": "play",
+                }
+            ),
+            "지금 나오는 곡은 Rachmaninoff: Piano Concerto No. 2 in C Minor, Op. 18: 1. Moderato, 아티스트는 Valentina Lisitsa입니다.",
+        )
+        self.assertEqual(
+            format_now_playing_response({"title": "밤편지", "artist": "아이유", "mode": "play"}),
+            "지금 나오는 곡은 아이유의 밤편지입니다.",
+        )
+        self.assertEqual(
+            format_now_playing_response({"title": "Love wins all", "artist": "아이유", "mode": "play"}),
+            "지금 나오는 곡은 아이유의 Love wins all입니다.",
+        )
+        self.assertEqual(
+            format_now_playing_response({"title": "서른 즈음에", "artist": "김광석", "mode": "pause"}),
+            "일시정지 중인 곡은 김광석의 서른 즈음에입니다.",
+        )
+        self.assertEqual(
+            format_now_playing_response({"title": "WQXR Classical Radio", "artist": "", "mode": "play"}),
+            "지금 나오는 곡은 WQXR Classical Radio입니다.",
+        )
+        self.assertEqual(
+            format_now_playing_response({"title": "", "artist": "", "mode": "stop"}),
+            "현재 재생 중인 곡이 없습니다.",
+        )
+        self.assertEqual(
+            format_now_playing_response({"title": "Fix You", "artist": "Coldplay", "mode": "play"}, language="en"),
+            "Now playing Fix You, by Coldplay.",
+        )
+        self.assertEqual(
+            format_now_playing_response({"title": "", "artist": "", "mode": "stop"}, language="en"),
+            "Nothing is currently playing.",
+        )
 
 
 if __name__ == "__main__":
