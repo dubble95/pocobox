@@ -139,9 +139,11 @@ def setup_pulse_aec(usb_card_id: str | None) -> bool:
         log.warning("Cannot configure WebRTC AEC (sink_master=%s source_master=%s)", sink_master, source_master)
         return False
 
-    # Ensure hardware sink is unmuted and full scale so LMS controls volume cleanly
+    # Ensure hardware sink is unmuted & full scale, and boost POCO F1 quiet mic before AEC
     run_pactl(["set-sink-mute", sink_master, "0"])
     run_pactl(["set-sink-volume", sink_master, "100%"])
+    run_pactl(["set-source-mute", source_master, "0"])
+    run_pactl(["set-source-volume", source_master, "150%"])
 
     aec_args = '"analog_gain_control=0 digital_gain_control=1 noise_suppression=1 high_pass_filter=1 voice_detection=0"'
     res = run_pactl([
