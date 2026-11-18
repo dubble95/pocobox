@@ -96,7 +96,15 @@
   {"id": "quiz_04", "category": "english_quiz", "text": "영어 퀴즈 그만", "expected_action": "stop_quiz"},
   {"id": "quiz_05", "category": "english_quiz", "text": "퀴즈 종료해줘", "expected_action": "stop_quiz"},
 
-  {"id": "neg_01", "category": "negative_non_commands", "text": "오늘 날씨 어때?", "expected_action": "unknown"},
+  {"id": "wx_01", "category": "weather", "text": "날씨", "expected_action": "weather"},
+  {"id": "wx_02", "category": "weather", "text": "포코야 오늘 날씨 어때?", "expected_action": "weather", "expected_wake": true},
+  {"id": "wx_03", "category": "weather", "text": "내일 비 와?", "expected_action": "weather"},
+  {"id": "wx_04", "category": "weather", "text": "서울 날씨 알려줘", "expected_action": "weather", "expected_query_contains": "서울"},
+  {"id": "wx_05", "category": "weather", "text": "판교 내일 날씨 어때", "expected_action": "weather", "expected_query_contains": "판교"},
+  {"id": "wx_06", "category": "weather", "text": "Hey Poco what's the weather today", "expected_action": "weather", "expected_wake": true},
+  {"id": "wx_07", "category": "weather_music_guard", "text": "비 오는 날 듣기 좋은 노래 틀어줘", "expected_action": "play_search"},
+
+  {"id": "neg_01", "category": "negative_non_commands", "text": "오늘 점심 뭐 먹지?", "expected_action": "unknown"},
   {"id": "neg_02", "category": "negative_non_commands", "text": "배고프다 저녁 뭐 먹지", "expected_action": "unknown"},
   {"id": "neg_03", "category": "negative_non_commands", "text": "그냥 지나가는 말이에요", "expected_action": "unknown"},
   {"id": "neg_04", "category": "negative_non_commands", "text": "포코야", "expected_action": "unknown", "expected_wake": true},
