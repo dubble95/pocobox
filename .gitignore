@@ -1,0 +1,30 @@
+# Python virtual environments
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Large OS images & flashing artifacts
+images/
+*.img
+*.img.xz
+*.zip
+*.tar.gz
+*.sha256
+*.sha512
+
+# Third-party tools cloned locally
+MiUnlockTool/
+
+# Secrets & local overrides
+.env
+.env.*
+*.secret
+*.key
+*.pem
+config.local.yml
+
+# OS metadata
+.DS_Store
+Thumbs.db
