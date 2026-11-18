@@ -523,6 +523,17 @@ class TestEnglishQuizDaemonIntegration(unittest.TestCase):
             code, stopped = req("POST", "/quiz/stop", {"dry_run": True})
             self.assertEqual(code, 200)
             self.assertFalse(stopped["details"]["quiz"]["active"])
+
+            code, sched = req("GET", "/quiz/schedule")
+            self.assertEqual(code, 200)
+            self.assertTrue(sched["ok"])
+            self.assertIn("schedule_label", sched)
+
+            code, trig = req("POST", "/quiz/schedule/trigger", {"dry_run": True})
+            self.assertEqual(code, 200)
+            self.assertTrue(trig["ok"])
+            self.assertEqual(trig["action"], "start_quiz")
+            self.assertTrue(trig["details"]["quiz"]["active"])
         finally:
             server.shutdown()
             server.server_close()
@@ -532,9 +543,19 @@ class TestEnglishQuizDaemonIntegration(unittest.TestCase):
         svc_txt = (REPO_ROOT / "infra" / "voice" / "pocobox-daily-quiz.service").read_text(encoding="utf-8")
         self.assertIn("OnCalendar=*-*-* 07:45:00 Asia/Seoul", timer_txt)
         self.assertIn("Persistent=false", timer_txt)
-        self.assertIn("/quiz/start", svc_txt)
-        self.assertIn("voice_loop", svc_txt)
-        self.assertIn("skip_if_active", svc_txt)
+        self.assertIn("pocobox-voice quiz daily", svc_txt)
+
+    def test_schedule_timestamp_parser_to_kst(self) -> None:
+        from voice_control.daemon import _parse_systemd_timestamp_to_kst
+        kst, rel, epoch = _parse_systemd_timestamp_to_kst("Wed 2026-11-18 22:45:04 GMT")
+        self.assertEqual(kst, "2026-11-19 07:45:04 KST")
+        self.assertIsNotNone(epoch)
+        self.assertIn("전", rel)
+
+        kst_na, rel_na, ep_na = _parse_systemd_timestamp_to_kst("n/a")
+        self.assertEqual(kst_na, "-")
+        self.assertEqual(rel_na, "-")
+        self.assertIsNone(ep_na)
 
 
 if __name__ == "__main__":

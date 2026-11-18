@@ -278,6 +278,25 @@ DASHBOARD_HTML = r"""<!doctype html>
       <button onclick="sendQuizQuick('힌트')">💡 힌트</button>
       <button onclick="sendQuizQuick('패스')">⏭ 패스</button>
     </div>
+    <div style="margin-top:16px; padding-top:14px; border-top:1px solid rgba(255,255,255,0.08)">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px">
+        <span style="font-size:14px; font-weight:700; display:flex; align-items:center; gap:6px">
+          ⏰ 매일 오전 자동 퀴즈 예약
+          <span id="schedBadge" class="badge b-muted">확인 중...</span>
+        </span>
+        <div style="display:flex; gap:6px">
+          <button onclick="triggerDailyQuizNow()" style="padding:4px 10px; font-size:11px" class="primary">⏰ 지금 테스트 실행</button>
+          <button onclick="pollSchedule()" style="padding:4px 10px; font-size:11px">🔄 상태 새로고침</button>
+        </div>
+      </div>
+      <div class="kv" style="grid-template-columns: repeat(auto-fit, minmax(130px, 1fr))">
+        <div class="stat"><div class="label">예약 설정</div><div id="schedTime" class="val" style="font-size:13.5px">07:45 KST</div></div>
+        <div class="stat"><div class="label">다음 실행 예정</div><div id="schedNext" class="val" style="font-size:13.5px">-</div></div>
+        <div class="stat"><div class="label">최근 실행 결과</div><div id="schedLastResult" class="val" style="font-size:13.5px">-</div></div>
+        <div class="stat"><div class="label">최근 실행 시각</div><div id="schedLastTime" class="val" style="font-size:13.5px">-</div></div>
+      </div>
+      <div id="schedDetailText" style="margin-top:8px; font-size:12px; color:var(--muted)">스케줄 타이머 정보를 불러오는 중입니다...</div>
+    </div>
   </div>
 
   <div class="card">
@@ -328,6 +347,9 @@ DASHBOARD_HTML = r"""<!doctype html>
         document.getElementById("quizScore").textContent = qz.score ?? 0;
         document.getElementById("quizStreak").textContent = qz.streak ?? 0;
         if (qz.last_feedback) document.getElementById("quizStatusText").textContent = qz.last_feedback;
+      }
+      if (s.quiz_schedule) {
+        updateScheduleUI(s.quiz_schedule);
       }
 
       document.getElementById("outputChip").textContent = s.audio_output_label || "오디오";
@@ -557,6 +579,101 @@ DASHBOARD_HTML = r"""<!doctype html>
     if (!text) return;
     inp.value = "";
     await sendQuizQuick(text);
+  }
+
+  function updateScheduleUI(sc) {
+    if (!sc) return;
+    const badge = document.getElementById("schedBadge");
+    const sTime = document.getElementById("schedTime");
+    const sNext = document.getElementById("schedNext");
+    const sRes = document.getElementById("schedLastResult");
+    const sLastTime = document.getElementById("schedLastTime");
+    const sDetail = document.getElementById("schedDetailText");
+
+    if (badge) {
+      if (sc.last_result === "failed") {
+        badge.textContent = "직전 실행 실패";
+        badge.className = "badge b-rec";
+      } else if (sc.timer_active) {
+        badge.textContent = "정상 예약 중 (대기)";
+        badge.className = "badge b-ok";
+      } else if (sc.configured) {
+        badge.textContent = "타이머 비활성";
+        badge.className = "badge b-muted";
+      } else {
+        badge.textContent = "미설정";
+        badge.className = "badge b-muted";
+      }
+    }
+    if (sTime) {
+      sTime.textContent = (sc.schedule_label ? "매일 07:45" : "-") + " (" + (sc.count || 3) + "문제)";
+    }
+    if (sNext) {
+      sNext.textContent = sc.next_run_rel !== "-" ? sc.next_run_rel : (sc.next_run_kst || "-");
+      sNext.title = sc.next_run_kst || "";
+    }
+    if (sRes) {
+      if (sc.last_result === "failed") {
+        sRes.textContent = "실패" + (sc.last_exit_code !== null && sc.last_exit_code !== undefined ? (" (" + sc.last_exit_code + ")") : "");
+        sRes.style.color = "var(--rec)";
+      } else if (sc.last_result === "success") {
+        sRes.textContent = "성공";
+        sRes.style.color = "var(--ok)";
+      } else {
+        sRes.textContent = "기록 없음";
+        sRes.style.color = "var(--muted)";
+      }
+    }
+    if (sLastTime) {
+      sLastTime.textContent = sc.last_run_rel !== "-" ? sc.last_run_rel : (sc.last_run_kst || "-");
+      sLastTime.title = sc.last_run_kst || "";
+    }
+    if (sDetail) {
+      if (sc.last_result === "failed") {
+        sDetail.textContent = "⚠️ 직전 실행 실패: " + (sc.last_error || "오류 발생");
+        sDetail.style.color = "var(--rec)";
+      } else if (sc.timer_active) {
+        sDetail.textContent = "✅ 타이머 정상 활성 중: " + (sc.next_run_kst || "-") + "에 " + (sc.topic_label || "종합 듣기") + " " + (sc.count || 3) + "문제 음성 퀴즈가 자동 실행됩니다.";
+        sDetail.style.color = "var(--muted)";
+      } else {
+        sDetail.textContent = "타이머 상태: " + (sc.timer_substate || "inactive");
+        sDetail.style.color = "var(--muted)";
+      }
+    }
+  }
+
+  async function pollSchedule() {
+    try {
+      const r = await fetch("/quiz/schedule", {cache: "no-store"});
+      if (!r.ok) return;
+      const data = await r.json();
+      updateScheduleUI(data);
+      addLog("QUIZ", "예약 퀴즈 스케줄 상태 새로고침 완료", "b-ok");
+    } catch (_) {}
+  }
+
+  async function triggerDailyQuizNow() {
+    addLog("QUIZ", "매일 오전 예약 퀴즈 지금 실행 요청...", "b-proc");
+    try {
+      const r = await fetch("/quiz/schedule/trigger", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({voice_loop: true, skip_if_active: false})
+      });
+      const d = await r.json();
+      if (d.ok) {
+        addLog("QUIZ", d.message || "예약 퀴즈 음성 대화 세션 시작", "b-ok");
+      } else {
+        addLog("QUIZ", "실행 실패: " + (d.error || d.message), "b-rec");
+      }
+      if (d.quiz_schedule) {
+        updateScheduleUI(d.quiz_schedule);
+      } else {
+        pollSchedule();
+      }
+    } catch (e) {
+      addLog("QUIZ", "네트워크 오류: " + e, "b-rec");
+    }
   }
 
   function connectSSE() {

@@ -6,4 +6,4 @@ Requires=pocobox-voice.service
 [Service]
 Type=oneshot
 EnvironmentFile=-/etc/pocobox/voice.env
-ExecStart=/bin/sh -c 'PORT="${VOICE_HTTP_PORT:-8765}"; TOPIC="${DAILY_QUIZ_TOPIC:-all}"; COUNT="${DAILY_QUIZ_COUNT:-3}"; /usr/bin/curl -fsS --max-time 15 -X POST "http://127.0.0.1:${PORT}/quiz/start" -H "Content-Type: application/json" -d "{\"topic\":\"${TOPIC}\",\"count\":${COUNT},\"voice_loop\":true,\"skip_if_active\":true}"'
+ExecStart=/usr/local/bin/pocobox-voice quiz daily

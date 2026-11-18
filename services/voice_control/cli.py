@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -26,8 +27,9 @@ def _request(url: str, data: bytes | None = None, content_type: str = "applicati
 
 
 def main() -> int:
+    default_port = os.environ.get("VOICE_HTTP_PORT", "8765")
     parser = argparse.ArgumentParser(description="PocoBox Voice Control CLI")
-    parser.add_argument("--url", default="http://127.0.0.1:8765", help="Voice daemon URL")
+    parser.add_argument("--url", default=f"http://127.0.0.1:{default_port}", help="Voice daemon URL")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("status", help="Show voice daemon health and configuration")
@@ -50,6 +52,7 @@ def main() -> int:
     q_start.add_argument("--topic", default="all", help="Topic: all|animals|food|colors_numbers|family_school|daily|riddles")
     q_start.add_argument("--count", type=int, default=3, help="Number of questions (1-10)")
     q_start.add_argument("--voice", action="store_true", help="Run hands-free voice conversation loop")
+    q_start.add_argument("--skip-if-active", action="store_true", help="Skip if quiz is already running")
     q_start.add_argument("--dry-run", action="store_true")
     q_ans = q_sub.add_parser("answer", help="Submit a text answer or quiz command (다시/힌트/패스/그만)")
     q_ans.add_argument("text")
@@ -57,6 +60,10 @@ def main() -> int:
     q_ans.add_argument("--no-cloud", action="store_true")
     q_sub.add_parser("stop", help="Stop the current quiz")
     q_sub.add_parser("status", help="Show current quiz state and score")
+    q_sub.add_parser("schedule", help="Show scheduled daily morning quiz status and history")
+    q_daily = q_sub.add_parser("daily", help="Trigger scheduled daily morning quiz now")
+    q_daily.add_argument("--force", action="store_true", help="Force start even if quiz is already running")
+    q_daily.add_argument("--dry-run", action="store_true")
 
     args = parser.parse_args()
     base = args.url.rstrip("/")
@@ -85,9 +92,19 @@ def main() -> int:
                 "topic": args.topic,
                 "count": args.count,
                 "voice_loop": args.voice,
+                "skip_if_active": args.skip_if_active,
                 "dry_run": args.dry_run,
             }).encode("utf-8")
             code, res = _request(f"{base}/quiz/start", data=payload)
+        elif args.quiz_cmd == "schedule":
+            code, res = _request(f"{base}/quiz/schedule")
+        elif args.quiz_cmd == "daily":
+            payload = json.dumps({
+                "voice_loop": True,
+                "skip_if_active": not args.force,
+                "dry_run": args.dry_run,
+            }).encode("utf-8")
+            code, res = _request(f"{base}/quiz/schedule/trigger", data=payload)
         elif args.quiz_cmd == "answer":
             payload = json.dumps({
                 "text": args.text,

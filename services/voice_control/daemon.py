@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 import os
@@ -111,6 +112,165 @@ def _read_audio_output_label() -> str:
     return "🔊 내장 스피커"
 
 
+_KST = datetime.timezone(datetime.timedelta(hours=9))
+
+
+def _parse_systemd_timestamp_to_kst(ts_str: str) -> tuple[str, str, float | None]:
+    """Parse systemd timestamp (e.g. 'Thu 2026-11-19 22:45:00 GMT') into (kst_str, relative_str, epoch)."""
+    if not ts_str or ts_str.strip().lower() in ("n/a", "no", "none", "0"):
+        return "-", "-", None
+    parts = ts_str.strip().split()
+    try:
+        if len(parts) >= 4 and len(parts[0]) == 3 and not parts[0].isdigit():
+            date_part, time_part = parts[1], parts[2]
+        elif len(parts) >= 2:
+            date_part, time_part = parts[0], parts[1]
+        else:
+            return ts_str, "-", None
+        dt_naive = datetime.datetime.strptime(f"{date_part} {time_part}", "%Y-%m-%d %H:%M:%S")
+        dt_utc = dt_naive.replace(tzinfo=datetime.timezone.utc)
+        dt_kst = dt_utc.astimezone(_KST)
+        kst_str = dt_kst.strftime("%Y-%m-%d %H:%M:%S KST")
+        now_kst = datetime.datetime.now(tz=_KST)
+        diff_sec = (dt_kst - now_kst).total_seconds()
+        abs_diff = abs(diff_sec)
+        if abs_diff < 60:
+            rel = "방금 전" if diff_sec <= 0 else "잠시 후"
+        elif abs_diff < 3600:
+            m = int(abs_diff // 60)
+            rel = f"{m}분 전" if diff_sec <= 0 else f"{m}분 후"
+        elif abs_diff < 86400:
+            h = int(abs_diff // 3600)
+            m = int((abs_diff % 3600) // 60)
+            m_str = f" {m}분" if m > 0 else ""
+            rel = f"{h}시간{m_str} 전" if diff_sec <= 0 else f"{h}시간{m_str} 후"
+        else:
+            d = int(abs_diff // 86400)
+            h = int((abs_diff % 86400) // 3600)
+            rel = f"{d}일 {h}시간 전" if diff_sec <= 0 else f"{d}일 {h}시간 후"
+        return kst_str, rel, dt_kst.timestamp()
+    except Exception:
+        return ts_str, "-", None
+
+
+def _parse_kv_output(text: str) -> dict[str, str]:
+    res: dict[str, str] = {}
+    for line in text.strip().splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            res[k.strip()] = v.strip()
+    return res
+
+
+def _read_daily_quiz_schedule_status() -> dict[str, Any]:
+    topic = os.environ.get("DAILY_QUIZ_TOPIC", "all")
+    count_str = os.environ.get("DAILY_QUIZ_COUNT", "3")
+    count = int(count_str) if count_str.isdigit() else DEFAULT_QUIZ_COUNT
+    topic_label = TOPIC_LABELS.get(topic, topic)
+
+    info: dict[str, Any] = {
+        "ok": True,
+        "configured": False,
+        "timer_active": False,
+        "timer_substate": "unknown",
+        "schedule_label": "매일 오전 07:45 (KST)",
+        "schedule_expr": "*-*-* 07:45:00 Asia/Seoul",
+        "next_run_kst": "-",
+        "next_run_rel": "-",
+        "last_run_kst": "-",
+        "last_run_rel": "-",
+        "last_result": "none",
+        "last_exit_code": None,
+        "last_error": "",
+        "service_state": "unknown",
+        "topic": topic,
+        "topic_label": topic_label,
+        "count": count,
+        "voice_loop": True,
+    }
+
+    try:
+        t_proc = subprocess.run(
+            [
+                "systemctl",
+                "show",
+                "pocobox-daily-quiz.timer",
+                "--property=ActiveState,SubState,NextElapseUSecRealtime,LastTriggerUSec,Result,TimersCalendar",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+        s_proc = subprocess.run(
+            [
+                "systemctl",
+                "show",
+                "pocobox-daily-quiz.service",
+                "--property=ActiveState,SubState,Result,ExecMainExitCode,ExecMainExitTimestamp",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+        if t_proc.returncode == 0 and t_proc.stdout.strip():
+            info["configured"] = True
+            t_props = _parse_kv_output(t_proc.stdout)
+            info["timer_active"] = (t_props.get("ActiveState") == "active")
+            info["timer_substate"] = t_props.get("SubState", "unknown")
+            next_raw = t_props.get("NextElapseUSecRealtime", "")
+            kst, rel, _ = _parse_systemd_timestamp_to_kst(next_raw)
+            info["next_run_kst"] = kst
+            info["next_run_rel"] = rel
+            last_raw = t_props.get("LastTriggerUSec", "")
+            kst_last, rel_last, _ = _parse_systemd_timestamp_to_kst(last_raw)
+            info["last_run_kst"] = kst_last
+            info["last_run_rel"] = rel_last
+            tc = t_props.get("TimersCalendar", "")
+            if "OnCalendar=" in tc:
+                expr = tc.split("OnCalendar=", 1)[1].split(";", 1)[0].strip()
+                info["schedule_expr"] = expr
+
+        if s_proc.returncode == 0 and s_proc.stdout.strip():
+            s_props = _parse_kv_output(s_proc.stdout)
+            s_active = s_props.get("ActiveState", "unknown")
+            s_res = s_props.get("Result", "unknown")
+            exit_code_str = s_props.get("ExecMainExitCode", "")
+            exit_code = int(exit_code_str) if exit_code_str.isdigit() else None
+            info["service_state"] = s_active
+            info["last_exit_code"] = exit_code
+
+            if s_active == "failed" or s_res == "exit-code":
+                info["last_result"] = "failed"
+                try:
+                    j_proc = subprocess.run(
+                        ["journalctl", "-u", "pocobox-daily-quiz.service", "-n", "5", "--no-pager", "-o", "cat"],
+                        capture_output=True,
+                        text=True,
+                        timeout=2.0,
+                        check=False,
+                    )
+                    lines = [ln.strip() for ln in j_proc.stdout.splitlines() if ln.strip()]
+                    for ln in reversed(lines):
+                        if "curl:" in ln or "Failed to connect" in ln or "error" in ln.lower():
+                            info["last_error"] = ln
+                            break
+                    if not info["last_error"] and lines:
+                        info["last_error"] = lines[-1]
+                except Exception:
+                    info["last_error"] = f"종료 코드 {exit_code}" if exit_code is not None else "실행 실패"
+            elif s_res == "success" or exit_code == 0:
+                info["last_result"] = "success"
+            elif info["last_run_kst"] != "-":
+                info["last_result"] = "success"
+    except Exception:
+        # systemctl or journalctl not available (e.g. macOS local dev or container)
+        pass
+
+    return info
+
+
 class EventHub:
     """Thread-safe Server-Sent Events pub/sub hub for instant live subtitles on the display."""
 
@@ -206,6 +366,8 @@ class VoiceController:
         self._display_wake_until = 0.0
         self._last_nokey_warn = 0.0
         self.last_result: dict[str, Any] | None = None
+        self._schedule_cache: dict[str, Any] | None = None
+        self._schedule_cache_time: float = 0.0
 
         self.continuous_listener: ContinuousVoiceListener | None = None
         if self.continuous_enabled:
@@ -1289,6 +1451,15 @@ class VoiceController:
             self._wake_display(15.0)
         return {"ok": True, "action": action}
 
+    def get_daily_quiz_schedule(self, force_refresh: bool = False) -> dict[str, Any]:
+        now = time.monotonic()
+        if not force_refresh and self._schedule_cache is not None and (now - self._schedule_cache_time) < 10.0:
+            return dict(self._schedule_cache)
+        st = _read_daily_quiz_schedule_status()
+        self._schedule_cache = st
+        self._schedule_cache_time = now
+        return dict(st)
+
     def display_state(self) -> dict[str, Any]:
         np: dict[str, Any] = {}
         try:
@@ -1337,6 +1508,7 @@ class VoiceController:
             "audio_output_label": _read_audio_output_label(),
             "voice": voice_info,
             "quiz": self.quiz.public_state(),
+            "quiz_schedule": self.get_daily_quiz_schedule(force_refresh=False),
         }
 
     def fetch_cover_art(self) -> tuple[bytes, str] | None:
@@ -1599,6 +1771,9 @@ def make_handler(controller: VoiceController) -> type[BaseHTTPRequestHandler]:
             if path == "/quiz/state":
                 self._send_json(200, {"ok": True, "quiz": controller.quiz.public_state(), "topics": TOPIC_LABELS})
                 return
+            if path == "/quiz/schedule":
+                self._send_json(200, controller.get_daily_quiz_schedule(force_refresh=True))
+                return
             if path == "/telemetry/stats":
                 hours = 24.0
                 if "hours=" in self.path:
@@ -1745,6 +1920,42 @@ def make_handler(controller: VoiceController) -> type[BaseHTTPRequestHandler]:
                     dry_run=bool(data.get("dry_run", False)),
                 )
                 self._send_json(200 if res.ok else 422, res.to_dict())
+                return
+
+            if path == "/quiz/schedule/trigger":
+                try:
+                    data = json.loads(body.decode("utf-8")) if body else {}
+                except json.JSONDecodeError:
+                    data = {}
+                sched = controller.get_daily_quiz_schedule(force_refresh=True)
+                topic = str(data.get("topic") or sched.get("topic") or "all")
+                count = int(data.get("count") or sched.get("count") or DEFAULT_QUIZ_COUNT)
+                voice_loop = bool(data.get("voice_loop", True))
+                dry_run = bool(data.get("dry_run", False))
+                skip_if_active = bool(data.get("skip_if_active", False))
+
+                if skip_if_active and controller.quiz.active:
+                    self._send_json(
+                        200,
+                        {
+                            "ok": True,
+                            "action": IntentAction.START_QUIZ.value,
+                            "skipped": True,
+                            "message": "영어 퀴즈가 이미 진행 중입니다.",
+                            "quiz": controller.quiz.public_state(),
+                            "quiz_schedule": sched,
+                        },
+                    )
+                    return
+                res = controller.start_quiz(
+                    topic=topic,
+                    count=count,
+                    voice_loop=voice_loop,
+                    dry_run=dry_run,
+                )
+                out = res.to_dict()
+                out["quiz_schedule"] = controller.get_daily_quiz_schedule(force_refresh=True)
+                self._send_json(200 if res.ok else 422, out)
                 return
 
             if path == "/quiz/answer":
