@@ -129,9 +129,11 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
             ctrl.interpreter,
             "interpret_audio",
             return_value=VoiceIntent(action=IntentAction.NEXT, raw_text="다음 곡", wake_word_detected=False),
-        ):
+        ), mock.patch("voice_control.daemon.speak_text", return_value=True) as mock_speak:
             ctrl.handle_wake_utterance(wav, "poco")
 
+        mock_speak.assert_called_once()
+        self.assertEqual(mock_speak.call_args[0][0], "네, 다음 곡으로 넘어갈게요.")
         self.assertEqual(fake_lms.volume, 90)
         self.assertEqual(fake_lms.volume_history, [18, 90])
 
@@ -151,9 +153,11 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
             ctrl.interpreter,
             "interpret_audio",
             return_value=VoiceIntent(action=IntentAction.VOLUME_SET, volume=55, raw_text="볼륨 55", wake_word_detected=False),
-        ):
+        ), mock.patch("voice_control.daemon.speak_text", return_value=True) as mock_speak:
             ctrl.handle_wake_utterance(wav, "poco")
 
+        mock_speak.assert_called_once()
+        self.assertEqual(mock_speak.call_args[0][0], "네, 볼륨을 55로 맞출게요.")
         self.assertEqual(fake_lms.volume, 55)
 
     def test_bare_wake_word_triggers_followup_listen_once(self) -> None:

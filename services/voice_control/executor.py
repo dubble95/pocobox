@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import logging
+import re
 import sys
+import threading
 import time
 from pathlib import Path
+
+log = logging.getLogger("pocobox-voice.executor")
 
 # Support importing lms_client both from repo layout and deployed /srv/pocobox/bin
 _THIS_DIR = Path(__file__).resolve().parent
@@ -13,13 +18,189 @@ for _p in (str(_THIS_DIR.parent / "lms_client"), "/srv/pocobox/bin"):
         sys.path.insert(0, _p)
 
 from lms_client import LMSClient  # noqa: E402
+from .aliases import normalize_asr_text, strip_wake_prefix  # noqa: E402
 from .intent_schema import ExecutionResult, IntentAction, VoiceIntent  # noqa: E402
+from .weather import answer_weather_query, fetch_weather  # noqa: E402
+
+_ACK_KO_PLAY_VERB_RE = re.compile(
+    r"(?:\s+(?:좀|한번|한 번|바로|지금|빨리|계속))*"
+    r"\s*(?:"
+    r"검색해서\s*틀어\s*(?:줘|주세요|줄래)?|"
+    r"찾아서\s*틀어\s*(?:줘|주세요|줄래)?|"
+    r"검색해\s*(?:줘|주세요)?|"
+    r"찾아\s*(?:줘|주세요)?|"
+    r"플레이\s*해\s*(?:줘|주세요)?|"
+    r"재생해\s*(?:줘|주세요)?|재생|"
+    r"들려\s*(?:줘|주세요)?|들려|"
+    r"틀어\s*(?:줘|주세요|줄래)?|틀어|"
+    r"켜\s*(?:줘|주세요)?"
+    r")$",
+    re.IGNORECASE,
+)
+_ACK_EN_PLAY_PREFIX_RE = re.compile(
+    r"^(?:please\s+)?(?:play|put\s+on|search\s+(?:and\s+play\s+)?|find\s+(?:and\s+play\s+)?|listen\s+to)\s+",
+    re.IGNORECASE,
+)
+_ACK_EN_PLAY_SUFFIX_RE = re.compile(
+    r"\s+(?:on\s+tidal|from\s+tidal|please|for\s+me|now)$",
+    re.IGNORECASE,
+)
+
+
+def _korean_ro(n: int) -> str:
+    """Return Korean directional particle '으로' or '로' matching Sino-Korean pronunciation of n."""
+    # 0(영), 10/20/..90(십), 100(백), 3(삼), 6(육) -> 으로; 1(일), 2(이), 4(사), 5(오), 7(칠), 8(팔), 9(구) -> 로
+    return "으로" if (abs(int(n)) % 10) in (0, 3, 6) else "로"
+
+
+def extract_spoken_play_target(intent: VoiceIntent) -> str:
+    """Extract a natural spoken target label from the user's utterance for PLAY_SEARCH confirmation."""
+    display = (intent.display_query or "").strip()
+    if display:
+        return display
+    raw = (intent.raw_text or "").strip()
+    if raw:
+        cleaned = normalize_asr_text(raw)
+        cleaned, _ = strip_wake_prefix(cleaned)
+        cleaned = cleaned.strip(" .!?,~\"'“”")
+        cleaned = re.sub(r"^(?:타이달|tidal)에서\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = _ACK_EN_PLAY_PREFIX_RE.sub("", cleaned)
+        cleaned = _ACK_EN_PLAY_SUFFIX_RE.sub("", cleaned)
+        cleaned = _ACK_KO_PLAY_VERB_RE.sub("", cleaned)
+        cleaned = re.sub(r"\s+(?:좀|한번|한 번|바로|지금|빨리|계속)$", "", cleaned).strip(" .!?,~\"'“”")
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if cleaned and len(cleaned) <= 45:
+            return cleaned
+    return (intent.query or "").strip()
+
+
+def format_command_ack(intent: VoiceIntent) -> str | None:
+    """Build a short, natural Korean spoken confirmation to announce BEFORE executing a command.
+
+    Returns None for non-action / already-spoken intents (Q&A, weather, now_playing, quiz, unknown).
+    """
+    act = intent.action
+    if act == IntentAction.PLAY_SEARCH:
+        target = extract_spoken_play_target(intent)
+        return f"네, {target} 틀어드릴게요." if target else "네, 음악 틀어드릴게요."
+    if act == IntentAction.PLAY_MIX:
+        low = (intent.raw_text or "").lower()
+        if any(k in low for k in ("마이믹스", "마이 믹스", "my mix", "타이달 믹스", "tidal mix")):
+            return "네, 마이믹스 틀어드릴게요."
+        return "네, 추천 음악 틀어드릴게요."
+    if act == IntentAction.PLAY_FAVORITE:
+        q = (intent.query or "").strip()
+        return f"네, {q} 즐겨찾기 틀어드릴게요." if q else "네, 즐겨찾기 틀어드릴게요."
+    if act == IntentAction.PAUSE:
+        return "네, 음악을 멈출게요."
+    if act == IntentAction.RESUME:
+        return "네, 음악을 다시 틀어드릴게요."
+    if act == IntentAction.NEXT:
+        return "네, 다음 곡으로 넘어갈게요."
+    if act == IntentAction.PREVIOUS:
+        return "네, 이전 곡으로 돌아갈게요."
+    if act == IntentAction.VOLUME_SET:
+        vol = intent.volume if intent.volume is not None else 50
+        return f"네, 볼륨을 {vol}{_korean_ro(vol)} 맞출게요."
+    if act == IntentAction.VOLUME_UP:
+        return "네, 볼륨을 올릴게요."
+    if act == IntentAction.VOLUME_DOWN:
+        return "네, 볼륨을 줄일게요."
+    if act == IntentAction.MUTE:
+        return "네, 음소거할게요."
+    if act == IntentAction.UNMUTE:
+        return "네, 음소거를 해제할게요."
+    return None
+
+
+def format_command_failure(result: ExecutionResult) -> str:
+    """Build a brief Korean spoken apology if execution fails after pre-execution confirmation."""
+    msg = (result.message or "").strip()
+    if "LMS 플레이어" in msg:
+        return "죄송해요, 플레이어에 연결하지 못했어요."
+    if "찾지 못했습니다" in msg:
+        return "죄송해요, 요청하신 곡을 찾지 못했어요."
+    return "죄송해요, 명령을 실행하지 못했어요."
 
 
 class VoiceExecutor:
-    def __init__(self, lms: LMSClient, player_name: str = "pocobox") -> None:
+    def __init__(
+        self,
+        lms: LMSClient,
+        player_name: str = "pocobox",
+        weather_fetcher=None,
+        *,
+        auto_queue_radio: bool = False,
+        radio_settle_sec: float = 0.6,
+    ) -> None:
         self.lms = lms
         self.player_name = player_name
+        self._weather_fetcher = weather_fetcher or fetch_weather
+        self.auto_queue_radio = bool(auto_queue_radio)
+        self.radio_settle_sec = max(0.0, float(radio_settle_sec))
+        self._radio_lock = threading.Lock()
+        self._radio_gen = 0
+
+    def _bump_radio_gen(self) -> int:
+        with self._radio_lock:
+            self._radio_gen += 1
+            return self._radio_gen
+
+    def _schedule_tidal_track_radio(self, player_id: str) -> None:
+        if not self.auto_queue_radio:
+            return
+        if not hasattr(self.lms, "append_tidal_track_radio"):
+            return
+        gen = self._bump_radio_gen()
+
+        def _worker() -> None:
+            try:
+                if self.radio_settle_sec > 0:
+                    time.sleep(self.radio_settle_sec)
+                with self._radio_lock:
+                    if gen != self._radio_gen:
+                        return
+                if hasattr(self.lms, "ensure_tidal_dstm"):
+                    try:
+                        self.lms.ensure_tidal_dstm(player_id)
+                    except Exception as exc:
+                        log.debug("ensure_tidal_dstm skipped: %s", exc)
+                res = self.lms.append_tidal_track_radio(
+                    player_id,
+                    only_if_single_track=True,
+                    wait_timeout_sec=2.5,
+                    dedup_timeout_sec=3.0,
+                )
+                if res.get("ok") and not res.get("skipped"):
+                    log.info(
+                        "Queued %d TIDAL radio tracks after track %s (queue=%d)",
+                        int(res.get("added") or 0),
+                        res.get("track_id"),
+                        int(res.get("playlist_tracks") or 0),
+                    )
+            except Exception as exc:
+                log.debug("TIDAL track radio auto-queue skipped: %s", exc)
+
+        threading.Thread(target=_worker, name="tidal-track-radio", daemon=True).start()
+
+    def _ensure_next_track_available(self, player_id: str) -> None:
+        """If at the end of a TIDAL queue, fetch Track Radio immediately so 'next' doesn't stop."""
+        if not self.auto_queue_radio or not hasattr(self.lms, "append_tidal_track_radio"):
+            return
+        try:
+            st = self.lms.call(player_id, ["status", "-", 1, "tags:u"])
+            tracks = int(st.get("playlist_tracks") or 0)
+            cur_idx = int(st.get("playlist_cur_index") or 0)
+            if tracks >= 1 and cur_idx + 1 >= tracks:
+                self._bump_radio_gen()
+                self.lms.append_tidal_track_radio(
+                    player_id,
+                    only_if_single_track=False,
+                    wait_timeout_sec=0.0,
+                    dedup_timeout_sec=3.0,
+                )
+        except Exception as exc:
+            log.debug("Pre-next TIDAL radio check skipped: %s", exc)
 
     def execute(self, intent: VoiceIntent, dry_run: bool = False) -> ExecutionResult:
         t0 = time.monotonic()
@@ -42,6 +223,21 @@ class VoiceExecutor:
             if not answer:
                 return done(False, "질문에 대한 답변을 생성하지 못했습니다.")
             return done(True, answer, {"answer": answer})
+
+        if intent.action == IntentAction.WEATHER:
+            try:
+                answer, details = answer_weather_query(
+                    intent.raw_text,
+                    location_query=intent.query,
+                    language=intent.language,
+                    fetcher=self._weather_fetcher,
+                )
+                return done(True, answer, details)
+            except Exception as exc:
+                msg = str(exc)
+                if not msg.startswith("날씨 정보를"):
+                    msg = f"날씨 정보를 불러오지 못했습니다: {msg}"
+                return done(False, msg)
 
         if intent.action == IntentAction.START_QUIZ:
             return done(
@@ -73,6 +269,8 @@ class VoiceExecutor:
                 )
                 if not res.get("ok"):
                     return done(False, f"TIDAL에서 '{queries[0]}' 검색 결과를 찾지 못했습니다.", res)
+                if not dry_run:
+                    self._schedule_tidal_track_radio(player_id)
                 verb = "검색 확인(dry-run)" if dry_run else "재생 시작"
                 return done(
                     True,
@@ -106,6 +304,7 @@ class VoiceExecutor:
 
             if act == IntentAction.NEXT:
                 if not dry_run:
+                    self._ensure_next_track_available(player_id)
                     self.lms.next_track(player_id)
                 return done(True, "다음 곡으로 넘어갑니다." if not dry_run else "다음 곡 확인(dry-run)")
 

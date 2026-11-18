@@ -7,9 +7,25 @@ import argparse
 import json
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 from typing import Any
+
+_TIDAL_TRACK_ID_RE = re.compile(
+    r"(?:tidal|wimp)://(?:track:)?(\d+)(?:\.[a-z0-9]+)?$|tidal\.com/(?:browse/)?track/(\d+)",
+    re.IGNORECASE,
+)
+
+
+def extract_tidal_track_id(url: str | None) -> str | None:
+    """Extract numeric TIDAL track ID from an LMS track URL (e.g. 'tidal://17603023.flc')."""
+    if not url:
+        return None
+    m = _TIDAL_TRACK_ID_RE.search(str(url).strip())
+    if not m:
+        return None
+    return m.group(1) or m.group(2)
 
 
 def _tokenize(text: str) -> set[str]:
@@ -95,6 +111,23 @@ class LMSClient:
         st = self.player_status(player_id)
         loop = st.get("playlist_loop") or []
         track = loop[0] if loop else {}
+        remote_meta = st.get("remoteMeta") if isinstance(st.get("remoteMeta"), dict) else {}
+        title = (
+            track.get("title")
+            or remote_meta.get("title")
+            or st.get("current_title")
+            or ""
+        )
+        artist = track.get("artist") or remote_meta.get("artist") or ""
+        album = track.get("album") or remote_meta.get("album") or ""
+        coverid = str(track.get("coverid") or remote_meta.get("coverid") or "")
+        artwork_url = str(track.get("artwork_url") or remote_meta.get("artwork_url") or "")
+        duration = float(
+            st.get("duration")
+            or track.get("duration")
+            or remote_meta.get("duration")
+            or 0
+        )
         return {
             "player_id": player_id,
             "player_name": st.get("player_name", ""),
@@ -103,11 +136,12 @@ class LMSClient:
             "volume": st.get("mixer volume", 0),
             "playlist_tracks": int(st.get("playlist_tracks", 0) or 0),
             "time": float(st.get("time", 0) or 0),
-            "duration": float(st.get("duration", track.get("duration", 0)) or 0),
-            "title": track.get("title", ""),
-            "artist": track.get("artist", ""),
-            "album": track.get("album", ""),
-            "coverid": str(track.get("coverid", "") or ""),
+            "duration": duration,
+            "title": str(title),
+            "artist": str(artist),
+            "album": str(album),
+            "coverid": coverid,
+            "artwork_url": artwork_url,
         }
 
     def power(self, player_id: str, state: int = 1) -> dict[str, Any]:
@@ -311,6 +345,101 @@ class LMSClient:
     def play_url(self, player_id: str, url: str) -> dict[str, Any]:
         self.power(player_id, 1)
         return self.call(player_id, ["playlist", "play", url])
+
+    def get_dstm_provider(self, player_id: str) -> str:
+        """Return currently configured LMS Don't Stop The Music provider ('' if disabled)."""
+        res = self.call(player_id, ["playerpref", "plugin.dontstopthemusic:provider", "?"])
+        val = res.get("_p2")
+        if not val or str(val) in ("0", "None"):
+            return ""
+        return str(val)
+
+    def ensure_tidal_dstm(
+        self,
+        player_id: str,
+        provider: str = "PLUGIN_TIDAL_DSTM",
+        *,
+        force: bool = False,
+    ) -> bool:
+        """Ensure LMS Don't Stop The Music (TIDAL Radio autoplay) is enabled for the player."""
+        current = self.get_dstm_provider(player_id)
+        if current and not force:
+            return current == provider
+        self.call(player_id, ["playerpref", "plugin.dontstopthemusic:provider", provider])
+        return True
+
+    def append_tidal_track_radio(
+        self,
+        player_id: str,
+        track_id: str | None = None,
+        *,
+        only_if_single_track: bool = True,
+        wait_timeout_sec: float = 0.0,
+        dedup_timeout_sec: float = 3.0,
+    ) -> dict[str, Any]:
+        """Append TIDAL Track Radio recommendations after the currently playing TIDAL track.
+
+        Deduplicates the seed track if TIDAL returns it as the first radio item so the
+        currently playing song is never played twice in a row.
+        """
+        deadline = time.monotonic() + max(0.0, float(wait_timeout_sec))
+        before_tracks = 0
+        cur_index = 0
+        resolved_id = track_id
+        while True:
+            st = self.call(player_id, ["status", "-", 2, "tags:u"])
+            before_tracks = int(st.get("playlist_tracks") or 0)
+            cur_index = int(st.get("playlist_cur_index") or 0)
+            if only_if_single_track and before_tracks > 1:
+                return {
+                    "ok": True,
+                    "skipped": True,
+                    "reason": "queue_already_populated",
+                    "playlist_tracks": before_tracks,
+                }
+            loop = st.get("playlist_loop") or []
+            cur_url = str(loop[0].get("url") or "") if loop else ""
+            if not resolved_id:
+                resolved_id = extract_tidal_track_id(cur_url)
+            if resolved_id:
+                break
+            if time.monotonic() >= deadline:
+                return {
+                    "ok": False,
+                    "reason": "no_tidal_track_id",
+                    "playlist_tracks": before_tracks,
+                }
+            time.sleep(0.3)
+
+        self.call(player_id, ["tidal_browse", "playlist", "add", "type:track_mix", f"id:{resolved_id}"])
+
+        # Wait briefly for LMS's async TIDAL track_mix callback to populate the queue, then remove duplicate seed
+        dedup_deadline = time.monotonic() + max(0.0, float(dedup_timeout_sec))
+        new_tracks = before_tracks
+        deduped = False
+        while True:
+            st2 = self.call(player_id, ["status", cur_index, 2, "tags:u"])
+            new_tracks = int(st2.get("playlist_tracks") or before_tracks)
+            if new_tracks > before_tracks:
+                loop2 = st2.get("playlist_loop") or []
+                if len(loop2) >= 2:
+                    next_url = str(loop2[1].get("url") or "")
+                    if extract_tidal_track_id(next_url) == resolved_id:
+                        self.call(player_id, ["playlist", "delete", cur_index + 1])
+                        new_tracks = max(before_tracks, new_tracks - 1)
+                        deduped = True
+                break
+            if time.monotonic() >= dedup_deadline:
+                break
+            time.sleep(0.25)
+
+        return {
+            "ok": True,
+            "track_id": resolved_id,
+            "added": max(0, new_tracks - before_tracks),
+            "deduped_seed": deduped,
+            "playlist_tracks": new_tracks,
+        }
 
 
 def main() -> int:

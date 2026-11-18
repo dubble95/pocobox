@@ -34,6 +34,26 @@ from .aliases import (
 )
 from .english_quiz import parse_quiz_options
 from .intent_schema import IntentAction, VoiceIntent
+from .weather import parse_weather_query
+
+# Weather query detection (strictly excluded when user asks to play music/songs)
+_WEATHER_MUSIC_GUARD_RE = re.compile(
+    r"(?:노래|음악|곡|트랙|앨범|플레이리스트|믹스|틀어|재생|들려|song|music|track|album|playlist|\bplay\b)",
+    re.IGNORECASE,
+)
+_WEATHER_QUERY_RE = re.compile(
+    r"(?:"
+    r"날씨|일기\s*예보|기상\s*예보"
+    r"|(?:오늘|내일|모레|지금|현재|밖에|[가-힣]{2,6})\s*(?:기온|온도)(?:\s*(?:어때|알려|몇\s*도))?"
+    r"|(?:지금|오늘|내일|모레|현재|밖에)\s*몇\s*도(?:야|예요|에요|인지|니|인가요)?"
+    r"|우산\s*(?:챙겨|필요|가져|들고)"
+    r"|(?:오늘|내일|모레|지금|현재|밖에)\s*(?:비|눈)(?:가|이)?\s*(?:와|오나|오니|올까|내려|내릴)"
+    r"|(?:^|\s)(?:비|눈)\s*(?:와요?|오나요?|오니|올까요?)(?:\s|$)"
+    r"|(?:오늘|내일|모레|지금|밖에)\s*(?:많이\s*)?(?:추워|춥니|추울까|더워|덥니|더울까|쌀쌀해)"
+    r"|\bweather\b|\bforecast\b|\bis\s+it\s+(?:raining|snowing|cold|hot)\b|\bwill\s+it\s+(?:rain|snow)\b|\bwhat(?:'s|\s+is)\s+the\s+temperature\b"
+    r")",
+    re.IGNORECASE,
+)
 
 # Trailing command verbs/phrases to strip from play queries (Korean & English)
 _KO_PLAY_SUFFIX_RE = re.compile(
@@ -152,6 +172,18 @@ def parse_command(raw_text: str) -> VoiceIntent:
             raw_text=raw_text,
             answer=_format_kst_date(),
             confidence=0.99,
+            wake_word_detected=wake_detected,
+            language=lang,
+        )
+
+    # 1.6 Live location-aware weather queries (default: configured POCOBOX_LOCATION_NAME / 분당)
+    if not _WEATHER_MUSIC_GUARD_RE.search(text) and _WEATHER_QUERY_RE.search(low):
+        loc_q, _, _ = parse_weather_query(text)
+        return VoiceIntent(
+            action=IntentAction.WEATHER,
+            raw_text=raw_text,
+            query=loc_q,
+            confidence=0.98,
             wake_word_detected=wake_detected,
             language=lang,
         )
@@ -381,6 +413,9 @@ def parse_command(raw_text: str) -> VoiceIntent:
         expanded = expand_tidal_queries(extracted)
         primary = expanded[0] if expanded else extracted
         fallbacks = expanded[1:] if len(expanded) > 1 else []
+        # If primary query still contains unresolved Hangul (unknown song/artist or SenseVoice ASR typo),
+        # keep confidence < 0.9 so HybridVoiceInterpreter can optionally refine via fast text-only LLM.
+        resolved_to_tidal = not bool(re.search(r"[가-힣]", primary))
 
         return VoiceIntent(
             action=IntentAction.PLAY_SEARCH,
@@ -388,7 +423,7 @@ def parse_command(raw_text: str) -> VoiceIntent:
             query=primary,
             fallback_queries=fallbacks,
             search_type=search_type,
-            confidence=0.92,
+            confidence=0.94 if resolved_to_tidal else 0.85,
             wake_word_detected=wake_detected,
             language=lang,
         )

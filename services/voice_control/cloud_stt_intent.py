@@ -23,6 +23,7 @@ from .aliases import expand_tidal_queries, strip_wake_prefix
 from .english_quiz import QuizQuestion, classify_quiz_command, is_local_answer_match, parse_quiz_options
 from .intent_schema import IntentAction, VoiceIntent
 from .rule_parser import parse_command
+from .weather import get_default_location
 
 log = logging.getLogger("pocobox-voice.stt")
 
@@ -43,8 +44,9 @@ Listen to the audio (or read the text) and return ONLY a valid JSON object match
   "transcript": "<exact spoken words only; empty string if only instrumental/noise>",
   "is_music_only": false,
   "wake_word_detected": true,
-  "action": "play_search | play_mix | play_favorite | pause | resume | next | previous | volume_set | volume_up | volume_down | mute | unmute | now_playing | answer_qa | start_quiz | stop_quiz | unknown",
-  "query": "<primary TIDAL-friendly search query for play_search, else empty string>",
+  "action": "play_search | play_mix | play_favorite | pause | resume | next | previous | volume_set | volume_up | volume_down | mute | unmute | now_playing | answer_qa | weather | start_quiz | stop_quiz | unknown",
+  "query": "<primary TIDAL-friendly search query for play_search, or requested city/region for weather (empty string for default device location), else empty string>",
+  "display_query": "<for play_search ONLY: natural corrected Korean/spoken song or artist name to read aloud in confirmation (fixing obvious ASR typos like '잘코스키 피아노 협주 일번' -> '차이코프스키 피아노 협주곡 1번'), else empty string>",
   "fallback_queries": ["<alternative query 1>", "<original Korean query>"],
   "search_type": "track | artist | album | playlist | any",
   "volume": null,
@@ -55,10 +57,11 @@ Listen to the audio (or read the text) and return ONLY a valid JSON object match
 
 Rules:
 - Strip the wake word ("포코야", "포코박스", "Hey Poco", etc.) from "query" and set "wake_word_detected": true ONLY if the speaker actually said the wake word.
+- Use action="weather" whenever the user asks about weather, temperature, rain, snow, or umbrella (e.g. "오늘 날씨 어때?", "내일 비 와?", "부산 날씨 알려줘"). Put ONLY the explicitly requested city/region in "query" (or "" if they did not specify a region). NEVER guess or invent weather data in "answer".
 - Use action="answer_qa" when the user asks a general question, trivia, math, definition, recommendation, music/artist info, greeting, or time/date question (e.g. "콜드플레이가 어떤 밴드야?", "프랑스 수도가 어디야?", "38 곱하기 17은?", "저녁 메뉴 추천해줘", "내일 무슨 요일이야?"). Keep "answer" short, accurate, and natural to read aloud (1-2 sentences, Korean unless the user asked in English).
 - Use action="start_quiz" when the user asks to start an English quiz or English listening quiz (e.g. "영어 퀴즈 시작해줘", "영어 문제 내줘", "동물 영어 퀴즈 하자", "English quiz"). Use action="stop_quiz" when they ask to stop/end the quiz.
 - If the speaker did NOT specify a song/artist/genre/mix/question (e.g. only said "포코야" or vague "이 노래 틀어줘"), return action="unknown" unless they clearly said "다시 틀어줘" (resume) or "아무거나 틀어줘" (play_mix).
-- For Korean artists/songs, put the official TIDAL English/canonical name in "query" and Korean/shorter variants in "fallback_queries" (e.g. "포코야 아이유 밤편지 틀어줘" -> query: "IU Through the Night", fallback_queries: ["밤편지", "IU"]).
+- For Korean artists/songs/classical works, ALWAYS fix obvious speech-recognition (ASR) mis-hearings (e.g. "잘코스키 피아노 협주 일번 틀어줘" -> query: "Tchaikovsky Piano Concerto No. 1", display_query: "차이코프스키 피아노 협주곡 1번"; "쇼핑 녹턴 틀어줘" -> query: "Chopin Nocturne", display_query: "쇼팽 녹턴"). Put the official TIDAL English/canonical name in "query", the natural spoken Korean title in "display_query", and Korean/shorter variants in "fallback_queries" (e.g. "포코야 아이유 밤편지 틀어줘" -> query: "IU Through the Night", display_query: "아이유 밤편지", fallback_queries: ["밤편지", "IU"]).
 - For playback controls (pause, resume, next, previous, volume_set/up/down, mute, unmute, now_playing), set query and answer to "".
 - For volume_up use positive delta (default 10), for volume_down use negative delta (default -10), for volume_set set volume 0..100.
 - Return pure JSON only, no markdown fences."""
@@ -67,9 +70,11 @@ Rules:
 def _build_system_prompt() -> str:
     now = datetime.datetime.now(tz=_KST)
     wd = _KO_WEEKDAYS[now.weekday()]
+    loc = get_default_location()
     return (
         SYSTEM_PROMPT
         + f"\n\nCurrent local time (Korea Standard Time, KST): {now.strftime('%Y-%m-%d %H:%M')} ({wd})."
+        + f"\nDevice default location: {loc.name} ({loc.en_name}, South Korea). For any location-dependent question where the user did not specify another city, assume {loc.name} (never default to Seoul unless the user explicitly mentions Seoul)."
     )
 
 
@@ -96,6 +101,7 @@ def _intent_from_llm_payload(payload: dict[str, Any], provider: str, raw_fallbac
 
     action_str = str(payload.get("action") or "unknown").strip().lower()
     query = str(payload.get("query") or "").strip()
+    display_query = str(payload.get("display_query") or "").strip()
     fallbacks = [str(x).strip() for x in (payload.get("fallback_queries") or []) if str(x).strip()]
 
     # Enrich with local alias expansion if query is Korean
@@ -120,6 +126,7 @@ def _intent_from_llm_payload(payload: dict[str, Any], provider: str, raw_fallbac
         action=IntentAction(action_str) if action_str in {a.value for a in IntentAction} else IntentAction.UNKNOWN,
         raw_text=transcript,
         query=query,
+        display_query=display_query,
         fallback_queries=fallbacks,
         search_type=str(payload.get("search_type") or "any").lower(),
         volume=payload.get("volume"),
@@ -250,10 +257,17 @@ class HybridVoiceInterpreter:
             return local_intent
 
         try:
+            cloud_intent: VoiceIntent | None = None
             if self.provider == "gemini" and self.gemini_api_key:
-                return self._gemini_text_intent(text)
-            if self.provider == "openai" and self.openai_api_key:
-                return self._openai_text_intent(text)
+                cloud_intent = self._gemini_text_intent(text)
+            elif self.provider == "openai" and self.openai_api_key:
+                cloud_intent = self._openai_text_intent(text)
+            if cloud_intent is not None and (
+                cloud_intent.action != IntentAction.UNKNOWN or local_intent.action == IntentAction.UNKNOWN
+            ):
+                if local_intent.wake_word_detected and not cloud_intent.wake_word_detected:
+                    cloud_intent.wake_word_detected = True
+                return cloud_intent
         except Exception:
             pass
         return local_intent
@@ -284,16 +298,21 @@ class HybridVoiceInterpreter:
                     fast.provider = "sensevoice+rule"
                     return fast
 
-                # Unknown/complex command or Q&A: escalate text-only to cloud LLM if enabled
+                # Unknown/complex command, unresolved Korean search, or Q&A: escalate text-only to cloud LLM if enabled
                 if self.cloud_fallback and self.has_cloud_api():
                     try:
+                        cloud_intent: VoiceIntent | None = None
                         if self.provider == "gemini" and self.gemini_api_key:
                             cloud_intent = self._gemini_text_intent(transcript)
                             cloud_intent.provider = "sensevoice+gemini-text"
-                            return cloud_intent
-                        if self.provider == "openai" and self.openai_api_key:
+                        elif self.provider == "openai" and self.openai_api_key:
                             cloud_intent = self._openai_text_intent(transcript)
                             cloud_intent.provider = "sensevoice+openai-text"
+                        if cloud_intent is not None and (
+                            cloud_intent.action != IntentAction.UNKNOWN or fast.action == IntentAction.UNKNOWN
+                        ):
+                            if fast.wake_word_detected and not cloud_intent.wake_word_detected:
+                                cloud_intent.wake_word_detected = True
                             return cloud_intent
                     except Exception as exc:
                         log.warning("Cloud text fallback failed after local STT (%r): %s", transcript, exc)

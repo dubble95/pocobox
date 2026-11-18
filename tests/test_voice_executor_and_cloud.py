@@ -15,7 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "services"))
 sys.path.insert(0, str(REPO_ROOT / "services" / "lms_client"))
 
-from lms_client import LMSClient  # noqa: E402
+from lms_client import LMSClient, extract_tidal_track_id  # noqa: E402
 from voice_control.audio_capture import analyze_wav_bytes, pcm_to_wav_bytes, trim_silence_wav  # noqa: E402
 from voice_control.cloud_stt_intent import HybridVoiceInterpreter  # noqa: E402
 from voice_control.executor import VoiceExecutor  # noqa: E402
@@ -159,7 +159,7 @@ class TestVoiceExecutorAndCloud(unittest.TestCase):
         self.assertTrue(np.ok)
         self.assertIn("Through the Night", np.message)
 
-        neg = executor.execute(parse_command("오늘 날씨 어때?"))
+        neg = executor.execute(parse_command("오늘 점심 뭐 먹지?"))
         self.assertFalse(neg.ok)
         self.assertEqual(neg.action, IntentAction.UNKNOWN.value)
 
@@ -334,6 +334,82 @@ class TestVoiceExecutorAndCloud(unittest.TestCase):
         self.assertTrue(speech_seen)
         self.assertIsNotNone(stopped_at)
         self.assertLess(stopped_at, len(rms_trace) - 1)
+
+    def test_tidal_dstm_and_track_radio_auto_queue_and_dedup(self) -> None:
+        self.assertEqual(extract_tidal_track_id("tidal://17603023.flc"), "17603023")
+        self.assertEqual(extract_tidal_track_id("tidal://track:4242"), "4242")
+        self.assertEqual(extract_tidal_track_id("https://tidal.com/browse/track/98765"), "98765")
+        self.assertIsNone(extract_tidal_track_id("http://stream.wqxr.org/wqxr"))
+        self.assertIsNone(extract_tidal_track_id(""))
+
+        class RadioLMS(LMSClient):
+            def __init__(self) -> None:
+                super().__init__(host="127.0.0.1", port=9000)
+                self.dstm_provider: str | None = None
+                self.queue: list[dict] = [{"url": "tidal://17603023.flc", "title": "Seed Track"}]
+                self.cur_idx = 0
+                self.calls: list[list] = []
+
+            def call(self, player_id: str, command: list) -> dict:
+                self.calls.append(list(command))
+                if command[0] == "serverstatus":
+                    return {"players_loop": [{"playerid": "02:70:6f:63:6f:01", "name": "pocobox", "connected": 1}]}
+                if command[0] == "playerpref" and command[1] == "plugin.dontstopthemusic:provider":
+                    if command[2] == "?":
+                        return {"_p2": self.dstm_provider}
+                    self.dstm_provider = str(command[2])
+                    return {}
+                if command[0] == "status":
+                    start = self.cur_idx if command[1] == "-" else int(command[1])
+                    count = int(command[2])
+                    return {
+                        "playlist_tracks": len(self.queue),
+                        "playlist_cur_index": str(self.cur_idx),
+                        "playlist_loop": self.queue[start : start + count],
+                    }
+                if command[0] == "tidal_browse" and command[1:3] == ["playlist", "add"]:
+                    # Simulate TIDAL returning seed track first + 2 recommendations
+                    self.queue.extend([
+                        {"url": "tidal://17603023.flc", "title": "Seed Track"},
+                        {"url": "tidal://22222222.flc", "title": "Rec 1"},
+                        {"url": "tidal://33333333.flc", "title": "Rec 2"},
+                    ])
+                    return {}
+                if command[0] == "playlist" and command[1] == "delete":
+                    del self.queue[int(command[2])]
+                    return {}
+                if command[0] == "playlist" and command[1] == "index" and command[2] == "+1":
+                    self.cur_idx = min(len(self.queue) - 1, self.cur_idx + 1)
+                    return {}
+                return {}
+
+        lms = RadioLMS()
+        self.assertEqual(lms.get_dstm_provider("p1"), "")
+        self.assertTrue(lms.ensure_tidal_dstm("p1"))
+        self.assertEqual(lms.get_dstm_provider("p1"), "PLUGIN_TIDAL_DSTM")
+
+        # Appending radio on a single-track queue deduplicates the seed track at index 1
+        res = lms.append_tidal_track_radio("p1", only_if_single_track=True, dedup_timeout_sec=0.5)
+        self.assertTrue(res["ok"])
+        self.assertTrue(res["deduped_seed"])
+        self.assertEqual(res["added"], 2)
+        self.assertEqual([t["url"] for t in lms.queue], [
+            "tidal://17603023.flc",
+            "tidal://22222222.flc",
+            "tidal://33333333.flc",
+        ])
+
+        # Skips if queue already has multiple tracks (e.g. album/playlist)
+        skip_res = lms.append_tidal_track_radio("p1", only_if_single_track=True)
+        self.assertTrue(skip_res["skipped"])
+
+        # Executor NEXT on last track automatically fills TIDAL track radio before advancing
+        lms2 = RadioLMS()
+        ex = VoiceExecutor(lms2, auto_queue_radio=True, radio_settle_sec=0.0)
+        next_res = ex.execute(parse_command("다음 곡"))
+        self.assertTrue(next_res.ok)
+        self.assertEqual(lms2.cur_idx, 1)
+        self.assertEqual(lms2.queue[lms2.cur_idx]["url"], "tidal://22222222.flc")
 
 
 if __name__ == "__main__":

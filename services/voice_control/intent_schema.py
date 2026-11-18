@@ -22,6 +22,7 @@ class IntentAction(str, Enum):
     UNMUTE = "unmute"
     NOW_PLAYING = "now_playing"
     ANSWER_QA = "answer_qa"
+    WEATHER = "weather"
     START_QUIZ = "start_quiz"
     STOP_QUIZ = "stop_quiz"
     UNKNOWN = "unknown"
@@ -35,6 +36,7 @@ class VoiceIntent:
     action: IntentAction
     raw_text: str = ""
     query: str = ""
+    display_query: str = ""
     fallback_queries: list[str] = field(default_factory=list)
     search_type: str = "any"
     volume: int | None = None

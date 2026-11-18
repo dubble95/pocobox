@@ -65,6 +65,12 @@ ASR_NORMALIZATIONS: tuple[tuple[str, str], ...] = (
     ("시작 해", "시작해"),
     ("들려 줘", "들려줘"),
     ("재생 해 줘", "재생해줘"),
+    # Common SenseVoice classical composer / work ASR mis-hearings
+    ("잘코스키", "차이코프스키"),
+    ("차이코스키", "차이코프스키"),
+    ("차이코프 스키", "차이코프스키"),
+    ("모짜르트", "모차르트"),
+    ("베토밴", "베토벤"),
 )
 
 # Korean artist name -> primary TIDAL search name(s)
@@ -132,7 +138,87 @@ ARTIST_ALIASES: dict[str, list[str]] = {
     "존 메이어": ["John Mayer"],
     "다프트펑크": ["Daft Punk"],
     "다프트 펑크": ["Daft Punk"],
+    # Classical composers
+    "차이코프스키": ["Tchaikovsky"],
+    "차이콥스키": ["Tchaikovsky"],
+    "베토벤": ["Beethoven"],
+    "모차르트": ["Mozart"],
+    "쇼팽": ["Chopin"],
+    "바흐": ["Bach"],
+    "라흐마니노프": ["Rachmaninoff"],
+    "비발디": ["Vivaldi"],
+    "드뷔시": ["Debussy"],
+    "브람스": ["Brahms"],
+    "슈베르트": ["Schubert"],
+    "리스트": ["Liszt"],
+    "슈만": ["Schumann"],
+    "멘델스존": ["Mendelssohn"],
+    "하이든": ["Haydn"],
+    "말러": ["Mahler"],
+    "드보르작": ["Dvorak"],
+    "파가니니": ["Paganini"],
+    "프로코피예프": ["Prokofiev"],
+    "쇼스타코비치": ["Shostakovich"],
+    "생상스": ["Saint-Saens"],
+    "라벨": ["Ravel"],
+    "엘가": ["Elgar"],
+    "푸치니": ["Puccini"],
+    "베르디": ["Verdi"],
+    "바그너": ["Wagner"],
+    "헨델": ["Handel"],
 }
+
+# Classical music form / title fragments -> TIDAL English equivalents
+_CLASSICAL_WORK_TERMS: tuple[tuple[str, str], ...] = (
+    ("피아노 협주곡", "Piano Concerto"),
+    ("피아노협주곡", "Piano Concerto"),
+    ("피아노 협주", "Piano Concerto"),
+    ("피아노협주", "Piano Concerto"),
+    ("바이올린 협주곡", "Violin Concerto"),
+    ("바이올린협주곡", "Violin Concerto"),
+    ("바이올린 협주", "Violin Concerto"),
+    ("바이올린협주", "Violin Concerto"),
+    ("첼로 협주곡", "Cello Concerto"),
+    ("첼로협주곡", "Cello Concerto"),
+    ("첼로 협주", "Cello Concerto"),
+    ("첼로협주", "Cello Concerto"),
+    ("피아노 소나타", "Piano Sonata"),
+    ("피아노소나타", "Piano Sonata"),
+    ("바이올린 소나타", "Violin Sonata"),
+    ("바이올린소나타", "Violin Sonata"),
+    ("첼로 모음곡", "Cello Suite"),
+    ("첼로모음곡", "Cello Suite"),
+    ("교향곡", "Symphony"),
+    ("협주곡", "Concerto"),
+    ("협주", "Concerto"),
+    ("소나타", "Sonata"),
+    ("녹턴", "Nocturne"),
+    ("전주곡", "Prelude"),
+    ("에튀드", "Etude"),
+    ("연습곡", "Etude"),
+    ("왈츠", "Waltz"),
+    ("백조의 호수", "Swan Lake"),
+    ("호두까기 인형", "Nutcracker"),
+    ("사계", "The Four Seasons"),
+    ("월광", "Moonlight Sonata"),
+    ("비창", "Pathetique"),
+    ("운명", "Symphony No. 5"),
+    ("합창", "Symphony No. 9"),
+)
+
+_CLASSICAL_WORK_GUARD_RE = re.compile(
+    r"(?:협주곡?|교향곡|소나타|녹턴|전주곡|에튀드|연습곡|모음곡|4중주|사중주|트리오)"
+)
+
+_SINO_WORK_NUM_RE = re.compile(r"(?:제\s*)?([일이삼사오육칠팔구]|십)\s*번")
+
+_GENERIC_MOOD_TOKENS: frozenset[str] = frozenset({
+    "잔잔한", "신나는", "조용한", "편안한", "부드러운", "감성", "감성적인",
+    "카페", "수면", "공부", "운동", "드라이브", "아침", "저녁", "밤",
+    "겨울", "여름", "가을", "봄", "인기", "최신", "명곡", "모음",
+    "재즈", "클래식", "피아노", "로파이", "팝송", "팝", "발라드",
+    "힙합", "록", "락", "어쿠스틱", "보사노바",
+})
 
 # Popular Korean song titles -> TIDAL English/canonical titles
 TRACK_ALIASES: dict[str, list[str]] = {
@@ -233,8 +319,23 @@ def strip_wake_prefix(text: str) -> tuple[str, bool]:
     return text.strip(), False
 
 
+def _translate_classical_terms(text: str) -> str:
+    """Translate Korean classical music work terms and numbering (e.g. '피아노협주곡 1번' / '피아노 협주 일번' -> 'Piano Concerto No. 1')."""
+    out = text
+    for ko, en in _CLASSICAL_WORK_TERMS:
+        if ko in out:
+            out = out.replace(ko, f" {en} ")
+    out = _SINO_WORK_NUM_RE.sub(
+        lambda m: f" No. {10 if m.group(1) == '십' else _SINO_DIGITS[m.group(1)]} ",
+        out,
+    )
+    out = re.sub(r"제\s*(\d+)\s*번", r" No. \1 ", out)
+    out = re.sub(r"(\d+)\s*번", r" No. \1 ", out)
+    return re.sub(r"\s+", " ", out).strip()
+
+
 def expand_tidal_queries(query: str) -> list[str]:
-    """Generate ordered TIDAL-friendly search candidates (English/canonical first for K-pop)."""
+    """Generate ordered TIDAL-friendly search candidates (English/canonical first for K-pop & classical)."""
     q = query.strip()
     if not q:
         return []
@@ -267,10 +368,16 @@ def expand_tidal_queries(query: str) -> list[str]:
             matched_tracks.append((k, TRACK_ALIASES[k]))
             break
 
-    for k in sorted(GENRE_MOOD_ALIASES, key=len, reverse=True):
-        if k in q:
-            matched_moods.append((k, GENRE_MOOD_ALIASES[k]))
-            break
+    is_classical_work = bool(_CLASSICAL_WORK_GUARD_RE.search(q))
+    q_tokens = q.split()
+    if not is_classical_work and (
+        q in GENRE_MOOD_ALIASES
+        or (len(q_tokens) <= 2 and all(tok in _GENERIC_MOOD_TOKENS for tok in q_tokens))
+    ):
+        for k in sorted(GENRE_MOOD_ALIASES, key=len, reverse=True):
+            if k == q or re.search(rf"(?:^|\s){re.escape(k)}(?:\s|$)", q):
+                matched_moods.append((k, GENRE_MOOD_ALIASES[k]))
+                break
 
     # If both artist and track matched (e.g., "아이유 밤편지" -> "IU Through the Night")
     if matched_artists and matched_tracks:
@@ -284,8 +391,11 @@ def expand_tidal_queries(query: str) -> list[str]:
         a_key, a_vals = matched_artists[0]
         rem = q.replace(a_key, "").strip()
         if rem:
+            translated_rem = _translate_classical_terms(rem)
+            if translated_rem != rem:
+                add(f"{a_vals[0]} {translated_rem}")
             add(f"{a_vals[0]} {rem}")
-            add(rem)
+            add(translated_rem if translated_rem != rem else rem)
         for av in a_vals:
             add(av)
     elif matched_tracks:
@@ -299,6 +409,10 @@ def expand_tidal_queries(query: str) -> list[str]:
         m_key, m_vals = matched_moods[0]
         for mv in m_vals:
             add(mv)
+    else:
+        translated = _translate_classical_terms(q)
+        if translated != q:
+            add(translated)
 
     # Always keep the original query as fallback
     add(q)

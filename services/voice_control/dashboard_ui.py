@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-DASHBOARD_HTML = """<!doctype html>
+DASHBOARD_HTML = r"""<!doctype html>
 <html lang="ko">
 <head>
 <meta charset="utf-8" />
@@ -233,6 +233,10 @@ DASHBOARD_HTML = """<!doctype html>
         <input id="ttsCheck" type="checkbox" checked onchange="saveSpeakerCfg()" />
         <span>질문·곡 안내 목소리 대답(TTS) 켜기</span>
       </label>
+      <label class="toggle">
+        <input id="cmdAckCheck" type="checkbox" checked onchange="saveSpeakerCfg()" />
+        <span>명령 실행 전 음성 응답 켜기</span>
+      </label>
       <div class="row">
         <button class="primary" onclick="testSpeaker()">🔊 내장 스피커 목소리 테스트</button>
       </div>
@@ -423,6 +427,7 @@ DASHBOARD_HTML = """<!doctype html>
     }
     if (v.enable_chime !== undefined) { chimeCheck.checked = Boolean(v.enable_chime); }
     if (v.enable_tts !== undefined) { ttsCheck.checked = Boolean(v.enable_tts); }
+    if (v.enable_command_ack !== undefined) { cmdAckCheck.checked = Boolean(v.enable_command_ack); }
   }
 
   async function saveSpeakerCfg() {
@@ -433,7 +438,8 @@ DASHBOARD_HTML = """<!doctype html>
       tts_rate_pct: Number(rateSlider.value),
       tts_pitch_hz: Number(pitchSlider.value),
       enable_chime: chimeCheck.checked,
-      enable_tts: ttsCheck.checked
+      enable_tts: ttsCheck.checked,
+      enable_command_ack: cmdAckCheck.checked
     };
     const r = await fetch("/dashboard/config", {
       method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)
@@ -563,6 +569,8 @@ DASHBOARD_HTML = """<!doctype html>
           else if (ev.state === "processing") addLog("STT", "Gemini 음성 분석 중...", "b-proc");
         } else if (ev.type === "transcript") {
           addLog("자막", `“${ev.text}” (wake=${ev.wake})`, "b-proc");
+        } else if (ev.type === "ack") {
+          addLog("응답", `${ev.text}`, "b-ok");
         } else if (ev.type === "quiz") {
           addLog("QUIZ", `${ev.header || "영어 퀴즈"}: ${(ev.text || "").replace(/\n+/g, " / ")}`, ev.event === "correct" || ev.event === "finished" ? "b-ok" : "b-proc");
         } else if (ev.type === "result") {

@@ -7,7 +7,9 @@ import json
 import logging
 import os
 import queue
+import shutil
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -33,7 +35,7 @@ from voice_control.audio_dsp import filter_wav_speech_band  # noqa: E402
 from voice_control.cloud_stt_intent import HybridVoiceInterpreter  # noqa: E402
 from voice_control.continuous_listener import ContinuousVoiceListener  # noqa: E402
 from voice_control.dashboard_ui import DASHBOARD_HTML  # noqa: E402
-from voice_control.display_ui import DISPLAY_HTML, UI_VERSION  # noqa: E402
+from voice_control.display_ui import DISPLAY_HTML, DISPLAY_MANIFEST, UI_VERSION  # noqa: E402
 from voice_control.english_quiz import (  # noqa: E402
     DEFAULT_QUIZ_COUNT,
     EnglishQuizSession,
@@ -43,13 +45,17 @@ from voice_control.english_quiz import (  # noqa: E402
     is_local_answer_match,
     question_from_dict,
 )
-from voice_control.executor import VoiceExecutor  # noqa: E402
+from voice_control.executor import (  # noqa: E402
+    VoiceExecutor,
+    format_command_ack,
+    format_command_failure,
+)
 from voice_control.feedback import (  # noqa: E402
     get_internal_speaker_volume,
     play_chime,
     set_internal_speaker_volume,
 )
-from voice_control.intent_schema import ExecutionResult, IntentAction  # noqa: E402
+from voice_control.intent_schema import ExecutionResult, IntentAction, VoiceIntent  # noqa: E402
 from voice_control.telemetry import VoiceTelemetryLogger  # noqa: E402
 from voice_control.tts import (  # noqa: E402
     AVAILABLE_VOICES,
@@ -60,6 +66,7 @@ from voice_control.tts import (  # noqa: E402
     speak_segments,
     speak_text,
 )
+from voice_control.weather import get_default_location  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -143,7 +150,12 @@ class VoiceController:
             port=int(os.environ.get("LMS_PORT", "9000")),
         )
         self.player_name = os.environ.get("PLAYER_NAME", "pocobox")
-        self.executor = VoiceExecutor(self.lms, player_name=self.player_name)
+        self.enable_tidal_autoplay = _env_bool("ENABLE_TIDAL_AUTOPLAY", True)
+        self.executor = VoiceExecutor(
+            self.lms,
+            player_name=self.player_name,
+            auto_queue_radio=self.enable_tidal_autoplay,
+        )
         self.interpreter = HybridVoiceInterpreter()
         self.require_wake_word = _env_bool("REQUIRE_WAKE_WORD", True)
         self.continuous_enabled = _env_bool("CONTINUOUS_LISTEN", True)
@@ -157,6 +169,7 @@ class VoiceController:
         self.enable_chime = _env_bool("ENABLE_CHIME", True)
         self.chime_volume = max(0.05, min(1.0, float(os.environ.get("VOICE_CHIME_VOLUME", "0.25"))))
         self.enable_tts = _env_bool("ENABLE_TTS", True)
+        self.enable_command_ack = _env_bool("ENABLE_COMMAND_ACK", True)
         self.tts_voice = default_tts_voice()
         self.tts_rate_pct = max(-30, min(30, int(os.environ.get("TTS_RATE_PCT", "0"))))
         self.tts_pitch_hz = max(-15, min(15, int(os.environ.get("TTS_PITCH_HZ", "0"))))
@@ -166,6 +179,7 @@ class VoiceController:
             "enable_chime": self.enable_chime,
             "chime_volume_pct": int(round(self.chime_volume * 100)),
             "enable_tts": self.enable_tts,
+            "enable_command_ack": self.enable_command_ack,
             "tts_voice": self.tts_voice,
             "tts_rate_pct": self.tts_rate_pct,
             "tts_pitch_hz": self.tts_pitch_hz,
@@ -231,6 +245,8 @@ class VoiceController:
             self.chime_volume = max(0.05, min(1.0, float(data["chime_volume_pct"]) / 100.0))
         if "enable_tts" in data:
             self.enable_tts = bool(data["enable_tts"])
+        if "enable_command_ack" in data:
+            self.enable_command_ack = bool(data["enable_command_ack"])
         if "tts_voice" in data and str(data["tts_voice"]) in VALID_VOICE_IDS:
             self.tts_voice = str(data["tts_voice"])
         if "tts_rate_pct" in data:
@@ -246,6 +262,7 @@ class VoiceController:
             "enable_chime": self.enable_chime,
             "chime_volume_pct": int(round(self.chime_volume * 100)),
             "enable_tts": self.enable_tts,
+            "enable_command_ack": self.enable_command_ack,
             "tts_voice": self.tts_voice,
             "tts_rate_pct": self.tts_rate_pct,
             "tts_pitch_hz": self.tts_pitch_hz,
@@ -319,20 +336,22 @@ class VoiceController:
             "ts": time.time(),
         })
 
-    def _speak_answer(self, text: str) -> None:
-        """Speak Q&A / Now-Playing answer via TTS while pausing mic and keeping music ducked."""
+    def _speak_answer(self, text: str) -> bool:
+        """Speak Q&A / Now-Playing / command confirmation via TTS while pausing mic and keeping music ducked."""
         if not text or not self.enable_tts:
-            return
+            return False
         already_ducked = self._duck_saved is not None
         did_duck = False if already_ducked else self._begin_duck()
         self._tts_speaking = True
         try:
-            speak_text(
-                text,
-                voice=self.tts_voice,
-                rate_pct=self.tts_rate_pct,
-                pitch_hz=self.tts_pitch_hz,
-                enabled=self.enable_tts,
+            return bool(
+                speak_text(
+                    text,
+                    voice=self.tts_voice,
+                    rate_pct=self.tts_rate_pct,
+                    pitch_hz=self.tts_pitch_hz,
+                    enabled=self.enable_tts,
+                )
             )
         finally:
             self._tts_speaking = False
@@ -365,10 +384,56 @@ class VoiceController:
         }
 
     def _is_spoken_action(self, action: str) -> bool:
-        return action in (IntentAction.ANSWER_QA.value, IntentAction.NOW_PLAYING.value)
+        return action in (IntentAction.ANSWER_QA.value, IntentAction.WEATHER.value, IntentAction.NOW_PLAYING.value)
 
     def _is_quiz_action(self, action: str) -> bool:
         return action in (IntentAction.START_QUIZ.value, IntentAction.STOP_QUIZ.value, "quiz_turn")
+
+    def _is_volume_or_mute_action(self, action: str) -> bool:
+        return action in (
+            IntentAction.VOLUME_SET.value,
+            IntentAction.VOLUME_UP.value,
+            IntentAction.VOLUME_DOWN.value,
+            IntentAction.MUTE.value,
+            IntentAction.UNMUTE.value,
+        )
+
+    def _execute_intent_with_ack(
+        self,
+        intent: VoiceIntent,
+        *,
+        dry_run: bool = False,
+    ) -> tuple[ExecutionResult, bool]:
+        """Speak pre-execution confirmation before executing an actionable command."""
+        ack_text = format_command_ack(intent)
+        ack_spoken = False
+        already_ducked = self._duck_saved is not None
+        did_duck = False
+
+        if not dry_run and ack_text and self.enable_tts and self.enable_command_ack:
+            did_duck = False if already_ducked else self._begin_duck()
+            self.events.publish({
+                "type": "ack",
+                "text": ack_text,
+                "user_text": intent.raw_text,
+                "action": intent.action.value,
+                "ts": time.time(),
+            })
+            log.info("CMD ACK (%s): %s", intent.action.value, ack_text)
+            ack_spoken = self._speak_answer(ack_text)
+
+        try:
+            res = self.executor.execute(intent, dry_run=dry_run)
+            if ack_text:
+                res.details["ack_text"] = ack_text
+            res.details["ack_spoken"] = ack_spoken
+            if not dry_run and ack_spoken and not res.ok:
+                self._speak_answer(format_command_failure(res))
+        finally:
+            if did_duck:
+                self._restore_duck(skip_restore=self._is_volume_or_mute_action(intent.action.value))
+
+        return res, ack_spoken
 
     def _pause_lms_for_quiz(self) -> None:
         if self._quiz_paused_lms is not None:
@@ -745,24 +810,32 @@ class VoiceController:
                     action=res.action,
                     **wake_meta,
                 )
-            if res.action in (
-                IntentAction.VOLUME_SET.value,
-                IntentAction.VOLUME_UP.value,
-                IntentAction.VOLUME_DOWN.value,
-                IntentAction.MUTE.value,
-                IntentAction.UNMUTE.value,
-            ):
+            if self._is_volume_or_mute_action(res.action):
                 skip_restore = True
             if self._is_quiz_action(res.action):
                 pass  # quiz handler already speaks bilingual TTS + chime
             elif res.ok and self._is_spoken_action(res.action):
                 self._speak_answer(res.message)
-            elif res.ok:
+            elif res.ok and not res.details.get("ack_spoken"):
                 self._play_chime("ok")
         finally:
             self._restore_duck(skip_restore=skip_restore)
 
+    def _init_tidal_autoplay_bg(self) -> None:
+        """Enable LMS Don't Stop The Music (PLUGIN_TIDAL_DSTM) on startup for continuous TIDAL radio."""
+        for _ in range(5):
+            try:
+                pid = self.lms.resolve_player_id(self.player_name)
+                if self.lms.ensure_tidal_dstm(pid):
+                    log.info("Enabled LMS Don't Stop The Music (PLUGIN_TIDAL_DSTM) for %s", pid)
+                return
+            except Exception as exc:
+                log.debug("Waiting for LMS to enable TIDAL autoplay: %s", exc)
+                time.sleep(2.0)
+
     def start_background_listeners(self) -> None:
+        if self.enable_tidal_autoplay:
+            threading.Thread(target=self._init_tidal_autoplay_bg, name="tidal-dstm-init", daemon=True).start()
         if self.continuous_listener is not None:
             self.continuous_listener.start()
 
@@ -795,7 +868,7 @@ class VoiceController:
         if intent.action == IntentAction.STOP_QUIZ:
             return self.stop_quiz(dry_run=dry_run)
 
-        res = self.executor.execute(intent, dry_run=dry_run)
+        res, _ = self._execute_intent_with_ack(intent, dry_run=dry_run)
         self.last_result = res.to_dict()
         self.events.publish({
             "type": "result",
@@ -962,7 +1035,7 @@ class VoiceController:
             res.details["vad"] = metrics.__dict__
             return res
 
-        res = self.executor.execute(intent, dry_run=dry_run)
+        res, _ = self._execute_intent_with_ack(intent, dry_run=dry_run)
         res.details["vad"] = metrics.__dict__
         res.details["stt_ms"] = stt_ms
         res.details["stt_provider"] = intent.provider
@@ -1010,7 +1083,7 @@ class VoiceController:
             return
         if res.ok and self._is_spoken_action(res.action):
             self._speak_answer(res.message)
-        elif res.ok:
+        elif res.ok and not res.details.get("ack_spoken"):
             self._play_chime("ok")
 
     def listen_once(self, dry_run: bool = False) -> ExecutionResult:
@@ -1049,18 +1122,14 @@ class VoiceController:
                 apply_bandpass=True,
                 start_quiz_voice_loop=not dry_run,
             )
-            if res.action in (
-                IntentAction.VOLUME_SET.value,
-                IntentAction.VOLUME_UP.value,
-                IntentAction.VOLUME_DOWN.value,
-                IntentAction.MUTE.value,
-                IntentAction.UNMUTE.value,
-            ):
+            if self._is_volume_or_mute_action(res.action):
                 skip_restore = True
             if self._is_quiz_action(res.action):
                 pass
             elif not dry_run and res.ok and self._is_spoken_action(res.action):
                 self._speak_answer(res.message)
+            elif not dry_run and res.details.get("ack_spoken"):
+                pass  # spoken pre-execution ack (and failure TTS if failed) already played
             else:
                 self._play_chime("ok" if res.ok else "error")
             return res
@@ -1093,6 +1162,7 @@ class VoiceController:
             self.enable_chime = bool(sd["enable_chime"])
             self.chime_volume = max(0.05, min(1.0, float(sd["chime_volume_pct"]) / 100.0))
             self.enable_tts = bool(sd["enable_tts"])
+            self.enable_command_ack = bool(sd["enable_command_ack"])
             self.tts_voice = str(sd["tts_voice"])
             self.tts_rate_pct = int(sd["tts_rate_pct"])
             self.tts_pitch_hz = int(sd["tts_pitch_hz"])
@@ -1111,6 +1181,9 @@ class VoiceController:
             prefs_changed = True
         if "enable_tts" in data:
             self.enable_tts = bool(data["enable_tts"])
+            prefs_changed = True
+        if "enable_command_ack" in data:
+            self.enable_command_ack = bool(data["enable_command_ack"])
             prefs_changed = True
         if "tts_voice" in data:
             v = str(data["tts_voice"]).strip()
@@ -1156,6 +1229,7 @@ class VoiceController:
         if action == "toggle":
             self.lms.toggle_pause(player_id)
         elif action == "next":
+            self.executor._ensure_next_track_available(player_id)
             self.lms.next_track(player_id)
         elif action == "prev":
             self.lms.prev_track(player_id)
@@ -1188,6 +1262,7 @@ class VoiceController:
         voice_info["enable_chime"] = self.enable_chime
         voice_info["chime_volume_pct"] = int(round(self.chime_volume * 100))
         voice_info["enable_tts"] = self.enable_tts
+        voice_info["enable_command_ack"] = self.enable_command_ack
         voice_info["tts_voice"] = self.tts_voice
         voice_info["tts_rate_pct"] = self.tts_rate_pct
         voice_info["tts_pitch_hz"] = self.tts_pitch_hz
@@ -1208,12 +1283,99 @@ class VoiceController:
             pid = self.lms.resolve_player_id(self.player_name)
         except Exception:
             pid = "02:70:6f:63:6f:01"
-        url = f"http://{self.lms.host}:{self.lms.port}/music/current/cover.jpg?player={pid}"
+        candidates: list[str] = [
+            f"http://{self.lms.host}:{self.lms.port}/music/current/cover.jpg?player={pid}",
+        ]
         try:
-            with urllib.request.urlopen(url, timeout=4.0) as resp:
-                return resp.read(), resp.headers.get("Content-Type", "image/jpeg")
+            np = self.lms.now_playing(pid)
+            artwork_url = str(np.get("artwork_url") or "").strip()
+            if artwork_url:
+                if artwork_url.startswith("/"):
+                    candidates.append(f"http://{self.lms.host}:{self.lms.port}{artwork_url}")
+                elif artwork_url.startswith(("http://", "https://")):
+                    candidates.append(artwork_url)
         except Exception:
-            return None
+            pass
+
+        for url in candidates:
+            try:
+                with urllib.request.urlopen(url, timeout=4.0) as resp:
+                    data = resp.read()
+                    if data:
+                        return data, resp.headers.get("Content-Type", "image/jpeg")
+            except Exception:
+                continue
+        return None
+
+    def rotate_display(self, mode: str = "next") -> dict[str, Any]:
+        """Rotate local Wayland kiosk output via wlr-randr (or re-enable sensor auto-rotate)."""
+        valid_transforms = ("normal", "90", "180", "270")
+        req_mode = (mode or "next").strip().lower()
+        runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+        lock_file = Path(runtime_dir) / "pocobox-rotation-lock"
+
+        if req_mode == "auto":
+            try:
+                lock_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return {"ok": True, "mode": "auto"}
+
+        wlr_randr = shutil.which("wlr-randr")
+        wayland_sock = Path(runtime_dir) / os.environ.get("WAYLAND_DISPLAY", "wayland-0")
+        if not wlr_randr or not wayland_sock.exists():
+            return {"ok": False, "error": "Local Wayland kiosk display not available"}
+
+        env = os.environ.copy()
+        env["XDG_RUNTIME_DIR"] = runtime_dir
+        env.setdefault("WAYLAND_DISPLAY", "wayland-0")
+
+        try:
+            probe = subprocess.run(
+                [wlr_randr, "--json"],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=3.0,
+                check=False,
+            )
+            outputs = json.loads(probe.stdout) if probe.returncode == 0 and probe.stdout.strip() else []
+        except Exception:
+            outputs = []
+
+        out_name = "DSI-1"
+        current_transform = "normal"
+        if outputs and isinstance(outputs, list):
+            first = outputs[0]
+            out_name = str(first.get("name") or out_name)
+            current_transform = str(first.get("transform") or "normal").lower()
+
+        if req_mode == "next":
+            idx = valid_transforms.index(current_transform) if current_transform in valid_transforms else 0
+            target = valid_transforms[(idx + 1) % len(valid_transforms)]
+        elif req_mode in valid_transforms:
+            target = req_mode
+        else:
+            return {"ok": False, "error": f"Invalid rotation mode: {mode}"}
+
+        try:
+            res = subprocess.run(
+                [wlr_randr, "--output", out_name, "--transform", target],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=3.0,
+                check=False,
+            )
+            if res.returncode != 0:
+                return {"ok": False, "error": res.stderr.strip() or "wlr-randr failed"}
+            try:
+                lock_file.write_text(target, encoding="utf-8")
+            except OSError:
+                pass
+            return {"ok": True, "output": out_name, "transform": target}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
 
     def health(self) -> dict[str, Any]:
         lms_ok = False
@@ -1229,9 +1391,12 @@ class VoiceController:
             else {"continuous_listen": False, "listening_state": "stopped"}
         )
         local_stt = self.interpreter.local_stt_health()
+        default_loc = get_default_location()
         return {
             "ok": True,
             "ui_version": UI_VERSION,
+            "location": default_loc.name,
+            "weather_zone": default_loc.kma_zone,
             "provider": self.interpreter.provider,
             "local_stt": local_stt,
             "gemini_model": self.interpreter.gemini_model,
@@ -1312,14 +1477,45 @@ def make_handler(controller: VoiceController) -> type[BaseHTTPRequestHandler]:
             self.end_headers()
             self.wfile.write(body)
 
-        def _send_bytes(self, code: int, data: bytes, content_type: str) -> None:
+        def _send_bytes(self, code: int, data: bytes, content_type: str, head_only: bool = False) -> None:
             self.send_response(code)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("Connection", "close")
             self.end_headers()
-            self.wfile.write(data)
+            if not head_only:
+                self.wfile.write(data)
+
+        def do_HEAD(self) -> None:  # noqa: N802
+            path = self.path.split("?", 1)[0]
+            if path in ("/", "/display"):
+                self._send_bytes(200, DISPLAY_HTML.encode("utf-8"), "text/html; charset=utf-8", head_only=True)
+                return
+            if path == "/display/manifest.webmanifest":
+                self._send_bytes(200, DISPLAY_MANIFEST.encode("utf-8"), "application/manifest+json; charset=utf-8", head_only=True)
+                return
+            if path == "/dashboard":
+                self._send_bytes(200, DASHBOARD_HTML.encode("utf-8"), "text/html; charset=utf-8", head_only=True)
+                return
+            if path == "/display/cover":
+                art = controller.fetch_cover_art()
+                if art is None:
+                    self.send_response(404)
+                    self.send_header("Content-Length", "0")
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    return
+                self._send_bytes(200, art[0], art[1], head_only=True)
+                return
+            if path in ("/health", "/status"):
+                body = json.dumps(controller.health(), ensure_ascii=False).encode("utf-8")
+                self._send_bytes(200, body, "application/json; charset=utf-8", head_only=True)
+                return
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
 
         def do_GET(self) -> None:  # noqa: N802
             path = self.path.split("?", 1)[0]
@@ -1328,6 +1524,9 @@ def make_handler(controller: VoiceController) -> type[BaseHTTPRequestHandler]:
                 return
             if path in ("/", "/display"):
                 self._send_bytes(200, DISPLAY_HTML.encode("utf-8"), "text/html; charset=utf-8")
+                return
+            if path == "/display/manifest.webmanifest":
+                self._send_bytes(200, DISPLAY_MANIFEST.encode("utf-8"), "application/manifest+json; charset=utf-8")
                 return
             if path == "/dashboard":
                 self._send_bytes(200, DASHBOARD_HTML.encode("utf-8"), "text/html; charset=utf-8")
@@ -1414,6 +1613,15 @@ def make_handler(controller: VoiceController) -> type[BaseHTTPRequestHandler]:
                     self._send_json(500, {"ok": False, "error": str(exc)})
                 return
 
+            if path == "/display/rotate":
+                try:
+                    data = json.loads(body.decode("utf-8")) if body else {}
+                    res = controller.rotate_display(str(data.get("mode", "next")))
+                    self._send_json(200 if res.get("ok") else 400, res)
+                except Exception as exc:
+                    self._send_json(500, {"ok": False, "error": str(exc)})
+                return
+
             if path == "/voice/text":
                 try:
                     data = json.loads(body.decode("utf-8")) if body else {}
@@ -1455,6 +1663,18 @@ def make_handler(controller: VoiceController) -> type[BaseHTTPRequestHandler]:
                     data = json.loads(body.decode("utf-8")) if body else {}
                 except json.JSONDecodeError:
                     self._send_json(400, {"ok": False, "error": "Invalid JSON"})
+                    return
+                if bool(data.get("skip_if_active", False)) and controller.quiz.active:
+                    self._send_json(
+                        200,
+                        {
+                            "ok": True,
+                            "action": IntentAction.START_QUIZ.value,
+                            "skipped": True,
+                            "message": "영어 퀴즈가 이미 진행 중입니다.",
+                            "quiz": controller.quiz.public_state(),
+                        },
+                    )
                     return
                 res = controller.start_quiz(
                     topic=str(data.get("topic") or "all"),
