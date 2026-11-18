@@ -7,6 +7,8 @@ Wants=network-online.target
 Type=simple
 User=user
 Group=audio
+LimitRTPRIO=95
+LimitMEMLOCK=infinity
 Environment=XDG_RUNTIME_DIR=/run/user/10000
 Environment=PULSE_SERVER=unix:/run/user/10000/pulse/native
 EnvironmentFile=/etc/pocobox/squeezelite.env
