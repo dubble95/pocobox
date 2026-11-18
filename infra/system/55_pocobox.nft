@@ -3,6 +3,6 @@
 table inet filter {
 	chain input {
 		tcp dport { 3483, 8765, 9000, 9090 } accept comment "Accept PocoBox LMS and Voice API"
-		udp dport 3483 accept comment "Accept LMS SlimProto discovery"
+		udp dport { 3483, 5353 } accept comment "Accept LMS SlimProto discovery and mDNS (pocobox.local)"
 	}
 }
