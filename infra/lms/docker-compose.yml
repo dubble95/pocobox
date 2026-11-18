@@ -1,0 +1,14 @@
+services:
+  lms:
+    image: lmscommunity/lyrionmusicserver:stable
+    container_name: pocobox-lms
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - TZ=Asia/Seoul
+      - HTTP_PORT=9000
+    volumes:
+      - /srv/pocobox/lms/config:/config:rw
+      - /srv/pocobox/lms/music:/music:ro
+      - /srv/pocobox/lms/playlist:/playlist:rw
+      - /etc/localtime:/etc/localtime:ro

@@ -1,19 +1,18 @@
-# 02. PocoBox 프로젝트 설계서 — LMS · USB 자동재생 · 음성명령 뮤직박스
+# 02. PocoBox 프로젝트 설계서 — LMS(TIDAL) · USB DAC 자동재생 · 하이브리드 음성명령
 
-## 1. 프로젝트 목표
+## 1. 확정 요구사항
 
-POCO F1 (`pocobox`) 한 대로 아래 세 가지 기능을 유기적으로 통합한 리눅스 스마트 뮤직 박스를 구축합니다.
-
-1. **Lyrion Music Server (LMS) + 로컬 플레이어(Squeezelite)**
-   - 웹 UI(`:9000`)와 JSON-RPC API(`/jsonrpc.js`)를 제공하는 음악 서버 구축
-   - 로컬 저장소(내부 저장소, 외부 USB, microSD) 및 네트워크 음원 통합 관리 및 재생
-   - 기기 자체 스피커 / 3.5mm 이어폰 단자 / Bluetooth / (지원 시) USB DAC 출력
-2. **외부 USB 연결 시 자동 음악 재생**
-   - USB 메모리/외장 저장장치를 연결하면 자동으로 마운트하고 음원 스캔/재생을 트리거
-   - 분리 시 안전한 언마운트 및 재생 정리
-3. **음성 명령 기반 음악 검색 및 재생**
-   - 한국어/영어 혼합 가수명·곡명·장르·제어 명령("OO 노래 틀어줘", "다음 곡", "멈춰", "볼륨 올려줘") 인식
-   - LMS JSON-RPC API로 검색·대기열 구성·재생 제어 및 상태 피드백
+1. **Lyrion Music Server (LMS) + TIDAL 스트리밍 중심**
+   - `http://pocobox.local:9000` 웹 UI 및 JSON-RPC API(`/jsonrpc.js`) 운영
+   - 공식 **TIDAL 플러그인** 연동으로 TIDAL 음원 검색·재생·플레이리스트/마이믹스 제어
+2. **외부 USB DAC 연결 시 자동 출력 전환 및 자동 음악 재생**
+   - USB 메모리(외장 저장소)는 사용하지 않음
+   - **USB DAC**를 POCO F1에 연결하면 자동으로 감지 → Squeezelite를 해당 USB DAC(ALSA bit-perfect 직결)으로 전환/기동 → **LMS(TIDAL) 자동 재생 시작**
+   - USB DAC 분리 시 자동으로 일시정지하고 안전하게 정리(필요 시 내장 스피커/3.5mm로 대기 전환)
+3. **하이브리드 음성 명령 (빠른 응답 + 높은 한국어/영어 혼합 인식률)**
+   - **로컬 트리거**: 상시 대기 Wake Word(`openWakeWord`) 또는 물리/화면 버튼 트리거 + VAD
+   - **클라우드 STT + Intent 해석**: Gemini API 또는 OpenAI Whisper/LLM API로 약 1초 내외 빠른 응답과 한국어+영어 혼합 아티스트/곡명 높은 인식률 확보
+   - **LMS JSON-RPC 연동**: TIDAL 카탈로그 검색, 재생/일시정지/다음곡/볼륨 조절 즉시 수행
 
 ---
 
@@ -22,108 +21,112 @@ POCO F1 (`pocobox`) 한 대로 아래 세 가지 기능을 유기적으로 통�
 ```mermaid
 flowchart TB
     subgraph HW["POCO F1 Hardware (SDM845 / postmarketOS v26.06)"]
-        MIC["Built-in / External Mic"]
-        SPK["Speaker / 3.5mm / BT / USB DAC"]
-        USB["USB-C (OTG/Host) & microSD"]
+        MIC["Built-in Mic (PulseAudio)"]
+        DAC["External USB DAC (ALSA hw:CARD=...)"]
+        SPK["Fallback: Speaker / 3.5mm"]
     end
 
-    subgraph CORE["Audio & Music Core"]
-        PA["PulseAudio 17.0"]
+    subgraph CORE["Music Server & Player"]
         LMS["Lyrion Music Server (Docker arm64, :9000)"]
-        SL["Squeezelite Local Player"]
+        TIDAL["TIDAL Plugin (OAuth)"]
+        SL["Squeezelite (Native arm64)"]
     end
 
-    subgraph AUTO["Storage Auto-Play Daemon"]
-        UDEV["udev rule + systemd unit"]
-        USBMGR["pocobox-usb-autoplay (Python)"]
+    subgraph DACAUTO["USB DAC Auto-Play Service"]
+        UDEV["udev sound/usb rule"]
+        DACMGR["pocobox-dac-autoplay (Python)"]
     end
 
-    subgraph VOICE["Voice Command Pipeline"]
-        WAKE["Wake Word / Trigger (openWakeWord / Button)"]
-        STT["STT Engine (whisper.cpp local or Cloud API)"]
-        INTENT["Intent & Search Router (Python)"]
+    subgraph VOICE["Hybrid Voice Command Service"]
+        WAKE["Local Wake Word / Trigger + VAD"]
+        CLOUD["Cloud STT + Intent Parser (Gemini / OpenAI)"]
+        ROUTER["LMS/TIDAL JSON-RPC Client"]
     end
 
-    USB --> UDEV --> USBMGR
-    USBMGR -->|"mount + scan/play via JSON-RPC"| LMS
+    LMS <--> TIDAL
+    LMS -->|"SlimProto (FLAC/PCM)"| SL
+    SL -->|"Bit-perfect ALSA"| DAC
+    SL -.->|"Fallback"| SPK
 
-    MIC --> PA --> WAKE --> STT --> INTENT
-    INTENT -->|"search / play / pause / volume"| LMS
+    DAC -->|"USB attach / detach"| UDEV --> DACMGR
+    DACMGR -->|"restart squeezelite on USB ALSA card + LMS play"| SL
+    DACMGR -->|"JSON-RPC play / pause"| LMS
 
-    LMS -->|"SlimProto audio stream"| SL --> PA --> SPK
+    MIC --> WAKE --> CLOUD --> ROUTER -->|"TIDAL search / play / control"| LMS
 ```
 
 ---
 
-## 3. 컴포넌트별 기술 검토 및 핵심 확인 사항
+## 3. 컴포넌트별 상세 설계
 
-### 3.1 Lyrion Music Server (LMS) + Squeezelite
-- **LMS 실행 방식**: Docker (`lmscommunity/lyrionmusicserver:stable`, `linux/arm64` 공식 지원)
-  - Alpine/musl 환경에서 Perl CPAN 바이너리 의존성 충돌을 피하고 업그레이드/백업을 단순화할 수 있습니다.
-  - 볼륨 구성:
-    - `/srv/pocobox/lms/config` → `/config`
-    - `/srv/pocobox/music` (내부 음악 + `/mnt/usb` 바인드 마운트) → `/music`
-    - `/srv/pocobox/playlists` → `/playlist`
-- **로컬 플레이어**: **Squeezelite**
-  - Alpine `apk`에 기본 패키지가 없으므로 Docker 컨테이너(PulseAudio 소켓 마운트) 또는 `arm64` 네이티브 빌드(ALSA/PulseAudio 출력)로 실행합니다.
-  - PulseAudio 17.0과 연동하여 Phosh 볼륨 조절 및 3.5mm/블루투스 자동 라우팅과 호환되도록 구성합니다.
+### 3.1 Lyrion Music Server (LMS) + TIDAL + Squeezelite (Phase 1)
+- **LMS**: `lmscommunity/lyrionmusicserver:stable` (`linux/arm64`, `network_mode: host`)
+  - 호스트 네트워크 사용 이유: SlimProto(`3483/tcp,udp`), Web UI(`9000/tcp`), CLI(`9090/tcp`), mDNS/디스커버리가 컨테이너 NAT 없이 즉시 동작
+  - 데이터 영속화: `/srv/pocobox/lms/{config,music,playlist}`
+  - **TIDAL 연동**: LMS 웹 UI(`http://pocobox.local:9000`) → Settings → Manage Plugins → **TIDAL** 활성화 후 OAuth 기기 인증
+- **Squeezelite (네이티브 arm64 빌드)**:
+  - Alpine Linux(`pocobox`)에서 C 소스로 직접 컴파일 (`/usr/local/bin/squeezelite`)
+  - 장점:
+    - USB DAC 연결 시 ALSA `hw:CARD=<dac>` 직접 점유(**bit-perfect**, 리샘플링 없음, DSD/고해상도 지원)
+    - 메모리 사용량 ~10MB 미만, `systemd`로 즉각 재시작/장치 전환 가능
+    - 환경변수 파일(`/etc/pocobox/squeezelite.env`)만 갱신하고 재시작하면 출력 장치(내장 오디오 ↔ USB DAC)를 1초 내 전환
 
-### 3.2 외부 USB 연결 시 자동 음악 재생 (⚠️ 하드웨어 사전 검증 필요)
-실제 기기 커널 점검에서 다음 사실을 확인했습니다:
-- 커널 모듈 `CONFIG_USB_STORAGE=m`, `CONFIG_SND_USB_AUDIO=m`, `CONFIG_USB_DWC3=y`는 **이미 빌드되어 있음**.
-- 그러나 현재 Device Tree의 USB-C 컨트롤러가 **`dr_mode = "peripheral"`**로 고정되어 있습니다 (`postmarketOS` POCO F1 위키 기준 `USB OTG`는 기본 비활성).
+### 3.2 USB-C Host/OTG 활성화 & USB DAC 자동 재생 (Phase 2)
+실제 기기 커널 점검 결과:
+- `CONFIG_SND_USB_AUDIO=m`, `CONFIG_USB_DWC3=y`, `CONFIG_TYPEC=y`, `CONFIG_USB_ROLE_SWITCH=y` 모두 **커널에 이미 포함됨**.
+- 단, 현재 `/boot/sdm845-xiaomi-beryllium-ebbg.dtb`의 `usb@a600000` 노드에서 `dr_mode = "peripheral"`로 설정되어 있음.
 
-따라서 Phase 2 진입 시 아래 순서를 밟습니다:
-1. **USB Host/OTG 활성화 테스트**
-   - Device Tree(`sdm845-xiaomi-beryllium-ebbg.dtb`)의 `usb@a600000` `dr_mode`를 `host` 또는 `otg`로 변경하거나 커스텀 부트 이미지로 테스트
-   - POCO F1 메인라인 `pmi8998`의 VBUS 5V 부스트 미지원 가능성을 고려해 **외부 전원 공급형 USB-C PD 허브(또는 전원 공급 OTG Y-케이블)**를 사용하면 안정적인 USB 메모리/DAC 인식 및 충전 동시 운용 가능
-   - Wi-Fi SSH(`ssh pocobox`)가 이미 확보되어 있으므로 USB 가젯 네트워크 없이도 기기 관리 가능
-2. **microSD 슬롯 동시 지원**
-   - POCO F1의 microSD 슬롯은 메인라인에서 즉시 동작하므로, 동일한 자동 마운트·자동 재생 파이프라인(`pocobox-media-autoplay`)이 USB 저장소와 microSD 모두를 투명하게 처리하도록 설계합니다.
-3. **자동 재생 동작 흐름**
-   - `udev`가 블록 장치(`/dev/sd*`, `/dev/mmcblk*`) 연결 감지 → `systemd` 서비스 실행
-   - 읽기 전용 또는 안전 옵션으로 `/mnt/external/<label>` 마운트 (`exfat`, `vfat`, `ntfs3`, `ext4` 지원)
-   - 오디오 파일(`.mp3`, `.flac`, `.m4a`, `.wav`, `.ogg`, `.opus`) 탐지 시:
-     - 옵션 1: LMS에 해당 폴더를 재생목록(`playlist play` 또는 `rescan` 후 재생)으로 즉시 전송
-     - 옵션 2: 재생 시작 전/후 짧은 안내음 출력 및 기존 재생 상태 기억
+Phase 2 구현 절차:
+1. **원본 `/boot/boot.img` 백업** (기기 및 Mac 양쪽에 보관 → 언제든 `fastboot flash boot`로 10초 복구 가능)
+2. **DTB `dr_mode` 변경 검증** (`peripheral` → `host` 또는 `otg`) 및 부트 이미지 반영
+   - POCO F1 메인라인 `pmi8998`의 VBUS 5V 공급 여부에 따라 직결 OTG 또는 **전원 공급형 USB-C 허브/Y케이블** 환경에서 `aplay -l` USB DAC 인식 확인
+   - Wi-Fi SSH(`ssh pocobox`)가 이미 확보되어 있어 USB 가젯 네트워크 없이도 안전하게 관리 가능
+3. **USB DAC 핫플러그 자동재생 데몬 (`pocobox-dac-autoplay`)**:
+   - `udev` 룰이 `SUBSYSTEM=="sound", ACTION=="add|remove"` (USB 오디오 카드, `card != 0`) 이벤트 감지
+   - **연결(add) 시**:
+     1. 새로 붙은 USB DAC ALSA 카드 이름(`aplay -l` / `/proc/asound/cards`) 자동 식별
+     2. `/etc/pocobox/squeezelite.env`의 출력 디바이스를 `hw:CARD=<DAC_NAME>`으로 갱신 후 `squeezelite.service` 재시작
+     3. LMS JSON-RPC로 `pocobox` 플레이어 접속 확인 후 자동 재생 시작 (마지막 재생 곡/큐가 있으면 이어서 `play`, 큐가 비어 있으면 설정된 기본 TIDAL 플레이리스트/마이믹스 자동 재생!)
+   - **분리(remove) 시**:
+     1. LMS JSON-RPC로 즉시 `pause` 전송 (내장 스피커로 갑자기 소리 튀는 것 방지)
+     2. Squeezelite를 안전하게 정지하거나 내장 오디오 대기 상태로 전환
 
-### 3.3 음성 명령으로 음악 검색 및 재생
-- **마이크 입력**: 내장 마이크(`alsa_input.platform-sound.HiFi__Mic1__source`) 우선 테스트 (필요 시 3.5mm/Bluetooth/USB 마이크 전환 가능)
-- **설계 선택지 (구현 전 확정 필요)**:
-
-| 항목 | 옵션 A: 완전 로컬 (오프라인) | 옵션 B: 하이브리드 (로컬 Wake Word + 클라우드 STT/LLM) |
-| --- | --- | --- |
-| **호출 방식** | `openWakeWord` (상시 대기) 또는 물리 볼륨키/화면 버튼 | 동일 |
-| **음성 인식(STT)** | `whisper.cpp` (ARM64 NEON, `small`/`base` Q5) | OpenAI Whisper / Gemini Audio API |
-| **한국어+영어 혼합 인식률** | 보통~좋음 (가수명·외래어 오인식 간헐 발생) | **매우 높음** (한국어+영어 곡명/가수명/자연어 의도 파악 우수) |
-| **응답 속도 (SDM845)** | 약 2~5초 (모델 크기 비례) | 약 0.8~1.5초 |
-| **네트워크 의존성** | 없음 (완전 오프라인) | Wi-Fi 필요 (오프라인 시 로컬 폴백 가능) |
-
-- **지원할 기본 음성 명령 예시**:
-  - 재생/검색: *"아이유 노래 틀어줘"*, *"잔나비 주저하는 연인들을 위해 재생해줘"*, *"재즈 틀어줘"*, *"USB 음악 틀어줘"*
-  - 재생 제어: *"멈춰 / 일시정지"*, *"계속 재생"*, *"다음 곡"*, *"이전 곡"*, *"볼륨 올려줘 / 내려줘 / 50으로 해줘"*
+### 3.3 하이브리드 음성 명령 파이프라인 (Phase 3)
+- **오디오 캡처**: POCO F1 내장 마이크(`alsa_input.platform-sound.HiFi__Mic1__source`) + WebRTC VAD / 침묵 감지로 발화 구간만 정확히 잘라냄
+- **호출 방식 (2가지 병행 지원)**:
+  - **상시 호출어 (Wake Word)**: `openWakeWord` (CPU 점유율 낮음, 로컬 오프라인 동작)
+  - **즉시 호출 버튼**: POCO F1 화면의 Phosh 버튼 또는 물리 볼륨키(길게 누르기 등)
+- **클라우드 STT + Intent 해석**:
+  - 녹음된 짧은 오디오(보통 2~5초)를 **Gemini Audio API** (또는 OpenAI Whisper + 경량 LLM)로 전송
+  - 단일 호출로 **음성 → 구조화된 JSON 명령** 반환:
+    ```json
+    {"action": "play_search", "query": "아이유 밤편지", "type": "track", "source": "tidal"}
+    ```
+  - 지원 액션: `play_search`(곡/아티스트/앨범/플레이리스트 검색 후 재생), `pause`, `resume`, `next`, `previous`, `volume_up`, `volume_down`, `volume_set`, `what_is_playing`
+- **LMS JSON-RPC 실행 & 피드백**:
+  - LMS `tidal` 플러그인 검색 메뉴(`["tidal", "items", 0, 10, "search:..."]`) 및 로컬 라이브러리 통합 검색
+  - 명령 인식 시작/완료 시 짧은 비프음(또는 가벼운 TTS 안내) 출력
 
 ---
 
-## 4. 단계별 실행 로드맵
+## 4. 단계별 마일스톤
 
-### Phase 1 — LMS + Squeezelite 기본 오디오 스택 (우선 착수)
-- [ ] `pocobox`에 Docker 설치 및 `systemd` 활성화 확인
+### Phase 1 — LMS + Squeezelite 기반 구축 (진행 중)
+- [ ] `pocobox`에 Docker 설치 및 `docker.service` 활성화
 - [ ] `infra/lms/docker-compose.yml` 작성 및 LMS (`:9000`) 구동
-- [ ] Squeezelite 설치 및 PulseAudio 출력 연동 (스피커/이어폰 테스트 음원 재생 검증)
-- [ ] LMS JSON-RPC 클라이언트(`services/lms_client/`) 구현 및 CLI 테스트
+- [ ] Squeezelite 네이티브 arm64 빌드 및 `systemd` 서비스 구성 (우선 내장 스피커/3.5mm로 LMS 재생 검증)
+- [ ] `services/lms_client/` JSON-RPC CLI 작성 (플레이어 조회, 재생/정지/볼륨, TIDAL 검색 테스트)
+- [ ] 사용자 LMS 웹 UI(`http://pocobox.local:9000`)에서 TIDAL 플러그인 로그인 완료
 
-### Phase 2 — 외부 USB / microSD 자동 마운트 & 자동 재생
-- [ ] POCO F1 USB-C Host/OTG 모드(`dr_mode` DTB 테스트 + 전원 공급 허브 유무 확인) 검증
-- [ ] `udev` 룰 + `systemd` 마운트 & `services/usb_autoplay/` 데몬 구현
-- [ ] USB/SD 삽입 → 자동 마운트 → LMS 즉시 재생, 제거 → 안전한 정지/언마운트 검증
+### Phase 2 — USB-C Host/OTG + USB DAC 자동 재생
+- [ ] 원본 `boot.img` 백업 + DTB `dr_mode` Host/OTG 전환 및 USB DAC ALSA 인식 검증
+- [ ] `udev` + `pocobox-dac-autoplay` 구현 (USB DAC 연결 → bit-perfect 전환 → 자동 재생 / 분리 → 자동 일시정지)
 
-### Phase 3 — 음성 명령 검색 & 재생 파이프라인
-- [ ] POCO F1 내장 마이크 녹음 품질 및 감도 테스트 (`arecord`/`parecord`)
-- [ ] 확정된 트리거(Wake Word / 버튼) + STT + Intent Parser 구현 (`services/voice_control/`)
-- [ ] LMS 라이브러리 검색(아티스트/앨범/곡명 퍼지 매칭) + 재생 제어 연동 및 E2E 테스트
+### Phase 3 — 하이브리드 음성 명령
+- [ ] POCO F1 내장 마이크 녹음 품질 및 감도 검증
+- [ ] `services/voice_control/` 구현 (호출어/버튼 + VAD + 클라우드 STT/Intent + LMS TIDAL 검색/재생)
+- [ ] `systemd` 상시 서비스 등록 및 실사용 튜닝
 
-### Phase 4 — 운영 안정화
-- [ ] 모든 서비스 `systemd` 자동 시작 및 장애 재시작 설정
-- [ ] 기본 비밀번호 변경, SSH 키 전용 전환 등 보안 강화
-- [ ] 배포 자동화 스크립트 (`scripts/deploy.sh` — Mac에서 `pocobox`로 원클릭 배포)
+### Phase 4 — 마무리 및 운영 안정화
+- [ ] 기본 비밀번호 변경, SSH 키 전용 보안 설정
+- [ ] 자동 배포 스크립트 및 전체 운영 매뉴얼 정리
