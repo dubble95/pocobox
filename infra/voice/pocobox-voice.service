@@ -1,0 +1,19 @@
+[Unit]
+Description=PocoBox Hybrid Voice Command Service
+After=network-online.target docker.service pocobox-pulseaudio.service pocobox-squeezelite.service
+Wants=pocobox-pulseaudio.service pocobox-squeezelite.service
+
+[Service]
+Type=simple
+User=user
+Group=audio
+SupplementaryGroups=input
+Environment=XDG_RUNTIME_DIR=/run/user/10000
+Environment=PULSE_SERVER=unix:/run/user/10000/pulse/native
+EnvironmentFile=-/etc/pocobox/voice.env
+ExecStart=/usr/bin/python3 /srv/pocobox/bin/voice_control/daemon.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

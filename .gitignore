@@ -25,6 +25,9 @@ MiUnlockTool/
 *.pem
 config.local.yml
 
+# Generated audio test fixtures
+tests/fixtures/
+
 # OS metadata
 .DS_Store
 Thumbs.db

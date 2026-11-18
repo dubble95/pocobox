@@ -1,7 +1,7 @@
 [Unit]
 Description=PocoBox Squeezelite Audio Player
-After=network-online.target docker.service sound.target
-Wants=network-online.target
+After=network-online.target docker.service sound.target pocobox-pulseaudio.service
+Wants=network-online.target pocobox-pulseaudio.service
 
 [Service]
 Type=simple

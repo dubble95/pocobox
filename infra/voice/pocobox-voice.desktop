@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=PocoBox 음성명령
+Comment=Trigger PocoBox voice music search and control
+Exec=/usr/local/bin/pocobox-voice listen
+Icon=audio-input-microphone
+Terminal=false
+Categories=AudioVideo;Audio;

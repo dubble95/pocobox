@@ -1,0 +1,18 @@
+[Unit]
+Description=PocoBox Headless User PulseAudio Daemon
+After=sound.target systemd-user-sessions.service
+
+[Service]
+Type=simple
+User=user
+Group=audio
+Environment=HOME=/home/user
+Environment=XDG_RUNTIME_DIR=/run/user/10000
+ExecStartPre=/bin/sh -c 'mkdir -p /run/user/10000 && chmod 700 /run/user/10000'
+ExecStart=/usr/bin/pulseaudio --daemonize=no --exit-idle-time=-1 --disallow-exit --log-target=stderr
+ExecStartPost=/bin/sh -c 'for i in 1 2 3 4 5 6 7 8 9 10; do [ -S /run/user/10000/pulse/native ] && break; sleep 0.3; done; PULSE_SERVER=unix:/run/user/10000/pulse/native pactl set-card-profile alsa_card.platform-sound "HiFi" 2>/dev/null || PULSE_SERVER=unix:/run/user/10000/pulse/native pactl set-card-profile alsa_card.platform-sound "Voice Call (Headphones, Mic, Speaker)" 2>/dev/null || true'
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
