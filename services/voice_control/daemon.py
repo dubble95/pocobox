@@ -31,6 +31,7 @@ from voice_control.audio_capture import (  # noqa: E402
 )
 from voice_control.cloud_stt_intent import HybridVoiceInterpreter  # noqa: E402
 from voice_control.continuous_listener import ContinuousVoiceListener  # noqa: E402
+from voice_control.dashboard_ui import DASHBOARD_HTML  # noqa: E402
 from voice_control.display_ui import DISPLAY_HTML, UI_VERSION  # noqa: E402
 from voice_control.executor import VoiceExecutor  # noqa: E402
 from voice_control.feedback import play_chime  # noqa: E402
@@ -289,6 +290,24 @@ class VoiceController:
             self.events.publish({"type": "state", "state": "waiting", "rms": 0.0, "ts": time.time()})
             self._listen_lock.release()
 
+    def update_runtime_config(self, data: dict[str, Any]) -> dict[str, Any]:
+        if "require_wake_word" in data:
+            self.require_wake_word = bool(data["require_wake_word"])
+        if "quiet_threshold" in data:
+            val = max(5.0, min(500.0, float(data["quiet_threshold"])))
+            self.vad_threshold = val
+            if self.continuous_listener:
+                self.continuous_listener.min_threshold = val
+        if "playing_threshold" in data and self.continuous_listener:
+            self.continuous_listener.playing_min_threshold = max(5.0, min(600.0, float(data["playing_threshold"])))
+        if "multiplier" in data and self.continuous_listener:
+            m = max(1.2, min(8.0, float(data["multiplier"])))
+            self.continuous_listener.speech_multiplier = m
+            self.continuous_listener.playing_multiplier = m
+        if data.get("reset_ambient") and self.continuous_listener:
+            self.continuous_listener.ambient_rms = 10.0
+        return {"ok": True, "voice": self.display_state()["voice"]}
+
     def display_control(self, action: str) -> dict[str, Any]:
         player_id = self.lms.resolve_player_id(self.player_name)
         if action == "toggle":
@@ -449,6 +468,9 @@ def make_handler(controller: VoiceController) -> type[BaseHTTPRequestHandler]:
             if path in ("/", "/display"):
                 self._send_bytes(200, DISPLAY_HTML.encode("utf-8"), "text/html; charset=utf-8")
                 return
+            if path == "/dashboard":
+                self._send_bytes(200, DASHBOARD_HTML.encode("utf-8"), "text/html; charset=utf-8")
+                return
             if path == "/display/state":
                 self._send_json(200, controller.display_state())
                 return
@@ -491,6 +513,15 @@ def make_handler(controller: VoiceController) -> type[BaseHTTPRequestHandler]:
             length = int(self.headers.get("Content-Length", "0") or 0)
             body = self.rfile.read(length) if length > 0 else b""
             path = self.path.split("?", 1)[0]
+
+            if path == "/dashboard/config":
+                try:
+                    data = json.loads(body.decode("utf-8")) if body else {}
+                    res = controller.update_runtime_config(data)
+                    self._send_json(200, res)
+                except Exception as exc:
+                    self._send_json(400, {"ok": False, "error": str(exc)})
+                return
 
             if path == "/display/control":
                 try:

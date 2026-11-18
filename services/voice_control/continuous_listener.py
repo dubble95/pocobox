@@ -94,6 +94,9 @@ class ContinuousVoiceListener:
             "ambient_rms": round(self.ambient_rms, 1),
             "current_rms": round(self.current_rms, 1),
             "active_threshold": round(self.current_threshold(), 1),
+            "quiet_threshold": self.min_threshold,
+            "playing_threshold": self.playing_min_threshold,
+            "multiplier": self.playing_multiplier,
             "last_speech_at": self.last_speech_at,
         }
 

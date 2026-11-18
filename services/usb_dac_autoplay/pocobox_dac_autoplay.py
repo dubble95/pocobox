@@ -145,7 +145,8 @@ def setup_pulse_aec(usb_card_id: str | None) -> bool:
     run_pactl(["set-source-mute", source_master, "0"])
     run_pactl(["set-source-volume", source_master, "150%"])
 
-    aec_args = '"analog_gain_control=0 digital_gain_control=1 noise_suppression=1 high_pass_filter=1 voice_detection=0"'
+    # Pure Echo Cancellation + High-Pass Filter (avoid aggressive WebRTC noise_suppression that attenuates quiet speech)
+    aec_args = '"analog_gain_control=0 digital_gain_control=0 noise_suppression=0 high_pass_filter=1 voice_detection=0"'
     res = run_pactl([
         "load-module",
         "module-echo-cancel",
