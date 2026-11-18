@@ -85,21 +85,25 @@ class LMSClient:
         return connected[0]["playerid"]
 
     def player_status(self, player_id: str) -> dict[str, Any]:
-        return self.call(player_id, ["status", "-", 1, "tags:aAlKd"])
+        return self.call(player_id, ["status", "-", 1, "tags:aAlKdc"])
 
     def now_playing(self, player_id: str) -> dict[str, Any]:
         st = self.player_status(player_id)
         loop = st.get("playlist_loop") or []
         track = loop[0] if loop else {}
         return {
+            "player_id": player_id,
             "player_name": st.get("player_name", ""),
             "mode": st.get("mode", "stop"),
             "power": st.get("power", 0),
             "volume": st.get("mixer volume", 0),
             "playlist_tracks": int(st.get("playlist_tracks", 0) or 0),
+            "time": float(st.get("time", 0) or 0),
+            "duration": float(st.get("duration", track.get("duration", 0)) or 0),
             "title": track.get("title", ""),
             "artist": track.get("artist", ""),
             "album": track.get("album", ""),
+            "coverid": str(track.get("coverid", "") or ""),
         }
 
     def power(self, player_id: str, state: int = 1) -> dict[str, Any]:

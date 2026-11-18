@@ -10,15 +10,18 @@ import urllib.request
 import uuid
 from typing import Any
 
-from .aliases import expand_tidal_queries
+from .aliases import expand_tidal_queries, strip_wake_prefix
 from .intent_schema import IntentAction, VoiceIntent
 from .rule_parser import parse_command
 
 SYSTEM_PROMPT = """You are the voice command interpreter for PocoBox, a Korean/English smart music player backed by Lyrion Music Server (LMS) and TIDAL.
 
+The device wake word is "포코" / "포코야" / "포코박스" / "헤이 포코" / "Hey Poco" (phonetic variants like "포쿠야" or "쿠쿠야" at the start of a music command also count as wake_word_detected=true).
+
 Listen to the audio (or read the text) and return ONLY a valid JSON object matching this exact schema:
 {
   "transcript": "<exact spoken text>",
+  "wake_word_detected": true,
   "action": "play_search | play_mix | play_favorite | pause | resume | next | previous | volume_set | volume_up | volume_down | mute | unmute | now_playing | unknown",
   "query": "<primary TIDAL-friendly search query, using official English/canonical artist & song titles when better indexed on TIDAL, e.g. 'IU Through the Night'>",
   "fallback_queries": ["<alternative query 1>", "<original Korean query>"],
@@ -29,10 +32,11 @@ Listen to the audio (or read the text) and return ONLY a valid JSON object match
 }
 
 Rules:
-- For Korean artists/songs, put the official TIDAL English/canonical name in "query" and Korean/shorter variants in "fallback_queries" (e.g. "아이유 밤편지 틀어줘" -> query: "IU Through the Night", fallback_queries: ["밤편지", "IU"]).
+- Strip the wake word ("포코야", "포코박스", "Hey Poco", etc.) from "query" and set "wake_word_detected": true if addressed to PocoBox, otherwise false.
+- For Korean artists/songs, put the official TIDAL English/canonical name in "query" and Korean/shorter variants in "fallback_queries" (e.g. "포코야 아이유 밤편지 틀어줘" -> query: "IU Through the Night", fallback_queries: ["밤편지", "IU"]).
 - For playback controls (pause, resume, next, previous, volume_set/up/down, mute, unmute, now_playing), set query to "".
 - For volume_up use positive delta (default 10), for volume_down use negative delta (default -10), for volume_set set volume 0..100.
-- If the utterance is unrelated to music control (e.g. weather, small talk, noise/silence), return action="unknown".
+- If the utterance is background music lyrics, TV chatter, noise, silence, or unrelated to music control, return action="unknown" and wake_word_detected=false.
 - Return pure JSON only, no markdown fences."""
 
 
@@ -57,6 +61,9 @@ def _intent_from_llm_payload(payload: dict[str, Any], provider: str, raw_fallbac
             if extra.lower() != query.lower() and extra.lower() not in {f.lower() for f in fallbacks}:
                 fallbacks.append(extra)
 
+    _, prefix_wake = strip_wake_prefix(transcript)
+    wake_detected = bool(payload.get("wake_word_detected", False)) or prefix_wake
+
     return VoiceIntent(
         action=IntentAction(action_str) if action_str in {a.value for a in IntentAction} else IntentAction.UNKNOWN,
         raw_text=transcript,
@@ -67,6 +74,7 @@ def _intent_from_llm_payload(payload: dict[str, Any], provider: str, raw_fallbac
         delta=payload.get("delta"),
         confidence=float(payload.get("confidence", 0.9)),
         provider=provider,
+        wake_word_detected=wake_detected,
     )
 
 
@@ -84,7 +92,7 @@ class HybridVoiceInterpreter:
         timeout: float = 15.0,
     ) -> None:
         self.gemini_api_key = gemini_api_key if gemini_api_key is not None else os.environ.get("GEMINI_API_KEY", "").strip()
-        self.gemini_model = gemini_model or os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+        self.gemini_model = gemini_model or os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
         self.openai_api_key = openai_api_key if openai_api_key is not None else os.environ.get("OPENAI_API_KEY", "").strip()
         self.openai_stt_model = openai_stt_model or os.environ.get("OPENAI_STT_MODEL", "gpt-4o-mini-transcribe")
         self.openai_chat_model = openai_chat_model or os.environ.get("OPENAI_CHAT_MODEL", "gpt-4o-mini")

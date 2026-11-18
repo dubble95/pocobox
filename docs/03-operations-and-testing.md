@@ -14,7 +14,9 @@
 | `pocobox-pulseaudio.service` | 헤드리스 PulseAudio (내장 마이크 캡처 + 내장 스피커/3.5mm 폴백) | `/run/user/10000/pulse/native` |
 | `pocobox-squeezelite.service` | Squeezelite `2.0.0-1612` 플레이어 (`pocobox`, 고정 MAC `02:70:6f:63:6f:01`) | ALSA `plughw:CARD=<DAC>` / `pulse` |
 | `pocobox-dac-autoplay.service` | USB DAC 핫플러그 감시 → 출력 자동 전환 → 이어재생 / 분리 시 일시정지 | `udevadm monitor` + `/sys/class/sound` |
-| `pocobox-voice.service` | 하이브리드 음성명령 데몬 (HTTP API + 볼륨업 길게 누르기 트리거) | `http://pocobox.local:8765` |
+| `pocobox-voice.service` | 상시 핸즈프리 음성명령 데몬 (24시간 마이크 감시 + Gemini 3.1 Flash-Lite + Now Playing 웹 UI) | `http://pocobox.local:8765/display` |
+| `greetd` (`cage` + `firefox-esr`) | 항상 켜지는 풀스크린 Now Playing 키오스크 (잠금 화면 없음, 2.5x HiDPI) | POCO F1 디스플레이 (VT7) |
+| `pocobox-backlight.service` | POCO F1 백라이트 상시 유지 (`DISPLAY_BRIGHTNESS=1800/4095`) | `/sys/class/backlight/backlight` |
 | `avahi-daemon` | mDNS 브로드캐스트 (`pocobox.local`) | UDP 5353 |
 
 방화벽 규칙은 `/etc/nftables.d/55_pocobox.nft`에 등록되어 있어 `3483`, `8765`, `9000`, `9090` 포트가 재부팅 후에도 유지됩니다.
@@ -53,10 +55,15 @@ ssh pocobox 'nano /etc/pocobox/voice.env'
 ssh pocobox 'sudo systemctl restart pocobox-voice.service'
 ```
 
-### 3.2 음성 명령 호출 방법 (3가지)
-1. **물리 버튼 트리거 (화면 꺼져도 동작)**: POCO F1의 **볼륨 업(+) 버튼을 0.7초 이상 길게 누름** → 시작 알림음(차임) 후 말씀하시면 자동 침묵 감지(VAD)로 녹음 종료·실행!
-2. **화면 터치 아이콘**: Phosh 앱 목록의 **"PocoBox 음성명령"** 아이콘 탭
-3. **CLI / HTTP API (Mac 또는 `pocobox` 터미널)**:
+### 3.2 음성 명령 호출 방법 (4가지)
+1. **상시 핸즈프리 음성 대기 (기본 ON)**: 화면을 건드리지 않고 바로 **"포코야 아이유 밤편지 틀어줘"**, **"포코야 다음 곡"**, **"포코야 볼륨 50으로 해줘"** 처럼 호출어(`포코` / `포코야` / `포코박스` / `Hey Poco`)와 함께 말씀하시면 자동 감지(적응형 VAD + 0.5초 프리롤) 후 실행됩니다!
+2. **화면 Now Playing 키오스크 터치 버튼**: 항상 켜져 있는 화면 하단의 **🎙 버튼**을 누르면 호출어 없이 바로 명령 가능 (이전/재생·일시정지/다음/볼륨/LMS 이동 버튼도 함께 제공)
+3. **물리 버튼 트리거**: POCO F1의 **볼륨 업(+) 버튼을 0.7초 이상 길게 누름** → 시작 알림음(차임) 후 호출어 없이 바로 명령 가능
+4. **CLI / HTTP API (Mac 또는 `pocobox` 터미널)**:
+
+> **디스플레이 밝기 / Phosh 복구**:
+> - 화면 밝기 조절: `pocobox:/etc/pocobox/display.env`의 `DISPLAY_BRIGHTNESS` (`0~4095`, 기본 `1800`) 수정 후 `sudo systemctl restart pocobox-backlight.service`
+> - 기존 Phosh 모바일 데스크톱 복구: `ssh pocobox 'sudo /srv/pocobox/bin/restore-phosh-display.sh'`
    ```sh
    # 상태 확인
    curl -s http://pocobox.local:8765/health

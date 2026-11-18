@@ -1,0 +1,13 @@
+[Unit]
+Description=PocoBox Always-On Backlight Keeper
+After=greetd.service
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/pocobox/display.env
+ExecStart=/bin/sh -c 'BRIGHT="${DISPLAY_BRIGHTNESS:-1800}"; while true; do [ -w /sys/class/backlight/backlight/bl_power ] && echo 0 > /sys/class/backlight/backlight/bl_power 2>/dev/null || true; [ -w /sys/class/backlight/backlight/brightness ] && echo "$BRIGHT" > /sys/class/backlight/backlight/brightness 2>/dev/null || true; sleep 30; done'
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
