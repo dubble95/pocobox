@@ -2,7 +2,26 @@
 
 from __future__ import annotations
 
+import datetime
 import re
+
+_KST = datetime.timezone(datetime.timedelta(hours=9))
+_KO_WEEKDAYS = ("월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일")
+
+
+def _format_kst_time(now: datetime.datetime | None = None) -> str:
+    dt = (now or datetime.datetime.now(tz=_KST)).astimezone(_KST)
+    period = "오전" if dt.hour < 12 else "오후"
+    hour12 = dt.hour % 12 or 12
+    if dt.minute == 0:
+        return f"지금은 {period} {hour12}시 정각입니다."
+    return f"지금은 {period} {hour12}시 {dt.minute}분입니다."
+
+
+def _format_kst_date(now: datetime.datetime | None = None) -> str:
+    dt = (now or datetime.datetime.now(tz=_KST)).astimezone(_KST)
+    wd = _KO_WEEKDAYS[dt.weekday()]
+    return f"오늘은 {dt.year}년 {dt.month}월 {dt.day}일 {wd}입니다."
 
 from .aliases import (
     ARTIST_ALIASES,
@@ -77,6 +96,33 @@ def parse_command(raw_text: str) -> VoiceIntent:
             action=IntentAction.NOW_PLAYING,
             raw_text=raw_text,
             confidence=0.98,
+            wake_word_detected=wake_detected,
+            language=lang,
+        )
+
+    # 1.5 Instant offline KST time / date Q&A
+    if re.search(
+        r"((지금|현재)?\s*몇\s*시(야|예요|에요|인지|니|인가요)?|현재\s*시간(\s*알려\s*줘)?|시간\s*알려\s*줘|what\s+time\s+is\s+it|current\s+time)",
+        low,
+    ):
+        return VoiceIntent(
+            action=IntentAction.ANSWER_QA,
+            raw_text=raw_text,
+            answer=_format_kst_time(),
+            confidence=0.99,
+            wake_word_detected=wake_detected,
+            language=lang,
+        )
+
+    if re.search(
+        r"(오늘\s*(몇\s*월\s*)?(며칠|몇일)(이야|이에요|예요|이니|인가요)?|오늘\s*날짜(\s*알려\s*줘)?|오늘\s*무슨\s*요일(이야|이에요|예요|이니|인가요)?|무슨\s*요일|what\s+(date|day)\s+is\s+(it|today))",
+        low,
+    ):
+        return VoiceIntent(
+            action=IntentAction.ANSWER_QA,
+            raw_text=raw_text,
+            answer=_format_kst_date(),
+            confidence=0.99,
             wake_word_detected=wake_detected,
             language=lang,
         )

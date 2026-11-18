@@ -174,7 +174,7 @@ DASHBOARD_HTML = """<!doctype html>
         <button onclick="ctrl('vol_up')">🔊 +5</button>
       </div>
       <div class="row">
-        <input id="cmdInput" type="text" placeholder="텍스트 명령 테스트 (예: 아이유 밤편지 틀어줘)" onkeydown="if(event.key==='Enter') sendText()" />
+        <input id="cmdInput" type="text" placeholder="명령 또는 질문 입력 (예: 아이유 틀어줘 / 지금 몇 시야? / 프랑스 수도는?)" onkeydown="if(event.key==='Enter') sendText()" />
         <button class="primary" onclick="sendText()">실행</button>
       </div>
     </div>

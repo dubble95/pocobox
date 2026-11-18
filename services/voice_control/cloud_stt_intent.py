@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import datetime
 import json
 import os
 import urllib.error
@@ -14,12 +15,15 @@ from .aliases import expand_tidal_queries, strip_wake_prefix
 from .intent_schema import IntentAction, VoiceIntent
 from .rule_parser import parse_command
 
-SYSTEM_PROMPT = """You are the voice command interpreter for PocoBox, a Korean/English smart music player backed by Lyrion Music Server (LMS) and TIDAL.
+_KST = datetime.timezone(datetime.timedelta(hours=9))
+_KO_WEEKDAYS = ("월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일")
+
+SYSTEM_PROMPT = """You are the voice assistant and music controller for PocoBox, a Korean/English smart speaker backed by Lyrion Music Server (LMS) and TIDAL.
 
 CRITICAL ANTI-HALLUCINATION RULE:
 The microphone is located near music speakers. Many audio clips contain ONLY background singing, song lyrics, instrumental music, TV audio, or ambient noise.
-- NEVER invent or hallucinate the wake word ("포코", "포코야") or a command ("이 노래 틀어줘") if nobody clearly spoke it!
-- Song vocals/singing are NOT voice commands. If the audio is singing/music without a clear spoken human command addressed to PocoBox, set "is_music_only": true, "wake_word_detected": false, "action": "unknown", "confidence": 0.0.
+- NEVER invent or hallucinate the wake word ("포코", "포코야") or a command/question if nobody clearly spoke it!
+- Song vocals/singing are NOT voice commands or questions. If the audio is singing/music without a clear spoken human request addressed to PocoBox, set "is_music_only": true, "wake_word_detected": false, "action": "unknown", "confidence": 0.0.
 
 The device wake word is ONLY "포코" / "포코야" / "포코박스" / "헤이 포코" / "Hey Poco".
 
@@ -28,22 +32,33 @@ Listen to the audio (or read the text) and return ONLY a valid JSON object match
   "transcript": "<exact spoken words only; empty string if only instrumental/noise>",
   "is_music_only": false,
   "wake_word_detected": true,
-  "action": "play_search | play_mix | play_favorite | pause | resume | next | previous | volume_set | volume_up | volume_down | mute | unmute | now_playing | unknown",
-  "query": "<primary TIDAL-friendly search query, using official English/canonical artist & song titles when better indexed on TIDAL, e.g. 'IU Through the Night'>",
+  "action": "play_search | play_mix | play_favorite | pause | resume | next | previous | volume_set | volume_up | volume_down | mute | unmute | now_playing | answer_qa | unknown",
+  "query": "<primary TIDAL-friendly search query for play_search, else empty string>",
   "fallback_queries": ["<alternative query 1>", "<original Korean query>"],
   "search_type": "track | artist | album | playlist | any",
   "volume": null,
   "delta": null,
+  "answer": "<for answer_qa ONLY: concise, friendly spoken Korean answer in 1-2 short sentences (plain text, no markdown/bullets/emojis); else empty string>",
   "confidence": 0.95
 }
 
 Rules:
 - Strip the wake word ("포코야", "포코박스", "Hey Poco", etc.) from "query" and set "wake_word_detected": true ONLY if the speaker actually said the wake word.
-- If the speaker did NOT specify a song/artist/genre/mix (e.g. only said "포코야" or vague "이 노래 틀어줘"), return action="unknown" unless they clearly said "다시 틀어줘" (resume) or "아무거나 틀어줘" (play_mix).
+- Use action="answer_qa" when the user asks a general question, trivia, math, definition, recommendation, music/artist info, greeting, or time/date question (e.g. "콜드플레이가 어떤 밴드야?", "프랑스 수도가 어디야?", "38 곱하기 17은?", "저녁 메뉴 추천해줘", "내일 무슨 요일이야?"). Keep "answer" short, accurate, and natural to read aloud (1-2 sentences, Korean unless the user asked in English).
+- If the speaker did NOT specify a song/artist/genre/mix/question (e.g. only said "포코야" or vague "이 노래 틀어줘"), return action="unknown" unless they clearly said "다시 틀어줘" (resume) or "아무거나 틀어줘" (play_mix).
 - For Korean artists/songs, put the official TIDAL English/canonical name in "query" and Korean/shorter variants in "fallback_queries" (e.g. "포코야 아이유 밤편지 틀어줘" -> query: "IU Through the Night", fallback_queries: ["밤편지", "IU"]).
-- For playback controls (pause, resume, next, previous, volume_set/up/down, mute, unmute, now_playing), set query to "".
+- For playback controls (pause, resume, next, previous, volume_set/up/down, mute, unmute, now_playing), set query and answer to "".
 - For volume_up use positive delta (default 10), for volume_down use negative delta (default -10), for volume_set set volume 0..100.
 - Return pure JSON only, no markdown fences."""
+
+
+def _build_system_prompt() -> str:
+    now = datetime.datetime.now(tz=_KST)
+    wd = _KO_WEEKDAYS[now.weekday()]
+    return (
+        SYSTEM_PROMPT
+        + f"\n\nCurrent local time (Korea Standard Time, KST): {now.strftime('%Y-%m-%d %H:%M')} ({wd})."
+    )
 
 
 def _parse_json_response(raw: str) -> dict[str, Any]:
@@ -95,6 +110,7 @@ def _intent_from_llm_payload(payload: dict[str, Any], provider: str, raw_fallbac
         confidence=float(payload.get("confidence", 0.9)),
         provider=provider,
         wake_word_detected=wake_detected,
+        answer=str(payload.get("answer") or "").strip(),
     )
 
 
@@ -170,18 +186,18 @@ class HybridVoiceInterpreter:
         b64 = base64.b64encode(wav_bytes).decode("ascii")
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.gemini_model}:generateContent?key={self.gemini_api_key}"
         body = {
-            "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+            "system_instruction": {"parts": [{"text": _build_system_prompt()}]},
             "contents": [
                 {
                     "role": "user",
                     "parts": [
                         {"inline_data": {"mime_type": "audio/wav", "data": b64}},
-                        {"text": "Transcribe and interpret this music voice command as JSON."},
+                        {"text": "Transcribe and interpret this voice command or simple question as JSON."},
                     ],
                 }
             ],
             "generationConfig": {
-                "temperature": 0.1,
+                "temperature": 0.2,
                 "responseMimeType": "application/json",
             },
         }
@@ -192,10 +208,10 @@ class HybridVoiceInterpreter:
     def _gemini_text_intent(self, text: str) -> VoiceIntent:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.gemini_model}:generateContent?key={self.gemini_api_key}"
         body = {
-            "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+            "system_instruction": {"parts": [{"text": _build_system_prompt()}]},
             "contents": [{"role": "user", "parts": [{"text": text}]}],
             "generationConfig": {
-                "temperature": 0.1,
+                "temperature": 0.2,
                 "responseMimeType": "application/json",
             },
         }
@@ -237,7 +253,7 @@ class HybridVoiceInterpreter:
             "temperature": 0.1,
             "response_format": {"type": "json_object"},
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": _build_system_prompt()},
                 {"role": "user", "content": text},
             ],
         }

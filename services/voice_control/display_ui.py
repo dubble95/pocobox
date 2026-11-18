@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-UI_VERSION = "2"
+UI_VERSION = "3"
 
 DISPLAY_HTML = """<!doctype html>
 <html lang="ko">
@@ -371,6 +371,11 @@ DISPLAY_HTML = """<!doctype html>
         } else {
           document.getElementById("subtitleOverlay").classList.remove("visible");
         }
+        return;
+      }
+      if (ev.action === "answer_qa" && ev.ok) {
+        showSubtitle("ok", "💬 포코박스 답변", msg, spoken ? ("Q. " + spoken) : "", 12000);
+        document.getElementById("voiceBanner").textContent = "💬 " + msg;
         return;
       }
       const mode = ev.ok ? "ok" : "";

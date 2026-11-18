@@ -37,6 +37,7 @@ from voice_control.display_ui import DISPLAY_HTML, UI_VERSION  # noqa: E402
 from voice_control.executor import VoiceExecutor  # noqa: E402
 from voice_control.feedback import play_chime  # noqa: E402
 from voice_control.intent_schema import ExecutionResult, IntentAction  # noqa: E402
+from voice_control.tts import speak_text  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -134,6 +135,7 @@ class VoiceController:
         self._duck_lock = threading.Lock()
         self._duck_saved: tuple[str, int] | None = None
         self._manual_busy = False
+        self._tts_speaking = False
         self._last_nokey_warn = 0.0
         self.last_result: dict[str, Any] | None = None
 
@@ -141,7 +143,7 @@ class VoiceController:
         if self.continuous_enabled:
             self.continuous_listener = ContinuousVoiceListener(
                 on_utterance=self.handle_continuous_wav,
-                is_paused_fn=lambda: self._manual_busy,
+                is_paused_fn=lambda: (self._manual_busy or self._tts_speaking),
                 on_state_change=self._on_listener_state,
                 is_music_playing_fn=self._is_music_playing,
                 on_wake_detected=self.handle_wake_detected,
@@ -208,6 +210,23 @@ class VoiceController:
             "ts": time.time(),
         })
 
+    def _speak_answer(self, text: str) -> None:
+        """Speak Q&A / Now-Playing answer via TTS while pausing mic and keeping music ducked."""
+        if not text:
+            return
+        already_ducked = self._duck_saved is not None
+        did_duck = False if already_ducked else self._begin_duck()
+        self._tts_speaking = True
+        try:
+            speak_text(text)
+        finally:
+            self._tts_speaking = False
+            if did_duck:
+                self._restore_duck(skip_restore=False)
+
+    def _is_spoken_action(self, action: str) -> bool:
+        return action in (IntentAction.ANSWER_QA.value, IntentAction.NOW_PLAYING.value)
+
     def handle_wake_utterance(self, wav_bytes: bytes | None, phrase: str) -> None:
         """Process the clean post-wake command captured while music was ducked."""
         skip_restore = False
@@ -241,7 +260,9 @@ class VoiceController:
                 IntentAction.UNMUTE.value,
             ):
                 skip_restore = True
-            if res.ok:
+            if res.ok and self._is_spoken_action(res.action):
+                self._speak_answer(res.message)
+            elif res.ok:
                 play_chime("ok")
         finally:
             self._restore_duck(skip_restore=skip_restore)
@@ -265,6 +286,8 @@ class VoiceController:
             "ts": time.time(),
         })
         log.info("TEXT '%s' -> action=%s ok=%s msg=%s", text, res.action, res.ok, res.message)
+        if not dry_run and res.ok and self._is_spoken_action(res.action):
+            threading.Thread(target=self._speak_answer, args=(res.message,), daemon=True).start()
         return res
 
     def handle_wav(
@@ -384,7 +407,9 @@ class VoiceController:
             # User said just "포코야" -> duck music to 18%, chime, and capture the command cleanly!
             self.listen_once(dry_run=False)
             return
-        if res.ok:
+        if res.ok and self._is_spoken_action(res.action):
+            self._speak_answer(res.message)
+        elif res.ok:
             play_chime("ok")
 
     def listen_once(self, dry_run: bool = False) -> ExecutionResult:
@@ -423,7 +448,10 @@ class VoiceController:
                 IntentAction.UNMUTE.value,
             ):
                 skip_restore = True
-            play_chime("ok" if res.ok else "error")
+            if not dry_run and res.ok and self._is_spoken_action(res.action):
+                self._speak_answer(res.message)
+            else:
+                play_chime("ok" if res.ok else "error")
             return res
         finally:
             self._restore_duck(skip_restore=skip_restore)

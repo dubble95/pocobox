@@ -86,9 +86,13 @@
   {"id": "asr_04", "category": "asr_noise_and_typos", "text": "타이날 마이 믹스 틀어줘", "expected_action": "play_mix"},
   {"id": "asr_05", "category": "asr_noise_and_typos", "text": "다음곡", "expected_action": "next"},
 
+  {"id": "qa_01", "category": "qa_time_date", "text": "지금 몇 시야", "expected_action": "answer_qa"},
+  {"id": "qa_02", "category": "qa_time_date", "text": "포코야 오늘 며칠이야?", "expected_action": "answer_qa", "expected_wake": true},
+  {"id": "qa_03", "category": "qa_time_date", "text": "Hey Poco what time is it", "expected_action": "answer_qa", "expected_wake": true},
+
   {"id": "neg_01", "category": "negative_non_commands", "text": "오늘 날씨 어때?", "expected_action": "unknown"},
   {"id": "neg_02", "category": "negative_non_commands", "text": "배고프다 저녁 뭐 먹지", "expected_action": "unknown"},
-  {"id": "neg_03", "category": "negative_non_commands", "text": "지금 몇 시야", "expected_action": "unknown"},
+  {"id": "neg_03", "category": "negative_non_commands", "text": "그냥 지나가는 말이에요", "expected_action": "unknown"},
   {"id": "neg_04", "category": "negative_non_commands", "text": "포코야", "expected_action": "unknown", "expected_wake": true},
   {"id": "neg_05", "category": "negative_non_commands", "text": "", "expected_action": "unknown"},
   {"id": "neg_06", "category": "negative_non_commands", "text": "   ", "expected_action": "unknown"}

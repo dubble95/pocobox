@@ -35,7 +35,13 @@ class VoiceExecutor:
             )
 
         if intent.action == IntentAction.UNKNOWN:
-            return done(False, "음악 관련 음성 명령으로 인식하지 못했습니다.")
+            return done(False, "음악 명령이나 질문으로 인식하지 못했습니다.")
+
+        if intent.action == IntentAction.ANSWER_QA:
+            answer = (intent.answer or "").strip()
+            if not answer:
+                return done(False, "질문에 대한 답변을 생성하지 못했습니다.")
+            return done(True, answer, {"answer": answer})
 
         try:
             player_id = self.lms.resolve_player_id(self.player_name)
