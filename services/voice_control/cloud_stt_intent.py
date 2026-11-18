@@ -16,11 +16,17 @@ from .rule_parser import parse_command
 
 SYSTEM_PROMPT = """You are the voice command interpreter for PocoBox, a Korean/English smart music player backed by Lyrion Music Server (LMS) and TIDAL.
 
-The device wake word is "포코" / "포코야" / "포코박스" / "헤이 포코" / "Hey Poco" (phonetic variants like "포쿠야" or "쿠쿠야" at the start of a music command also count as wake_word_detected=true).
+CRITICAL ANTI-HALLUCINATION RULE:
+The microphone is located near music speakers. Many audio clips contain ONLY background singing, song lyrics, instrumental music, TV audio, or ambient noise.
+- NEVER invent or hallucinate the wake word ("포코", "포코야") or a command ("이 노래 틀어줘") if nobody clearly spoke it!
+- Song vocals/singing are NOT voice commands. If the audio is singing/music without a clear spoken human command addressed to PocoBox, set "is_music_only": true, "wake_word_detected": false, "action": "unknown", "confidence": 0.0.
+
+The device wake word is ONLY "포코" / "포코야" / "포코박스" / "헤이 포코" / "Hey Poco".
 
 Listen to the audio (or read the text) and return ONLY a valid JSON object matching this exact schema:
 {
-  "transcript": "<exact spoken text>",
+  "transcript": "<exact spoken words only; empty string if only instrumental/noise>",
+  "is_music_only": false,
   "wake_word_detected": true,
   "action": "play_search | play_mix | play_favorite | pause | resume | next | previous | volume_set | volume_up | volume_down | mute | unmute | now_playing | unknown",
   "query": "<primary TIDAL-friendly search query, using official English/canonical artist & song titles when better indexed on TIDAL, e.g. 'IU Through the Night'>",
@@ -32,11 +38,11 @@ Listen to the audio (or read the text) and return ONLY a valid JSON object match
 }
 
 Rules:
-- Strip the wake word ("포코야", "포코박스", "Hey Poco", etc.) from "query" and set "wake_word_detected": true if addressed to PocoBox, otherwise false.
+- Strip the wake word ("포코야", "포코박스", "Hey Poco", etc.) from "query" and set "wake_word_detected": true ONLY if the speaker actually said the wake word.
+- If the speaker did NOT specify a song/artist/genre/mix (e.g. only said "포코야" or vague "이 노래 틀어줘"), return action="unknown" unless they clearly said "다시 틀어줘" (resume) or "아무거나 틀어줘" (play_mix).
 - For Korean artists/songs, put the official TIDAL English/canonical name in "query" and Korean/shorter variants in "fallback_queries" (e.g. "포코야 아이유 밤편지 틀어줘" -> query: "IU Through the Night", fallback_queries: ["밤편지", "IU"]).
 - For playback controls (pause, resume, next, previous, volume_set/up/down, mute, unmute, now_playing), set query to "".
 - For volume_up use positive delta (default 10), for volume_down use negative delta (default -10), for volume_set set volume 0..100.
-- If the utterance is background music lyrics, TV chatter, noise, silence, or unrelated to music control, return action="unknown" and wake_word_detected=false.
 - Return pure JSON only, no markdown fences."""
 
 
@@ -51,6 +57,16 @@ def _parse_json_response(raw: str) -> dict[str, Any]:
 
 def _intent_from_llm_payload(payload: dict[str, Any], provider: str, raw_fallback: str = "") -> VoiceIntent:
     transcript = str(payload.get("transcript") or raw_fallback or "").strip()
+    is_music_only = bool(payload.get("is_music_only", False))
+    if is_music_only:
+        return VoiceIntent(
+            action=IntentAction.UNKNOWN,
+            raw_text="",
+            confidence=0.0,
+            provider=provider,
+            wake_word_detected=False,
+        )
+
     action_str = str(payload.get("action") or "unknown").strip().lower()
     query = str(payload.get("query") or "").strip()
     fallbacks = [str(x).strip() for x in (payload.get("fallback_queries") or []) if str(x).strip()]
@@ -62,7 +78,11 @@ def _intent_from_llm_payload(payload: dict[str, Any], provider: str, raw_fallbac
                 fallbacks.append(extra)
 
     _, prefix_wake = strip_wake_prefix(transcript)
-    wake_detected = bool(payload.get("wake_word_detected", False)) or prefix_wake
+    # Require either real wake prefix in transcript OR explicit wake_word_detected with high confidence
+    wake_detected = prefix_wake or (
+        bool(payload.get("wake_word_detected", False))
+        and any(w in transcript.lower() for w in ("포코", "포쿠", "쿠쿠", "poco"))
+    )
 
     return VoiceIntent(
         action=IntentAction(action_str) if action_str in {a.value for a in IntentAction} else IntentAction.UNKNOWN,

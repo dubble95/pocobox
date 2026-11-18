@@ -126,7 +126,16 @@ class VoiceController:
                 on_utterance=self.handle_continuous_wav,
                 is_paused_fn=lambda: self._manual_busy,
                 on_state_change=self._on_listener_state,
+                is_music_playing_fn=self._is_music_playing,
             )
+
+    def _is_music_playing(self) -> bool:
+        try:
+            pid = self.lms.resolve_player_id(self.player_name)
+            st = self.lms.player_status(pid)
+            return st.get("mode") == "play"
+        except Exception:
+            return False
 
     def _on_listener_state(self, state: str, rms: float) -> None:
         self.events.publish({"type": "state", "state": state, "rms": round(rms, 1), "ts": time.time()})
@@ -180,23 +189,17 @@ class VoiceController:
             self.events.publish({"type": "result", "text": "", "ok": False, "message": res.message, "ignored_no_wake": False})
             return res
 
-        # Immediately push recognized subtitle to the screen BEFORE TIDAL search runs!
-        if intent.raw_text:
-            self.events.publish({
-                "type": "transcript",
-                "text": intent.raw_text,
-                "wake": intent.wake_word_detected or not enforce_wake_word,
-                "ts": time.time(),
-            })
-
         if enforce_wake_word and self.require_wake_word and not intent.wake_word_detected:
-            log.info("Ignored ambient speech without wake word: '%s'", intent.raw_text)
+            # Feed music/ambient RMS back into continuous listener so playing music stops re-triggering!
+            if self.continuous_listener is not None:
+                self.continuous_listener.notify_ambient_rms(metrics.rms_mean)
+            log.info("Ignored ambient/music audio (rms=%.1f): '%s'", metrics.rms_mean, intent.raw_text)
             self.events.publish({
                 "type": "result",
-                "text": intent.raw_text,
+                "text": "",
                 "ok": False,
                 "action": IntentAction.UNKNOWN.value,
-                "message": "호출어('포코야')가 없어 무시되었습니다.",
+                "message": "",
                 "ignored_no_wake": True,
                 "ts": time.time(),
             })
@@ -207,6 +210,15 @@ class VoiceController:
                 intent=intent.to_dict(),
                 details={"vad": metrics.__dict__, "ignored_no_wake_word": True},
             )
+
+        # Immediately push recognized subtitle to the screen BEFORE TIDAL search runs!
+        if intent.raw_text:
+            self.events.publish({
+                "type": "transcript",
+                "text": intent.raw_text,
+                "wake": True,
+                "ts": time.time(),
+            })
 
         res = self.executor.execute(intent, dry_run=dry_run)
         res.details["vad"] = metrics.__dict__

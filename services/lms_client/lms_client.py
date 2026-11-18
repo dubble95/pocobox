@@ -35,7 +35,11 @@ def _score_candidate(item: dict[str, Any], query: str) -> float:
     if item.get("isaudio"):
         score += 5.0
     # Penalize karaoke / instrumental / tribute / cover versions unless explicitly requested
-    for noise in ("karaoke", "instrumental", "tribute", "lullaby", "ringtone", "originally perf", "made famous", "in the style of"):
+    for noise in (
+        "karaoke", "instrumental", "tribute", "lullaby", "ringtone",
+        "originally perf", "made famous", "in the style of",
+        "orchestral", "music box", "piano version", "8-bit", "(cover)",
+    ):
         if noise in name_l and noise not in query_l:
             score -= 35.0
     return score
