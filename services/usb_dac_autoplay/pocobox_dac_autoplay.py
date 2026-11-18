@@ -130,7 +130,10 @@ def boost_hardware_mic_preamp() -> None:
         ("DEC7 Volume", "104"),  # +20 dB digital decimator
     ]
     for name, val in controls:
-        subprocess.run(["amixer", "-c", "0", "cset", f"name={name}", val], capture_output=True, check=False)
+        try:
+            subprocess.run(["amixer", "-c", "0", "cset", f"name={name}", val], capture_output=True, check=False)
+        except FileNotFoundError:
+            return
 
 
 def setup_pulse_aec(usb_card_id: str | None) -> bool:
@@ -311,6 +314,7 @@ def apply_state(client: LMSClient, active_dac: str | None, is_startup: bool = Fa
         return active_dac
 
     if new_dac is not None:
+        boost_hardware_mic_preamp()
         if enable_aec:
             log.info("USB DAC attached: card_id=%s -> configuring WebRTC AEC pipeline", new_dac)
             stop_squeezelite()
@@ -336,6 +340,7 @@ def apply_state(client: LMSClient, active_dac: str | None, is_startup: bool = Fa
         return new_dac
 
     # No USB DAC present
+    boost_hardware_mic_preamp()
     if active_dac is not None:
         log.info("USB DAC detached (was %s)", active_dac)
         trigger_pause(client)
