@@ -22,17 +22,19 @@ class ContinuousVoiceListener:
         self,
         on_utterance: Callable[[bytes], None],
         is_paused_fn: Callable[[], bool] | None = None,
+        on_state_change: Callable[[str, float], None] | None = None,
     ) -> None:
         self.on_utterance = on_utterance
         self.is_paused_fn = is_paused_fn or (lambda: False)
+        self.on_state_change = on_state_change
 
         self.min_threshold = float(os.environ.get("VOICE_VAD_THRESHOLD", "45.0"))
         self.speech_multiplier = float(os.environ.get("VOICE_VAD_MULTIPLIER", "3.5"))
         self.onset_chunks = max(2, int(float(os.environ.get("VOICE_ONSET_SEC", "0.2")) * 1000 // CHUNK_MS))
-        self.silence_chunks = max(4, int(float(os.environ.get("VOICE_SILENCE_SEC", "1.0")) * 1000 // CHUNK_MS))
-        self.max_chunks = max(15, int(float(os.environ.get("VOICE_MAX_SEC", "7.0")) * 1000 // CHUNK_MS))
+        self.silence_chunks = max(4, int(float(os.environ.get("VOICE_SILENCE_SEC", "0.9")) * 1000 // CHUNK_MS))
+        self.max_chunks = max(15, int(float(os.environ.get("VOICE_MAX_SEC", "5.5")) * 1000 // CHUNK_MS))
         self.preroll_chunks = max(2, int(float(os.environ.get("VOICE_PREROLL_SEC", "0.5")) * 1000 // CHUNK_MS))
-        self.cooldown_sec = float(os.environ.get("VOICE_COOLDOWN_SEC", "1.5"))
+        self.cooldown_sec = float(os.environ.get("VOICE_COOLDOWN_SEC", "1.2"))
         self.source = os.environ.get("VOICE_PULSE_SOURCE") or None
 
         self.state: str = "stopped"  # stopped | waiting | recording | processing | paused
@@ -42,6 +44,15 @@ class ContinuousVoiceListener:
 
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+
+    def _set_state(self, new_state: str, rms: float = 0.0) -> None:
+        changed = new_state != self.state
+        self.state = new_state
+        if changed and self.on_state_change is not None:
+            try:
+                self.on_state_change(new_state, rms)
+            except Exception:
+                pass
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -97,7 +108,7 @@ class ContinuousVoiceListener:
             consecutive_speech = 0
             consecutive_silence = 0
             cooldown_until = 0.0
-            self.state = "waiting"
+            self._set_state("waiting")
 
             try:
                 while not self._stop_event.is_set():
@@ -106,7 +117,7 @@ class ContinuousVoiceListener:
                         break
 
                     if self.is_paused_fn():
-                        self.state = "paused"
+                        self._set_state("paused")
                         recording = False
                         captured.clear()
                         consecutive_speech = 0
@@ -118,32 +129,31 @@ class ContinuousVoiceListener:
                     self.current_rms = rms
 
                     if now < cooldown_until:
-                        self.state = "waiting"
+                        self._set_state("waiting")
                         preroll.append(data)
                         continue
 
                     threshold = max(self.min_threshold, self.ambient_rms * self.speech_multiplier)
 
                     if not recording:
-                        self.state = "waiting"
+                        self._set_state("waiting")
                         preroll.append(data)
                         if rms >= threshold:
                             consecutive_speech += 1
                             if consecutive_speech >= self.onset_chunks:
                                 recording = True
-                                self.state = "recording"
+                                self._set_state("recording", rms)
                                 self.last_speech_at = time.time()
                                 captured = list(preroll)
                                 consecutive_silence = 0
                         else:
                             consecutive_speech = 0
-                            # Smoothly track background noise floor (capped so loud music doesn't blind mic forever)
                             capped = min(rms, 1200.0)
                             self.ambient_rms = self.ambient_rms * 0.94 + capped * 0.06
                     else:
                         captured.append(data)
-                        # Use slightly lower sustain threshold so soft endings of Korean words aren't clipped
-                        sustain_threshold = max(self.min_threshold * 0.8, self.ambient_rms * (self.speech_multiplier * 0.75))
+                        # Slightly tighter sustain threshold so playback audio ends capture promptly
+                        sustain_threshold = max(self.min_threshold * 0.85, self.ambient_rms * (self.speech_multiplier * 0.9))
                         if rms >= sustain_threshold:
                             consecutive_silence = 0
                         else:
@@ -156,13 +166,13 @@ class ContinuousVoiceListener:
                             consecutive_speech = 0
                             consecutive_silence = 0
                             preroll.clear()
-                            self.state = "processing"
+                            self._set_state("processing", rms)
                             try:
                                 self.on_utterance(wav_bytes)
                             except Exception as exc:
                                 log.error("Continuous utterance handler error: %s", exc)
                             cooldown_until = time.monotonic() + self.cooldown_sec
-                            self.state = "waiting"
+                            self._set_state("waiting")
             finally:
                 proc.terminate()
                 try:

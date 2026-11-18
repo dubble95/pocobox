@@ -1,6 +1,8 @@
-"""Always-on Now Playing Kiosk HTML/CSS/JS UI for the POCO F1 screen."""
+"""Always-on Now Playing Kiosk HTML/CSS/JS UI with real-time SSE voice subtitles."""
 
 from __future__ import annotations
+
+UI_VERSION = "2"
 
 DISPLAY_HTML = """<!doctype html>
 <html lang="ko">
@@ -16,8 +18,9 @@ DISPLAY_HTML = """<!doctype html>
     --accent: #38bdf8;
     --ok: #22c55e;
     --rec: #ef4444;
-    --glass: rgba(18, 22, 32, 0.56);
-    --border: rgba(255, 255, 255, 0.12);
+    --warn: #f59e0b;
+    --glass: rgba(18, 22, 32, 0.58);
+    --border: rgba(255, 255, 255, 0.14);
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; user-select: none; }
   html, body {
@@ -43,8 +46,7 @@ DISPLAY_HTML = """<!doctype html>
     position: relative; z-index: 2;
     display: flex; flex-direction: column; justify-content: space-between;
     height: 100%; width: 100%;
-    /* Extra top padding to clear POCO F1 camera notch cleanly */
-    padding: 46px 24px 28px 24px;
+    padding: 46px 22px 24px 22px;
     max-width: 720px; margin: 0 auto;
   }
   .topbar {
@@ -61,17 +63,17 @@ DISPLAY_HTML = """<!doctype html>
     width: 9px; height: 9px; border-radius: 50%; background: var(--ok);
     box-shadow: 0 0 10px var(--ok);
   }
-  .dot.recording { background: var(--rec); box-shadow: 0 0 14px var(--rec); animation: pulse 0.9s infinite; }
-  .dot.processing { background: #f59e0b; box-shadow: 0 0 14px #f59e0b; animation: pulse 0.6s infinite; }
+  .dot.recording { background: var(--rec); box-shadow: 0 0 14px var(--rec); animation: pulse 0.85s infinite; }
+  .dot.processing { background: var(--warn); box-shadow: 0 0 14px var(--warn); animation: pulse 0.6s infinite; }
   .dot.off { background: #64748b; box-shadow: none; }
-  @keyframes pulse { 0%,100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.4); opacity: 0.65; } }
+  @keyframes pulse { 0%,100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.45); opacity: 0.6; } }
 
   .center {
     flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
-    text-align: center; gap: 22px; min-height: 0;
+    text-align: center; gap: 18px; min-height: 0;
   }
   .art-wrap {
-    width: min(76vw, 42vh, 360px); height: min(76vw, 42vh, 360px);
+    width: min(74vw, 39vh, 340px); height: min(74vw, 39vh, 340px);
     border-radius: 26px; overflow: hidden;
     background: rgba(255,255,255,0.06);
     border: 1px solid rgba(255,255,255,0.16);
@@ -79,33 +81,28 @@ DISPLAY_HTML = """<!doctype html>
     display: flex; align-items: center; justify-content: center;
     position: relative;
   }
-  .art-wrap img {
-    width: 100%; height: 100%; object-fit: cover; display: block;
-  }
-  .art-placeholder {
-    font-size: 68px; opacity: 0.35;
-  }
+  .art-wrap img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .art-placeholder { font-size: 64px; opacity: 0.35; }
+
   .meta { width: 100%; padding: 0 6px; }
   .title {
-    font-size: clamp(24px, 5.5vw, 34px); font-weight: 800; line-height: 1.22;
-    letter-spacing: -0.02em; margin: 0 0 8px 0;
+    font-size: clamp(23px, 5.4vw, 32px); font-weight: 800; line-height: 1.22;
+    letter-spacing: -0.02em; margin: 0 0 6px 0;
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
   }
   .artist {
-    font-size: clamp(17px, 4vw, 22px); font-weight: 600; color: var(--accent);
+    font-size: clamp(16px, 4vw, 21px); font-weight: 600; color: var(--accent);
     margin: 0 0 4px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .album {
-    font-size: 14px; color: var(--muted);
+    font-size: 13px; color: var(--muted);
     margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  .clock-idle {
-    font-size: 56px; font-weight: 800; letter-spacing: -0.03em; margin-bottom: 4px;
-  }
+  .clock-idle { font-size: 52px; font-weight: 800; letter-spacing: -0.03em; margin-bottom: 4px; }
 
   .progress-wrap { width: 100%; }
   .bar-bg {
-    width: 100%; height: 7px; border-radius: 999px;
+    width: 100%; height: 6px; border-radius: 999px;
     background: rgba(255,255,255,0.16); overflow: hidden;
   }
   .bar-fill {
@@ -115,32 +112,99 @@ DISPLAY_HTML = """<!doctype html>
   }
   .times {
     display: flex; justify-content: space-between;
-    font-size: 13px; color: var(--muted); margin-top: 8px; font-variant-numeric: tabular-nums;
+    font-size: 13px; color: var(--muted); margin-top: 7px; font-variant-numeric: tabular-nums;
   }
 
   .controls {
-    display: flex; align-items: center; justify-content: center; gap: 18px;
-    margin-top: 12px;
+    display: flex; align-items: center; justify-content: center; gap: 14px;
+    margin-top: 6px;
   }
   .btn {
     border: 1px solid var(--border); background: var(--glass); color: var(--fg);
-    border-radius: 50%; width: 58px; height: 58px;
-    font-size: 22px; font-weight: 700; cursor: pointer;
+    border-radius: 50%; width: 54px; height: 54px;
+    font-size: 20px; font-weight: 700; cursor: pointer;
     display: inline-flex; align-items: center; justify-content: center;
     backdrop-filter: blur(12px);
   }
   .btn:active { transform: scale(0.92); background: rgba(255,255,255,0.2); }
   .btn.primary {
-    width: 74px; height: 74px; font-size: 28px;
+    width: 68px; height: 68px; font-size: 26px;
     background: #ffffff; color: #0b0d12; border-color: #ffffff;
   }
   .btn.mic {
     background: rgba(56, 189, 248, 0.22); border-color: rgba(56, 189, 248, 0.55);
   }
 
+  /* Live floating subtitle box */
+  .subtitle-overlay {
+    position: fixed;
+    left: 18px; right: 18px; bottom: 82px;
+    max-width: 680px; margin: 0 auto;
+    z-index: 20;
+    pointer-events: none;
+    opacity: 0;
+    transform: translateY(18px) scale(0.97);
+    transition: opacity 0.22s ease, transform 0.22s ease;
+  }
+  .subtitle-overlay.visible {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  .subtitle-card {
+    background: rgba(8, 12, 22, 0.88);
+    border: 1.5px solid rgba(56, 189, 248, 0.5);
+    border-radius: 22px;
+    padding: 16px 20px;
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.72);
+    backdrop-filter: blur(18px);
+    text-align: center;
+  }
+  .subtitle-card.recording { border-color: rgba(239, 68, 68, 0.85); }
+  .subtitle-card.processing { border-color: rgba(245, 158, 11, 0.85); }
+  .subtitle-card.ok { border-color: rgba(34, 197, 94, 0.8); }
+  .subtitle-card.ambient { border-color: rgba(148, 163, 184, 0.45); background: rgba(10, 14, 24, 0.76); }
+
+  .sub-header {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    font-size: 12px; font-weight: 700; letter-spacing: 0.03em;
+    color: var(--accent); margin-bottom: 6px;
+  }
+  .subtitle-card.recording .sub-header { color: #fca5a5; }
+  .subtitle-card.processing .sub-header { color: #fcd34d; }
+  .subtitle-card.ok .sub-header { color: #86efac; }
+  .subtitle-card.ambient .sub-header { color: #94a3b8; }
+
+  .sub-text {
+    font-size: clamp(20px, 5.2vw, 28px);
+    font-weight: 800; line-height: 1.32;
+    color: #ffffff;
+    word-break: keep-all;
+  }
+  .subtitle-card.ambient .sub-text {
+    font-size: clamp(16px, 4.2vw, 21px);
+    font-weight: 600;
+    color: rgba(241, 245, 249, 0.85);
+  }
+  .sub-status {
+    margin-top: 8px;
+    font-size: 14px; font-weight: 600;
+    color: var(--muted);
+  }
+  .wave {
+    display: inline-flex; align-items: center; gap: 3px; height: 14px;
+  }
+  .wave span {
+    width: 3px; height: 6px; border-radius: 3px; background: currentColor;
+    animation: eq 0.7s infinite ease-in-out;
+  }
+  .wave span:nth-child(2) { animation-delay: 0.15s; }
+  .wave span:nth-child(3) { animation-delay: 0.3s; }
+  .wave span:nth-child(4) { animation-delay: 0.45s; }
+  @keyframes eq { 0%,100% { height: 4px; } 50% { height: 14px; } }
+
   .footer {
     display: flex; justify-content: space-between; align-items: center; gap: 10px;
-    margin-top: 16px;
+    margin-top: 10px;
   }
   .voice-banner {
     flex: 1; padding: 10px 14px; border-radius: 14px;
@@ -158,6 +222,14 @@ DISPLAY_HTML = """<!doctype html>
 <body>
   <div id="backdrop" class="backdrop"></div>
   <div class="backdrop-grad"></div>
+
+  <div id="subtitleOverlay" class="subtitle-overlay">
+    <div id="subtitleCard" class="subtitle-card">
+      <div id="subHeader" class="sub-header"></div>
+      <div id="subText" class="sub-text"></div>
+      <div id="subStatus" class="sub-status"></div>
+    </div>
+  </div>
 
   <div class="app">
     <div class="topbar">
@@ -198,13 +270,15 @@ DISPLAY_HTML = """<!doctype html>
     </div>
 
     <div class="footer">
-      <div id="voiceBanner" class="voice-banner">음성 명령 대기 중 ("포코야 아이유 노래 틀어줘")</div>
+      <div id="voiceBanner" class="voice-banner">🎙 "포코야 아이유 밤편지 틀어줘"</div>
       <a class="link-btn" id="lmsLink" href="http://127.0.0.1:9000/material/" target="_self">LMS</a>
     </div>
   </div>
 
 <script>
+  const CLIENT_UI_VERSION = "__UI_VERSION__";
   let lastCoverKey = "";
+  let hideTimer = null;
 
   function fmtTime(sec) {
     sec = Math.max(0, Math.floor(sec || 0));
@@ -220,6 +294,108 @@ DISPLAY_HTML = """<!doctype html>
     document.getElementById("idleClock").textContent = hh + ":" + mm;
   }
 
+  function setMicBadge(ls, continuous) {
+    const dot = document.getElementById("micDot");
+    const micText = document.getElementById("micText");
+    dot.className = "dot " + (ls === "recording" ? "recording" : ls === "processing" ? "processing" : ls === "waiting" ? "" : "off");
+    if (ls === "recording") micText.textContent = "음성 듣는 중...";
+    else if (ls === "processing") micText.textContent = "인식 중...";
+    else if (continuous) micText.textContent = "상시 음성 대기";
+    else micText.textContent = "음성 대기";
+  }
+
+  function showSubtitle(mode, headerHtml, text, statusText, autoHideMs) {
+    const overlay = document.getElementById("subtitleOverlay");
+    const card = document.getElementById("subtitleCard");
+    card.className = "subtitle-card " + (mode || "");
+    document.getElementById("subHeader").innerHTML = headerHtml || "";
+    document.getElementById("subText").textContent = text || "";
+    document.getElementById("subStatus").textContent = statusText || "";
+    overlay.classList.add("visible");
+
+    if (hideTimer) clearTimeout(hideTimer);
+    if (autoHideMs && autoHideMs > 0) {
+      hideTimer = setTimeout(() => {
+        overlay.classList.remove("visible");
+      }, autoHideMs);
+    }
+  }
+
+  function handleVoiceEvent(ev) {
+    if (!ev || !ev.type) return;
+
+    if (ev.type === "state") {
+      setMicBadge(ev.state, true);
+      if (ev.state === "recording") {
+        showSubtitle(
+          "recording",
+          '<span class="wave"><span></span><span></span><span></span><span></span></span> 음성 감지 중',
+          "듣고 있습니다...",
+          "말씀을 마치면 자동으로 인식합니다",
+          0
+        );
+      } else if (ev.state === "processing") {
+        showSubtitle(
+          "processing",
+          "✨ Gemini 음성 인식 중",
+          "분석하고 있습니다...",
+          "",
+          0
+        );
+      }
+      return;
+    }
+
+    if (ev.type === "transcript") {
+      const spoken = ev.text || "";
+      if (!spoken) return;
+      const isWake = Boolean(ev.wake);
+      showSubtitle(
+        isWake ? "processing" : "ambient",
+        isWake ? "🎙 인식된 음성" : "💬 감지된 음성 (호출어 없음)",
+        "“" + spoken + "”",
+        isWake ? "명령 실행 중..." : "‘포코야’라고 불러주세요",
+        isWake ? 0 : 4000
+      );
+      document.getElementById("voiceBanner").textContent = "🎙 “" + spoken + "”";
+      return;
+    }
+
+    if (ev.type === "result") {
+      const spoken = ev.text || "";
+      const msg = ev.message || "";
+      if (ev.ignored_no_wake) {
+        if (spoken) {
+          showSubtitle("ambient", "💬 주변 음성 (호출어 없음)", "“" + spoken + "”", "명령 실행 시 ‘포코야’로 시작해 주세요", 4500);
+          document.getElementById("voiceBanner").textContent = "💬 “" + spoken + "”";
+        } else {
+          document.getElementById("subtitleOverlay").classList.remove("visible");
+        }
+        return;
+      }
+      const mode = ev.ok ? "ok" : "";
+      const hdr = ev.ok ? "✅ 음성 명령 완료" : "⚠️ 음성 명령";
+      showSubtitle(mode, hdr, spoken ? ("“" + spoken + "”") : msg, spoken ? msg : "", 6500);
+      document.getElementById("voiceBanner").textContent = "🎙 " + (spoken ? ("“" + spoken + "” → ") : "") + msg;
+      setTimeout(refresh, 350);
+    }
+  }
+
+  function connectEvents() {
+    try {
+      const es = new EventSource("/display/events");
+      es.onmessage = (e) => {
+        try { handleVoiceEvent(JSON.parse(e.data)); } catch (_) {}
+      };
+      es.onerror = () => {
+        es.close();
+        setTimeout(connectEvents, 2000);
+      };
+    } catch (_) {
+      setTimeout(connectEvents, 3000);
+    }
+  }
+
   async function ctrl(action) {
     try {
       await fetch("/display/control", {
@@ -232,11 +408,9 @@ DISPLAY_HTML = """<!doctype html>
   }
 
   async function triggerMic() {
-    document.getElementById("voiceBanner").textContent = "🎙 듣고 있습니다... 말씀해 주세요";
     try {
       const r = await fetch("/voice/listen", {method: "POST", body: "{}"});
-      const j = await r.json();
-      if (j.message) document.getElementById("voiceBanner").textContent = "🎙 " + j.message;
+      await r.json();
       refresh();
     } catch (e) {}
   }
@@ -247,23 +421,15 @@ DISPLAY_HTML = """<!doctype html>
       const r = await fetch("/display/state", {cache: "no-store"});
       const s = await r.json();
 
-      // Update LMS Material Skin link dynamically to current host
+      if (s.ui_version && s.ui_version !== CLIENT_UI_VERSION) {
+        location.reload();
+        return;
+      }
+
       document.getElementById("lmsLink").href = "http://" + location.hostname + ":9000/material/";
-
-      // Mic / Always-on indicator
-      const dot = document.getElementById("micDot");
-      const micText = document.getElementById("micText");
-      const ls = s.voice.listening_state || "stopped";
-      dot.className = "dot " + (ls === "recording" ? "recording" : ls === "processing" ? "processing" : ls === "waiting" ? "" : "off");
-      if (ls === "recording") micText.textContent = "음성 듣는 중...";
-      else if (ls === "processing") micText.textContent = "명령 처리 중...";
-      else if (s.voice.continuous_listen) micText.textContent = "상시 음성 대기";
-      else micText.textContent = "음성 대기 (버튼)";
-
-      // Output badge (USB DAC vs Speaker)
+      setMicBadge(s.voice.listening_state || "stopped", Boolean(s.voice.continuous_listen));
       document.getElementById("outputBadge").textContent = s.audio_output_label || "🔊 오디오";
 
-      // Track info
       const np = s.now_playing || {};
       const hasTrack = Boolean(np.title);
       document.getElementById("idleClock").style.display = hasTrack ? "none" : "block";
@@ -271,8 +437,7 @@ DISPLAY_HTML = """<!doctype html>
       document.getElementById("trackArtist").textContent = hasTrack ? (np.artist || "Unknown Artist") : '"포코야 ..." 라고 불러보세요';
       document.getElementById("trackAlbum").textContent = hasTrack ? (np.album || "TIDAL") : "USB DAC 연결 시 자동 이어재생";
 
-      const isPlaying = np.mode === "play";
-      document.getElementById("playBtn").textContent = isPlaying ? "⏸" : "▶";
+      document.getElementById("playBtn").textContent = (np.mode === "play") ? "⏸" : "▶";
       document.getElementById("volText").textContent = "VOL " + (np.volume ?? 0) + "%";
 
       const elapsed = Number(np.time || 0);
@@ -282,7 +447,6 @@ DISPLAY_HTML = """<!doctype html>
       document.getElementById("timeElapsed").textContent = fmtTime(elapsed);
       document.getElementById("timeTotal").textContent = fmtTime(duration);
 
-      // Artwork refresh only when track changes
       const coverKey = (np.title || "") + "|" + (np.artist || "") + "|" + (np.coverid || "");
       const img = document.getElementById("coverImg");
       const ph = document.getElementById("artPlaceholder");
@@ -301,18 +465,13 @@ DISPLAY_HTML = """<!doctype html>
         ph.style.display = "block";
         bg.style.backgroundImage = "none";
       }
-
-      // Last voice command banner
-      if (s.voice.last_result && s.voice.last_result.message) {
-        const raw = (s.voice.last_result.intent && s.voice.last_result.intent.raw_text) ? ("“" + s.voice.last_result.intent.raw_text + "” → ") : "";
-        document.getElementById("voiceBanner").textContent = "🎙 " + raw + s.voice.last_result.message;
-      }
     } catch (e) {}
   }
 
+  connectEvents();
   refresh();
   setInterval(refresh, 1000);
 </script>
 </body>
 </html>
-"""
+""".replace("__UI_VERSION__", UI_VERSION)

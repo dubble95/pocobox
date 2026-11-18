@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""PocoBox Always-On Hybrid Voice Control & Now-Playing Display Daemon."""
+"""PocoBox Always-On Hybrid Voice Control & Now-Playing Display Daemon with Live SSE Subtitles."""
 
 from __future__ import annotations
 
 import json
 import logging
 import os
+import queue
 import struct
 import sys
 import threading
 import time
-import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -31,7 +31,7 @@ from voice_control.audio_capture import (  # noqa: E402
 )
 from voice_control.cloud_stt_intent import HybridVoiceInterpreter  # noqa: E402
 from voice_control.continuous_listener import ContinuousVoiceListener  # noqa: E402
-from voice_control.display_ui import DISPLAY_HTML  # noqa: E402
+from voice_control.display_ui import DISPLAY_HTML, UI_VERSION  # noqa: E402
 from voice_control.executor import VoiceExecutor  # noqa: E402
 from voice_control.feedback import play_chime  # noqa: E402
 from voice_control.intent_schema import ExecutionResult, IntentAction  # noqa: E402
@@ -69,6 +69,38 @@ def _read_audio_output_label() -> str:
     return "🔊 내장 스피커"
 
 
+class EventHub:
+    """Thread-safe Server-Sent Events pub/sub hub for instant live subtitles on the display."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._subs: set[queue.Queue[str]] = set()
+
+    def subscribe(self) -> queue.Queue[str]:
+        q: queue.Queue[str] = queue.Queue(maxsize=32)
+        with self._lock:
+            self._subs.add(q)
+        return q
+
+    def unsubscribe(self, q: queue.Queue[str]) -> None:
+        with self._lock:
+            self._subs.discard(q)
+
+    def publish(self, event: dict[str, Any]) -> None:
+        payload = f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        with self._lock:
+            subs = list(self._subs)
+        for q in subs:
+            try:
+                q.put_nowait(payload)
+            except queue.Full:
+                try:
+                    q.get_nowait()
+                    q.put_nowait(payload)
+                except Exception:
+                    pass
+
+
 class VoiceController:
     def __init__(self) -> None:
         self.lms = LMSClient(
@@ -82,6 +114,7 @@ class VoiceController:
         self.continuous_enabled = _env_bool("CONTINUOUS_LISTEN", True)
         self.vad_threshold = float(os.environ.get("VOICE_VAD_THRESHOLD", "45.0"))
 
+        self.events = EventHub()
         self._listen_lock = threading.Lock()
         self._manual_busy = False
         self._last_nokey_warn = 0.0
@@ -92,16 +125,30 @@ class VoiceController:
             self.continuous_listener = ContinuousVoiceListener(
                 on_utterance=self.handle_continuous_wav,
                 is_paused_fn=lambda: self._manual_busy,
+                on_state_change=self._on_listener_state,
             )
+
+    def _on_listener_state(self, state: str, rms: float) -> None:
+        self.events.publish({"type": "state", "state": state, "rms": round(rms, 1), "ts": time.time()})
 
     def start_background_listeners(self) -> None:
         if self.continuous_listener is not None:
             self.continuous_listener.start()
 
     def handle_text(self, text: str, dry_run: bool = False, use_cloud: bool = True) -> ExecutionResult:
+        self.events.publish({"type": "transcript", "text": text, "wake": True, "ts": time.time()})
         intent = self.interpreter.interpret_text(text, use_cloud_fallback=use_cloud)
         res = self.executor.execute(intent, dry_run=dry_run)
         self.last_result = res.to_dict()
+        self.events.publish({
+            "type": "result",
+            "text": intent.raw_text or text,
+            "ok": res.ok,
+            "action": res.action,
+            "message": res.message,
+            "ignored_no_wake": False,
+            "ts": time.time(),
+        })
         log.info("TEXT '%s' -> action=%s ok=%s msg=%s", text, res.action, res.ok, res.message)
         return res
 
@@ -115,6 +162,7 @@ class VoiceController:
                 details={"vad": metrics.__dict__},
             )
             self.last_result = res.to_dict()
+            self.events.publish({"type": "result", "text": "", "ok": False, "message": res.message, "ignored_no_wake": True})
             return res
 
         trimmed = trim_silence_wav(wav_bytes, threshold=max(20.0, self.vad_threshold * 0.7))
@@ -129,10 +177,29 @@ class VoiceController:
                 details={"vad": metrics.__dict__},
             )
             self.last_result = res.to_dict()
+            self.events.publish({"type": "result", "text": "", "ok": False, "message": res.message, "ignored_no_wake": False})
             return res
+
+        # Immediately push recognized subtitle to the screen BEFORE TIDAL search runs!
+        if intent.raw_text:
+            self.events.publish({
+                "type": "transcript",
+                "text": intent.raw_text,
+                "wake": intent.wake_word_detected or not enforce_wake_word,
+                "ts": time.time(),
+            })
 
         if enforce_wake_word and self.require_wake_word and not intent.wake_word_detected:
             log.info("Ignored ambient speech without wake word: '%s'", intent.raw_text)
+            self.events.publish({
+                "type": "result",
+                "text": intent.raw_text,
+                "ok": False,
+                "action": IntentAction.UNKNOWN.value,
+                "message": "호출어('포코야')가 없어 무시되었습니다.",
+                "ignored_no_wake": True,
+                "ts": time.time(),
+            })
             return ExecutionResult(
                 ok=False,
                 action=IntentAction.UNKNOWN.value,
@@ -144,6 +211,15 @@ class VoiceController:
         res = self.executor.execute(intent, dry_run=dry_run)
         res.details["vad"] = metrics.__dict__
         self.last_result = res.to_dict()
+        self.events.publish({
+            "type": "result",
+            "text": intent.raw_text,
+            "ok": res.ok,
+            "action": res.action,
+            "message": res.message,
+            "ignored_no_wake": False,
+            "ts": time.time(),
+        })
         log.info("AUDIO (%.2fs) -> '%s' action=%s ok=%s", metrics.duration_sec, intent.raw_text, res.action, res.ok)
         return res
 
@@ -164,9 +240,10 @@ class VoiceController:
         self._manual_busy = True
         try:
             play_chime("listen")
+            self.events.publish({"type": "state", "state": "recording", "rms": 0.0, "ts": time.time()})
             wav_bytes, metrics = record_utterance_wav(
-                max_duration_sec=float(os.environ.get("VOICE_MAX_SEC", "8.0")),
-                silence_timeout_sec=float(os.environ.get("VOICE_SILENCE_SEC", "1.2")),
+                max_duration_sec=float(os.environ.get("VOICE_MAX_SEC", "6.0")),
+                silence_timeout_sec=float(os.environ.get("VOICE_SILENCE_SEC", "1.0")),
                 min_threshold=self.vad_threshold,
                 source=os.environ.get("VOICE_PULSE_SOURCE") or None,
             )
@@ -179,12 +256,15 @@ class VoiceController:
                     details={"vad": metrics.__dict__},
                 )
                 self.last_result = res.to_dict()
+                self.events.publish({"type": "result", "text": "", "ok": False, "message": res.message, "ignored_no_wake": False})
                 return res
+            self.events.publish({"type": "state", "state": "processing", "rms": 0.0, "ts": time.time()})
             res = self.handle_wav(wav_bytes, dry_run=dry_run, enforce_wake_word=False)
             play_chime("ok" if res.ok else "error")
             return res
         finally:
             self._manual_busy = False
+            self.events.publish({"type": "state", "state": "waiting", "rms": 0.0, "ts": time.time()})
             self._listen_lock.release()
 
     def display_control(self, action: str) -> dict[str, Any]:
@@ -220,6 +300,7 @@ class VoiceController:
         voice_info["last_result"] = self.last_result
         return {
             "ok": True,
+            "ui_version": UI_VERSION,
             "now_playing": np,
             "audio_output_label": _read_audio_output_label(),
             "voice": voice_info,
@@ -252,6 +333,7 @@ class VoiceController:
         )
         return {
             "ok": True,
+            "ui_version": UI_VERSION,
             "provider": self.interpreter.provider,
             "gemini_model": self.interpreter.gemini_model,
             "gemini_configured": bool(self.interpreter.gemini_api_key),
@@ -312,9 +394,10 @@ def start_hw_button_watcher(controller: VoiceController) -> None:
 
 def make_handler(controller: VoiceController) -> type[BaseHTTPRequestHandler]:
     class VoiceHTTPHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
         def log_message(self, fmt: str, *args: Any) -> None:
-            # Suppress noisy 1Hz /display/state poll logs
-            if args and isinstance(args[0], str) and "/display/state" in args[0]:
+            if args and isinstance(args[0], str) and ("/display/state" in args[0] or "/display/events" in args[0]):
                 return
             log.info("HTTP %s - " + fmt, self.address_string(), *args)
 
@@ -323,6 +406,7 @@ def make_handler(controller: VoiceController) -> type[BaseHTTPRequestHandler]:
             self.send_response(code)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(body)
 
@@ -331,6 +415,7 @@ def make_handler(controller: VoiceController) -> type[BaseHTTPRequestHandler]:
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(data)
 
@@ -345,10 +430,35 @@ def make_handler(controller: VoiceController) -> type[BaseHTTPRequestHandler]:
             if path == "/display/state":
                 self._send_json(200, controller.display_state())
                 return
+            if path == "/display/events":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "keep-alive")
+                self.end_headers()
+                q = controller.events.subscribe()
+                try:
+                    self.wfile.write(b": connected\n\n")
+                    self.wfile.flush()
+                    while True:
+                        try:
+                            msg = q.get(timeout=15.0)
+                            self.wfile.write(msg.encode("utf-8"))
+                            self.wfile.flush()
+                        except queue.Empty:
+                            self.wfile.write(b": keepalive\n\n")
+                            self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass
+                finally:
+                    controller.events.unsubscribe(q)
+                return
             if path == "/display/cover":
                 art = controller.fetch_cover_art()
                 if art is None:
                     self.send_response(404)
+                    self.send_header("Content-Length", "0")
+                    self.send_header("Connection", "close")
                     self.end_headers()
                     return
                 self._send_bytes(200, art[0], art[1])
