@@ -125,17 +125,36 @@ def record_utterance_wav(
     min_threshold: float = 350.0,
     source: str | None = None,
 ) -> tuple[bytes, VadMetrics]:
-    """Capture one spoken command from PulseAudio microphone using adaptive RMS VAD."""
+    """Capture one spoken command from PulseAudio microphone using RNNoise + Bandpass + adaptive RMS VAD."""
+    from .audio_dsp import (
+        RNNOISE_SAMPLE_RATE,
+        RNNoiseProcessor,
+        SpeechBandpassFilter,
+        decimate_48k_to_16k,
+        extract_mono_channel,
+    )
+
     env = os.environ.copy()
     env.setdefault("XDG_RUNTIME_DIR", "/run/user/10000")
     env.setdefault("PULSE_SERVER", "unix:/run/user/10000/pulse/native")
+
+    mic_channel = os.environ.get("VOICE_MIC_CHANNEL", "right").strip().lower()
+    use_rnnoise = os.environ.get("VOICE_USE_RNNOISE", "1").strip().lower() not in ("0", "false", "no")
+    use_bandpass = os.environ.get("VOICE_USE_BANDPASS", "1").strip().lower() not in ("0", "false", "no")
+    rnnoise = RNNoiseProcessor() if use_rnnoise else None
+    bandpass = SpeechBandpassFilter(sample_rate=SAMPLE_RATE, low_hz=250.0, high_hz=3500.0) if use_bandpass else None
+    use_48k_stereo = bool((rnnoise and rnnoise.available) or mic_channel in ("left", "right"))
+
+    rate = RNNOISE_SAMPLE_RATE if use_48k_stereo else SAMPLE_RATE
+    channels = 2 if use_48k_stereo else CHANNELS
+    expected_bytes = (RNNOISE_SAMPLE_RATE * CHUNK_MS // 1000) * 4 if use_48k_stereo else CHUNK_BYTES
 
     cmd = [
         "parecord",
         "--raw",
         "--format=s16le",
-        f"--rate={SAMPLE_RATE}",
-        f"--channels={CHANNELS}",
+        f"--rate={rate}",
+        f"--channels={channels}",
         "--latency-msec=100",
     ]
     if source:
@@ -156,9 +175,25 @@ def record_utterance_wav(
 
     try:
         for idx in range(max_chunks):
-            data = proc.stdout.read(CHUNK_BYTES)
-            if not data:
+            buf = bytearray()
+            while len(buf) < expected_bytes:
+                part = proc.stdout.read(expected_bytes - len(buf))
+                if not part:
+                    break
+                buf.extend(part)
+            if len(buf) < expected_bytes:
                 break
+            raw = bytes(buf)
+            if use_48k_stereo:
+                mono48 = extract_mono_channel(raw, mic_channel)
+                if rnnoise is not None and rnnoise.available:
+                    mono48, _ = rnnoise.process_48k_pcm(mono48)
+                data = decimate_48k_to_16k(mono48)
+            else:
+                data = raw
+            if bandpass is not None:
+                data = bandpass.process_pcm(data)
+
             chunks.append(data)
             r = chunk_rms(data)
 
@@ -166,7 +201,7 @@ def record_utterance_wav(
                 ambient_samples.append(r)
                 continue
 
-            ambient = sum(ambient_samples) / len(ambient_samples) if ambient_samples else 100.0
+            ambient = sum(ambient_samples) / len(ambient_samples) if ambient_samples else 30.0
             threshold = max(min_threshold, ambient * 2.2)
 
             if r >= threshold:
@@ -180,6 +215,8 @@ def record_utterance_wav(
             elif idx >= no_speech_limit:
                 break
     finally:
+        if rnnoise is not None:
+            rnnoise.close()
         proc.terminate()
         try:
             proc.wait(timeout=1.5)

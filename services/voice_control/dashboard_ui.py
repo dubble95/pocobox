@@ -94,6 +94,7 @@ DASHBOARD_HTML = """<!doctype html>
     <h1>🎵 PocoBox Live Dashboard <span id="stateBadge" class="badge b-ok">waiting</span></h1>
     <div class="links">
       <span class="chip" id="outputChip">🔊 출력 확인 중</span>
+      <span class="chip" id="dspChip">🧠 DSP 확인 중</span>
       <span class="chip" id="providerChip">Gemini</span>
       <a class="chip" href="/display" target="_blank">📱 키오스크 화면</a>
       <a class="chip" id="lmsLink" href="http://127.0.0.1:9000/material/" target="_blank">🎛 LMS Material</a>
@@ -135,10 +136,20 @@ DASHBOARD_HTML = """<!doctype html>
       </div>
       <div style="margin-bottom:6px">
         <div style="display:flex; justify-content:space-between; font-size:13px">
-          <span>배경 대비 배수 (multiplier)</span><strong id="mVal">2.5</strong>
+          <span>배경 대비 배수 (multiplier)</span><strong id="mVal">2.1</strong>
         </div>
-        <input id="mSlider" type="range" min="1.3" max="5.0" step="0.1" value="2.5" oninput="mVal.textContent=Number(this.value).toFixed(1)" onchange="saveCfg()" />
+        <input id="mSlider" type="range" min="1.3" max="5.0" step="0.1" value="2.1" oninput="mVal.textContent=Number(this.value).toFixed(1)" onchange="saveCfg()" />
       </div>
+      <div style="margin-bottom:6px">
+        <div style="display:flex; justify-content:space-between; font-size:13px">
+          <span>호출 시 자동 볼륨 덕킹 (%)</span><strong id="dVal">18</strong>
+        </div>
+        <input id="dSlider" type="range" min="5" max="50" step="1" value="18" oninput="dVal.textContent=this.value" onchange="saveCfg()" />
+      </div>
+      <label class="toggle">
+        <input id="duckCheck" type="checkbox" checked onchange="saveCfg()" />
+        <span>호출 감지 시 음악 볼륨 자동 낮춤 (Auto-Ducking)</span>
+      </label>
       <label class="toggle">
         <input id="wakeCheck" type="checkbox" checked onchange="saveCfg()" />
         <span>상시 대기 시 호출어("포코야") 필수</span>
@@ -199,12 +210,18 @@ DASHBOARD_HTML = """<!doctype html>
       const np = s.now_playing || {};
 
       document.getElementById("outputChip").textContent = s.audio_output_label || "오디오";
+      const dspParts = [];
+      if (v.rnnoise_enabled) dspParts.push("RNNoise");
+      if (v.bandpass_enabled) dspParts.push("250-3.5kHz");
+      if (v.wake_engine === "vosk") dspParts.push("Vosk호출어");
+      if (v.duck_enabled) dspParts.push("덕킹 " + (v.duck_volume ?? 18) + "%");
+      document.getElementById("dspChip").textContent = "🧠 " + (dspParts.join(" · ") || "기본 VAD");
       document.getElementById("providerChip").textContent = "STT: " + (v.provider || "local");
 
       const st = v.listening_state || "stopped";
       const sb = document.getElementById("stateBadge");
       sb.textContent = st;
-      sb.className = "badge " + (st === "recording" ? "b-rec" : st === "processing" ? "b-proc" : "b-ok");
+      sb.className = "badge " + (st === "recording" || st === "wake" ? "b-rec" : st === "processing" ? "b-proc" : "b-ok");
 
       const mf = document.getElementById("musicFlag");
       mf.textContent = v.music_playing ? "음악 재생 중" : "대기/정지";
@@ -226,6 +243,8 @@ DASHBOARD_HTML = """<!doctype html>
         qSlider.value = v.quiet_threshold; qVal.textContent = v.quiet_threshold;
         pSlider.value = v.playing_threshold; pVal.textContent = v.playing_threshold;
         mSlider.value = v.multiplier; mVal.textContent = Number(v.multiplier).toFixed(1);
+        if (v.duck_volume !== undefined) { dSlider.value = v.duck_volume; dVal.textContent = v.duck_volume; }
+        if (v.duck_enabled !== undefined) { duckCheck.checked = Boolean(v.duck_enabled); }
         wakeCheck.checked = Boolean(v.require_wake_word);
       }
 
@@ -245,13 +264,15 @@ DASHBOARD_HTML = """<!doctype html>
       quiet_threshold: Number(qSlider.value),
       playing_threshold: Number(pSlider.value),
       multiplier: Number(mSlider.value),
+      duck_volume: Number(dSlider.value),
+      duck_enabled: duckCheck.checked,
       require_wake_word: wakeCheck.checked
     };
     const r = await fetch("/dashboard/config", {
       method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)
     });
     const j = await r.json();
-    if (j.ok) addLog("CONFIG", `quiet=${body.quiet_threshold} playing=${body.playing_threshold} mult=${body.multiplier} wake=${body.require_wake_word}`, "b-ok");
+    if (j.ok) addLog("CONFIG", `quiet=${body.quiet_threshold} playing=${body.playing_threshold} mult=${body.multiplier} duck=${body.duck_enabled ? body.duck_volume + '%' : 'off'} wake=${body.require_wake_word}`, "b-ok");
   }
 
   async function resetFloor() {

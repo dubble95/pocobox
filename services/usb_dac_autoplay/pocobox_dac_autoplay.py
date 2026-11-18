@@ -126,8 +126,8 @@ def boost_hardware_mic_preamp() -> None:
     controls = [
         ("ADC2 Volume", "20"),   # +5 dB analog preamp max
         ("ADC3 Volume", "20"),   # +5 dB analog preamp max
-        ("DEC0 Volume", "104"),  # +20 dB digital decimator (default was 80 = -4 dB handset mode!)
-        ("DEC7 Volume", "104"),  # +20 dB digital decimator
+        ("DEC0 Volume", "104"),  # +20 dB digital decimator (L channel)
+        ("DEC7 Volume", "94"),   # +10 dB digital decimator (R far-field mic; prevents 32768 clipping during music)
     ]
     for name, val in controls:
         try:

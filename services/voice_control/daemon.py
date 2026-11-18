@@ -29,6 +29,7 @@ from voice_control.audio_capture import (  # noqa: E402
     record_utterance_wav,
     trim_silence_wav,
 )
+from voice_control.audio_dsp import filter_wav_speech_band  # noqa: E402
 from voice_control.cloud_stt_intent import HybridVoiceInterpreter  # noqa: E402
 from voice_control.continuous_listener import ContinuousVoiceListener  # noqa: E402
 from voice_control.dashboard_ui import DASHBOARD_HTML  # noqa: E402
@@ -123,10 +124,15 @@ class VoiceController:
         self.interpreter = HybridVoiceInterpreter()
         self.require_wake_word = _env_bool("REQUIRE_WAKE_WORD", True)
         self.continuous_enabled = _env_bool("CONTINUOUS_LISTEN", True)
-        self.vad_threshold = float(os.environ.get("VOICE_VAD_THRESHOLD", "45.0"))
+        self.vad_threshold = float(os.environ.get("VOICE_VAD_THRESHOLD", "40.0"))
+        self.duck_enabled = _env_bool("VOICE_DUCK_ENABLED", True)
+        self.duck_volume = max(5, min(60, int(os.environ.get("VOICE_DUCK_VOLUME", "18"))))
+        self.use_bandpass = _env_bool("VOICE_USE_BANDPASS", True)
 
         self.events = EventHub()
         self._listen_lock = threading.Lock()
+        self._duck_lock = threading.Lock()
+        self._duck_saved: tuple[str, int] | None = None
         self._manual_busy = False
         self._last_nokey_warn = 0.0
         self.last_result: dict[str, Any] | None = None
@@ -138,6 +144,8 @@ class VoiceController:
                 is_paused_fn=lambda: self._manual_busy,
                 on_state_change=self._on_listener_state,
                 is_music_playing_fn=self._is_music_playing,
+                on_wake_detected=self.handle_wake_detected,
+                on_wake_utterance=self.handle_wake_utterance,
             )
 
     def _is_music_playing(self) -> bool:
@@ -148,8 +156,95 @@ class VoiceController:
         except Exception:
             return False
 
+    def _begin_duck(self) -> bool:
+        """Immediately lower LMS music volume while listening so 2-3m voice is crystal clear."""
+        if not self.duck_enabled:
+            return False
+        with self._duck_lock:
+            if self._duck_saved is not None:
+                return True
+            try:
+                pid = self.lms.resolve_player_id(self.player_name)
+                st = self.lms.player_status(pid)
+                if st.get("mode") != "play":
+                    return False
+                cur_vol = int(float(st.get("mixer volume", 0)))
+                if cur_vol <= self.duck_volume:
+                    return False
+                self._duck_saved = (pid, cur_vol)
+                self.lms.set_volume(pid, self.duck_volume)
+                log.info("Auto-ducked LMS volume %d%% -> %d%%", cur_vol, self.duck_volume)
+                return True
+            except Exception as exc:
+                log.debug("Auto-duck skipped: %s", exc)
+                self._duck_saved = None
+                return False
+
+    def _restore_duck(self, skip_restore: bool = False) -> None:
+        """Restore pre-duck LMS volume unless the user explicitly changed volume."""
+        with self._duck_lock:
+            saved = self._duck_saved
+            self._duck_saved = None
+        if saved is None or skip_restore:
+            return
+        pid, prev_vol = saved
+        try:
+            self.lms.set_volume(pid, prev_vol)
+            log.info("Restored LMS volume to %d%%", prev_vol)
+        except Exception as exc:
+            log.warning("Failed to restore ducked volume to %d%%: %s", prev_vol, exc)
+
     def _on_listener_state(self, state: str, rms: float) -> None:
         self.events.publish({"type": "state", "state": state, "rms": round(rms, 1), "ts": time.time()})
+
+    def handle_wake_detected(self, phrase: str) -> None:
+        """Fired immediately when local Vosk spots '포코야'/'헤이 포코'."""
+        self._begin_duck()
+        threading.Thread(target=play_chime, args=("listen",), daemon=True).start()
+        self.events.publish({
+            "type": "transcript",
+            "text": f"🎤 포코야! 명령을 말씀하세요... ({phrase})",
+            "wake": True,
+            "ts": time.time(),
+        })
+
+    def handle_wake_utterance(self, wav_bytes: bytes | None, phrase: str) -> None:
+        """Process the clean post-wake command captured while music was ducked."""
+        skip_restore = False
+        try:
+            if wav_bytes is None:
+                log.info("Wake word '%s' timed out with no follow-up speech.", phrase)
+                self.events.publish({
+                    "type": "result",
+                    "text": "",
+                    "ok": False,
+                    "action": IntentAction.UNKNOWN.value,
+                    "message": "",
+                    "ignored_no_wake": True,
+                    "ts": time.time(),
+                })
+                return
+            if self.interpreter.provider == "local":
+                log.warning("Wake command captured, but no cloud STT API key is configured.")
+                return
+            res = self.handle_wav(
+                wav_bytes,
+                dry_run=False,
+                enforce_wake_word=False,
+                apply_bandpass=False,  # already bandpass-filtered in ContinuousVoiceListener
+            )
+            if res.action in (
+                IntentAction.VOLUME_SET.value,
+                IntentAction.VOLUME_UP.value,
+                IntentAction.VOLUME_DOWN.value,
+                IntentAction.MUTE.value,
+                IntentAction.UNMUTE.value,
+            ):
+                skip_restore = True
+            if res.ok:
+                play_chime("ok")
+        finally:
+            self._restore_duck(skip_restore=skip_restore)
 
     def start_background_listeners(self) -> None:
         if self.continuous_listener is not None:
@@ -172,8 +267,15 @@ class VoiceController:
         log.info("TEXT '%s' -> action=%s ok=%s msg=%s", text, res.action, res.ok, res.message)
         return res
 
-    def handle_wav(self, wav_bytes: bytes, dry_run: bool = False, enforce_wake_word: bool = False) -> ExecutionResult:
-        metrics = analyze_wav_bytes(wav_bytes, speech_threshold=self.vad_threshold)
+    def handle_wav(
+        self,
+        wav_bytes: bytes,
+        dry_run: bool = False,
+        enforce_wake_word: bool = False,
+        apply_bandpass: bool = True,
+    ) -> ExecutionResult:
+        prepared = filter_wav_speech_band(wav_bytes) if (apply_bandpass and self.use_bandpass) else wav_bytes
+        metrics = analyze_wav_bytes(prepared, speech_threshold=self.vad_threshold)
         if not metrics.has_speech:
             res = ExecutionResult(
                 ok=False,
@@ -185,7 +287,7 @@ class VoiceController:
             self.events.publish({"type": "result", "text": "", "ok": False, "message": res.message, "ignored_no_wake": True})
             return res
 
-        trimmed = trim_silence_wav(wav_bytes, threshold=max(20.0, self.vad_threshold * 0.7))
+        trimmed = trim_silence_wav(prepared, threshold=max(20.0, self.vad_threshold * 0.7))
         boosted = normalize_wav_gain(trimmed)
         try:
             intent = self.interpreter.interpret_audio(boosted)
@@ -231,6 +333,29 @@ class VoiceController:
                 "ts": time.time(),
             })
 
+        # If user called ONLY the wake word ("포코야" / "헤이 포코") with no command yet,
+        # immediately duck music, chime, and wait for the follow-up command!
+        if (
+            intent.wake_word_detected
+            and intent.action == IntentAction.UNKNOWN
+            and not dry_run
+            and enforce_wake_word
+        ):
+            log.info("Bare wake word '%s' recognized via cloud -> entering auto-duck follow-up listen", intent.raw_text)
+            self.events.publish({
+                "type": "transcript",
+                "text": "🎤 네! 명령을 말씀하세요...",
+                "wake": True,
+                "ts": time.time(),
+            })
+            return ExecutionResult(
+                ok=True,
+                action="wake_only",
+                message="네! 명령을 말씀하세요...",
+                intent=intent.to_dict(),
+                details={"vad": metrics.__dict__, "wake_only": True},
+            )
+
         res = self.executor.execute(intent, dry_run=dry_run)
         res.details["vad"] = metrics.__dict__
         self.last_result = res.to_dict()
@@ -253,7 +378,12 @@ class VoiceController:
                 log.warning("Speech detected in always-on mode, but no cloud STT API key is configured.")
                 self._last_nokey_warn = now
             return
-        res = self.handle_wav(wav_bytes, dry_run=False, enforce_wake_word=True)
+        # Audio from ContinuousVoiceListener is already RNNoise + bandpass filtered
+        res = self.handle_wav(wav_bytes, dry_run=False, enforce_wake_word=True, apply_bandpass=False)
+        if res.action == "wake_only":
+            # User said just "포코야" -> duck music to 18%, chime, and capture the command cleanly!
+            self.listen_once(dry_run=False)
+            return
         if res.ok:
             play_chime("ok")
 
@@ -261,7 +391,9 @@ class VoiceController:
         if not self._listen_lock.acquire(blocking=False):
             return ExecutionResult(ok=False, action="busy", message="이미 음성 명령을 듣는 중입니다.")
         self._manual_busy = True
+        skip_restore = False
         try:
+            self._begin_duck()
             play_chime("listen")
             self.events.publish({"type": "state", "state": "recording", "rms": 0.0, "ts": time.time()})
             wav_bytes, metrics = record_utterance_wav(
@@ -282,10 +414,19 @@ class VoiceController:
                 self.events.publish({"type": "result", "text": "", "ok": False, "message": res.message, "ignored_no_wake": False})
                 return res
             self.events.publish({"type": "state", "state": "processing", "rms": 0.0, "ts": time.time()})
-            res = self.handle_wav(wav_bytes, dry_run=dry_run, enforce_wake_word=False)
+            res = self.handle_wav(wav_bytes, dry_run=dry_run, enforce_wake_word=False, apply_bandpass=True)
+            if res.action in (
+                IntentAction.VOLUME_SET.value,
+                IntentAction.VOLUME_UP.value,
+                IntentAction.VOLUME_DOWN.value,
+                IntentAction.MUTE.value,
+                IntentAction.UNMUTE.value,
+            ):
+                skip_restore = True
             play_chime("ok" if res.ok else "error")
             return res
         finally:
+            self._restore_duck(skip_restore=skip_restore)
             self._manual_busy = False
             self.events.publish({"type": "state", "state": "waiting", "rms": 0.0, "ts": time.time()})
             self._listen_lock.release()
@@ -293,6 +434,10 @@ class VoiceController:
     def update_runtime_config(self, data: dict[str, Any]) -> dict[str, Any]:
         if "require_wake_word" in data:
             self.require_wake_word = bool(data["require_wake_word"])
+        if "duck_enabled" in data:
+            self.duck_enabled = bool(data["duck_enabled"])
+        if "duck_volume" in data:
+            self.duck_volume = max(5, min(60, int(float(data["duck_volume"]))))
         if "quiet_threshold" in data:
             val = max(5.0, min(500.0, float(data["quiet_threshold"])))
             self.vad_threshold = val
@@ -338,6 +483,8 @@ class VoiceController:
         )
         voice_info["provider"] = self.interpreter.provider
         voice_info["require_wake_word"] = self.require_wake_word
+        voice_info["duck_enabled"] = self.duck_enabled
+        voice_info["duck_volume"] = self.duck_volume
         voice_info["last_result"] = self.last_result
         return {
             "ok": True,
@@ -380,6 +527,8 @@ class VoiceController:
             "gemini_configured": bool(self.interpreter.gemini_api_key),
             "openai_configured": bool(self.interpreter.openai_api_key),
             "require_wake_word": self.require_wake_word,
+            "duck_enabled": self.duck_enabled,
+            "duck_volume": self.duck_volume,
             **cont,
             "lms_connected": lms_ok,
             "players": [
