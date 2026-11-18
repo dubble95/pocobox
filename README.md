@@ -12,7 +12,10 @@
   - postmarketOS (Nura `v26.06` · Phosh · `xiaomi-beryllium-ebbg`) 플래싱 및 부팅 완료
   - 호스트네임 `pocobox` (`pocobox.local` mDNS) 및 Wi-Fi 연결 완료
   - Mac에서 키 기반 비밀번호 없는 SSH 접속 구성 (`ssh pocobox`, `ssh pocobox-usb`)
-- [ ] **Phase 1: LMS (Docker) + TIDAL 플러그인 + Squeezelite 로컬 오디오 출력**
+- [x] **Phase 1: LMS (Docker) + TIDAL 플러그인 + Squeezelite 로컬 오디오 출력**
+  - Lyrion Music Server 9.1.2 (`pocobox-lms`, `http://pocobox.local:9000`) 구동 완료
+  - Squeezelite `2.0.0-1612` 네이티브 arm64 빌드 (ALSA + DSD + SoXR + Opus + SSL) 및 `pocobox-squeezelite.service` 연동 완료
+  - LMS JSON-RPC CLI (`pocobox-lms`) 설치 및 검증 완료 (사용자 웹 UI에서 TIDAL 로그인만 남음)
 - [ ] **Phase 2: USB-C Host/OTG 활성화 + USB DAC 연결 감지 시 자동 전환 & 자동 재생**
 - [ ] **Phase 3: 하이브리드 음성 명령(로컬 호출어 + 클라우드 STT/LLM → LMS/TIDAL 검색·재생)**
 - [ ] **Phase 4: 안정화, 보안 강화 및 원클릭 배포 자동화**
