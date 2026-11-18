@@ -6,9 +6,10 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 echo "==> Deploying PocoBox full stack (Phases 1-4) to ${HOST}..."
 
-ssh "${HOST}" 'mkdir -p /tmp/pocobox-deploy/voice_control'
+ssh "${HOST}" 'mkdir -p /tmp/pocobox-deploy/voice_control /tmp/pocobox-deploy/stt'
 
 scp "${REPO_DIR}/infra/lms/docker-compose.yml" "${HOST}:/tmp/pocobox-deploy/"
+scp "${REPO_DIR}"/infra/stt/* "${HOST}:/tmp/pocobox-deploy/stt/"
 scp "${REPO_DIR}/infra/audio/pocobox-pulseaudio.service" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/audio/pocobox_aec3.cpp" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/audio/build-aec3.sh" "${HOST}:/tmp/pocobox-deploy/"
@@ -41,9 +42,12 @@ SSH_TTY_OPT=""
 ssh ${SSH_TTY_OPT} "${HOST}" 'sudo sh -c "
 set -eu
 SRC=/tmp/pocobox-deploy
-mkdir -p /srv/pocobox/lms/config /srv/pocobox/lms/music /srv/pocobox/lms/playlist /srv/pocobox/bin/voice_control /srv/pocobox/logs/wake_clips /etc/pocobox /etc/NetworkManager/conf.d /etc/systemd/sleep.conf.d /etc/systemd/system/greetd.service.d /home/user/.local/share/applications
+mkdir -p /srv/pocobox/lms/config /srv/pocobox/lms/music /srv/pocobox/lms/playlist /srv/pocobox/stt /srv/pocobox/bin/voice_control /srv/pocobox/logs/wake_clips /etc/pocobox /etc/NetworkManager/conf.d /etc/systemd/sleep.conf.d /etc/systemd/system/greetd.service.d /home/user/.local/share/applications
 
 install -m 0644 \$SRC/docker-compose.yml /srv/pocobox/lms/docker-compose.yml
+install -m 0644 \$SRC/stt/Dockerfile /srv/pocobox/stt/Dockerfile
+install -m 0644 \$SRC/stt/docker-compose.yml /srv/pocobox/stt/docker-compose.yml
+install -m 0755 \$SRC/stt/stt_server.py /srv/pocobox/stt/stt_server.py
 install -m 0755 \$SRC/build-squeezelite.sh /srv/pocobox/bin/build-squeezelite.sh
 install -m 0644 \$SRC/pocobox_aec3.cpp /srv/pocobox/bin/pocobox_aec3.cpp
 install -m 0755 \$SRC/build-aec3.sh /srv/pocobox/bin/build-aec3.sh
@@ -80,7 +84,11 @@ install -m 0644 -o user -g user \$SRC/pocobox-voice.desktop /home/user/.local/sh
 
 addgroup user input 2>/dev/null || true
 addgroup user video 2>/dev/null || true
-chown -R user:user /srv/pocobox/bin /srv/pocobox/logs /home/user/.local/share/applications
+chown -R user:user /srv/pocobox/bin /srv/pocobox/logs /srv/pocobox/stt /home/user/.local/share/applications
+
+if [ -d /srv/pocobox/models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17 ] && command -v docker >/dev/null 2>&1; then
+  (cd /srv/pocobox/stt && docker compose up -d --build) || echo WARN_pocobox_stt_start_skipped
+fi
 
 if [ ! -f /usr/local/lib/libpocobox_aec3.so ] || [ /srv/pocobox/bin/pocobox_aec3.cpp -nt /usr/local/lib/libpocobox_aec3.so ]; then
   /srv/pocobox/bin/build-aec3.sh || echo WARN_libpocobox_aec3_build_skipped

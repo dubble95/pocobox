@@ -1,0 +1,21 @@
+services:
+  stt:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      network: host
+    image: pocobox-stt:latest
+    container_name: pocobox-stt
+    restart: unless-stopped
+    network_mode: host
+    cpuset: "4-7"
+    environment:
+      - TZ=Asia/Seoul
+      - STT_HOST=127.0.0.1
+      - STT_PORT=8766
+      - STT_LANG=ko
+      - STT_USE_ITN=1
+      - STT_THREADS=4
+      - STT_MODEL_DIR=/models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17
+    volumes:
+      - /srv/pocobox/models:/models:ro

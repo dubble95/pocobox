@@ -230,6 +230,111 @@ class TestVoiceExecutorAndCloud(unittest.TestCase):
         self.assertTrue(wav.startswith(b"RIFF"))
         self.assertGreater(len(wav), 2000)
 
+    def test_local_sensevoice_fast_path_skips_cloud(self) -> None:
+        interp = HybridVoiceInterpreter(
+            provider="gemini",
+            gemini_api_key="test-key",
+            local_stt_url="http://127.0.0.1:8766",
+        )
+        self.assertTrue(interp.can_transcribe_audio())
+        wav = synthesize_tone_wav([(440.0, 0.3)])
+        with patch.object(
+            interp,
+            "transcribe_local_audio",
+            return_value={"ok": True, "text": "골드 플레이 노래 틀 어 줘.", "lang": "ko", "event": "Speech", "is_music_only": False},
+        ), patch.object(interp, "_gemini_audio_intent") as mock_gem_audio, patch.object(
+            interp, "_gemini_text_intent"
+        ) as mock_gem_text:
+            intent = interp.interpret_audio(wav)
+        self.assertEqual(intent.action, IntentAction.PLAY_SEARCH)
+        self.assertEqual(intent.query, "Coldplay")
+        self.assertEqual(intent.provider, "sensevoice+rule")
+        mock_gem_audio.assert_not_called()
+        mock_gem_text.assert_not_called()
+
+    def test_local_sensevoice_music_only_skips_cloud(self) -> None:
+        interp = HybridVoiceInterpreter(
+            provider="gemini",
+            gemini_api_key="test-key",
+            local_stt_url="http://127.0.0.1:8766",
+        )
+        wav = synthesize_tone_wav([(440.0, 0.3)])
+        with patch.object(
+            interp,
+            "transcribe_local_audio",
+            return_value={"ok": True, "text": "", "lang": "nospeech", "event": "BGM", "is_music_only": True},
+        ), patch.object(interp, "_gemini_audio_intent") as mock_gem_audio:
+            intent = interp.interpret_audio(wav)
+        self.assertEqual(intent.action, IntentAction.UNKNOWN)
+        self.assertEqual(intent.provider, "sensevoice-local")
+        mock_gem_audio.assert_not_called()
+
+    def test_local_sensevoice_qa_escalates_text_only_to_cloud(self) -> None:
+        interp = HybridVoiceInterpreter(
+            provider="gemini",
+            gemini_api_key="test-key",
+            local_stt_url="http://127.0.0.1:8766",
+        )
+        wav = synthesize_tone_wav([(440.0, 0.3)])
+        qa_intent = VoiceIntent(
+            action=IntentAction.ANSWER_QA,
+            raw_text="프랑스 수도가 어디야?",
+            answer="프랑스의 수도는 파리입니다.",
+            confidence=0.95,
+            provider="gemini-text",
+        )
+        with patch.object(
+            interp,
+            "transcribe_local_audio",
+            return_value={"ok": True, "text": "프랑스 수도가 어디야?", "lang": "ko", "event": "Speech", "is_music_only": False},
+        ), patch.object(interp, "_gemini_text_intent", return_value=qa_intent) as mock_text, patch.object(
+            interp, "_gemini_audio_intent"
+        ) as mock_audio:
+            intent = interp.interpret_audio(wav)
+        self.assertEqual(intent.action, IntentAction.ANSWER_QA)
+        self.assertEqual(intent.provider, "sensevoice+gemini-text")
+        mock_text.assert_called_once_with("프랑스 수도가 어디야?")
+        mock_audio.assert_not_called()
+
+    def test_local_sensevoice_blind_quiz_audio(self) -> None:
+        interp = HybridVoiceInterpreter(provider="local", local_stt_url="http://127.0.0.1:8766")
+        self.assertTrue(interp.can_transcribe_audio())
+        wav = synthesize_tone_wav([(440.0, 0.2)])
+        with patch.object(
+            interp,
+            "transcribe_local_audio",
+            return_value={"ok": True, "text": "Dolphin.", "lang": "en", "event": "Speech", "is_music_only": False},
+        ):
+            self.assertEqual(interp.transcribe_blind_audio(wav), "Dolphin")
+
+    def test_post_wake_dynamic_vad_ends_on_ducked_music_floor(self) -> None:
+        from voice_control.continuous_listener import ContinuousVoiceListener
+
+        listener = ContinuousVoiceListener(on_utterance=lambda _: None)
+        listener.music_playing = True
+        listener.ambient_rms = 250.0
+        floor = listener.initial_wake_cmd_floor()
+        # Simulate ducked room floor (~75 RMS), then speech (~380 RMS), then return to ~75 RMS
+        speech_seen = False
+        silent_run = 0
+        rms_trace = [80.0, 75.0, 74.0, 350.0, 420.0, 390.0, 310.0] + [75.0] * 10
+        stopped_at = None
+        for idx, rms in enumerate(rms_trace):
+            th = listener.wake_cmd_threshold(floor, speech_seen)
+            is_speech = rms >= th
+            floor = listener.update_wake_cmd_floor(floor, rms, is_speech)
+            if is_speech:
+                speech_seen = True
+                silent_run = 0
+            elif speech_seen:
+                silent_run += 1
+                if silent_run >= listener.wake_silence_chunks:
+                    stopped_at = idx
+                    break
+        self.assertTrue(speech_seen)
+        self.assertIsNotNone(stopped_at)
+        self.assertLess(stopped_at, len(rms_trace) - 1)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -69,6 +69,7 @@ class ContinuousVoiceListener:
 
         self.onset_chunks = max(2, int(float(os.environ.get("VOICE_ONSET_SEC", "0.2")) * 1000 // CHUNK_MS))
         self.silence_chunks = max(4, int(float(os.environ.get("VOICE_SILENCE_SEC", "0.9")) * 1000 // CHUNK_MS))
+        self.wake_silence_chunks = max(4, int(float(os.environ.get("VOICE_WAKE_SILENCE_SEC", "0.7")) * 1000 // CHUNK_MS))
         self.max_chunks = max(15, int(float(os.environ.get("VOICE_MAX_SEC", "5.0")) * 1000 // CHUNK_MS))
         self.wake_max_chunks = max(20, int(float(os.environ.get("VOICE_WAKE_MAX_SEC", "4.8")) * 1000 // CHUNK_MS))
         self.wake_no_speech_chunks = max(15, int(float(os.environ.get("VOICE_WAKE_TIMEOUT_SEC", "3.5")) * 1000 // CHUNK_MS))
@@ -189,6 +190,26 @@ class ContinuousVoiceListener:
         if not self.wake_spotter.available:
             return True
         return self.rms_fallback_during_music
+
+    def initial_wake_cmd_floor(self) -> float:
+        """Estimate initial post-duck background RMS floor right after wake-word fires."""
+        if self.music_playing:
+            return max(15.0, min(self.ambient_rms * 0.45, 160.0))
+        return max(15.0, min(self.ambient_rms, 80.0))
+
+    def wake_cmd_threshold(self, wake_cmd_floor: float, speech_seen: bool) -> float:
+        """Dynamic post-duck command threshold so ducked music (~60-100 RMS) never stalls VAD until 4.8s max."""
+        mult = 1.45 if speech_seen else 1.85
+        return max(self.min_threshold, 35.0, wake_cmd_floor * mult)
+
+    def update_wake_cmd_floor(self, wake_cmd_floor: float, rms: float, is_speech: bool) -> float:
+        """Rapidly adapt post-duck floor downward as LMS volume drops, slowly upward on non-speech."""
+        capped = min(rms, 600.0)
+        if capped < wake_cmd_floor:
+            return wake_cmd_floor * 0.45 + capped * 0.55
+        if not is_speech:
+            return wake_cmd_floor * 0.90 + capped * 0.10
+        return wake_cmd_floor
 
     def passes_wake_energy_gate(self, recent_peak_rms: float) -> bool:
         """Reject faint reverb/music false wake hits that do not rise above floor energy."""
@@ -395,6 +416,7 @@ class ContinuousVoiceListener:
             wake_mode = False
             wake_phrase = ""
             wake_speech_seen = False
+            wake_cmd_floor = 25.0
             consecutive_speech = 0
             consecutive_silence = 0
             cooldown_until = 0.0
@@ -502,6 +524,7 @@ class ContinuousVoiceListener:
                             wake_mode = True
                             recording = True
                             wake_speech_seen = False
+                            wake_cmd_floor = self.initial_wake_cmd_floor()
                             consecutive_silence = 0
                             # Keep last 2 chunks (~0.2s) in case user speaks continuously without pausing
                             captured = list(preroll)[-2:]
@@ -537,15 +560,18 @@ class ContinuousVoiceListener:
                     else:
                         captured.append(stt_data)
                         if wake_mode:
-                            # Music is ducked to ~18%, so use sensitive quiet-room command threshold
-                            cmd_threshold = max(self.min_threshold, 35.0)
-                            if rms >= cmd_threshold:
+                            # Dynamic post-duck command VAD: adapts to actual ducked room/speaker floor
+                            # so utterances end cleanly ~0.7s after speech instead of hitting 4.8s max.
+                            cmd_threshold = self.wake_cmd_threshold(wake_cmd_floor, wake_speech_seen)
+                            is_cmd_speech = rms >= cmd_threshold
+                            wake_cmd_floor = self.update_wake_cmd_floor(wake_cmd_floor, rms, is_cmd_speech)
+                            if is_cmd_speech:
                                 wake_speech_seen = True
                                 consecutive_silence = 0
                             elif wake_speech_seen:
                                 consecutive_silence += 1
 
-                            done_silence = wake_speech_seen and consecutive_silence >= self.silence_chunks
+                            done_silence = wake_speech_seen and consecutive_silence >= self.wake_silence_chunks
                             done_timeout = (not wake_speech_seen) and len(captured) >= self.wake_no_speech_chunks
                             done_max = len(captured) >= self.wake_max_chunks
                             if done_silence or done_timeout or done_max:
@@ -582,6 +608,7 @@ class ContinuousVoiceListener:
                                     wake_phrase = hit
                                     wake_mode = True
                                     wake_speech_seen = False
+                                    wake_cmd_floor = self.initial_wake_cmd_floor()
                                     consecutive_silence = 0
                                     captured = captured[-2:]
                                     self._set_state("wake", rms)

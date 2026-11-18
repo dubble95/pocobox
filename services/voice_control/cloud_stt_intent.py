@@ -1,20 +1,30 @@
-"""Hybrid Cloud STT + Intent Parser (Gemini Audio / OpenAI Whisper+LLM) with instant local rule fast-path."""
+"""Hybrid Local-First (SenseVoice INT8) + Cloud STT/Intent Parser with instant offline rule fast-path."""
 
 from __future__ import annotations
 
 import base64
 import datetime
 import json
+import logging
 import os
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from typing import Any
+
+try:
+    import requests as _requests  # type: ignore
+except Exception:  # pragma: no cover
+    _requests = None
 
 from .aliases import expand_tidal_queries, strip_wake_prefix
 from .english_quiz import QuizQuestion, classify_quiz_command, is_local_answer_match, parse_quiz_options
 from .intent_schema import IntentAction, VoiceIntent
 from .rule_parser import parse_command
+
+log = logging.getLogger("pocobox-voice.stt")
 
 _KST = datetime.timezone(datetime.timedelta(hours=9))
 _KO_WEEKDAYS = ("월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일")
@@ -124,7 +134,7 @@ def _intent_from_llm_payload(payload: dict[str, Any], provider: str, raw_fallbac
 
 
 class HybridVoiceInterpreter:
-    """Combines ultra-fast local rule parsing with Gemini or OpenAI cloud audio/text understanding."""
+    """Combines local SenseVoice INT8 STT + offline rule fast-path with optional Gemini/OpenAI fallback."""
 
     def __init__(
         self,
@@ -135,6 +145,10 @@ class HybridVoiceInterpreter:
         openai_stt_model: str | None = None,
         openai_chat_model: str | None = None,
         timeout: float = 15.0,
+        local_stt_url: str | None = None,
+        local_stt_language: str | None = None,
+        local_stt_timeout: float | None = None,
+        cloud_fallback: bool | None = None,
     ) -> None:
         self.gemini_api_key = gemini_api_key if gemini_api_key is not None else os.environ.get("GEMINI_API_KEY", "").strip()
         self.gemini_model = gemini_model or os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
@@ -142,6 +156,24 @@ class HybridVoiceInterpreter:
         self.openai_stt_model = openai_stt_model or os.environ.get("OPENAI_STT_MODEL", "gpt-4o-mini-transcribe")
         self.openai_chat_model = openai_chat_model or os.environ.get("OPENAI_CHAT_MODEL", "gpt-4o-mini")
         self.timeout = timeout
+
+        raw_local_url = local_stt_url if local_stt_url is not None else os.environ.get("LOCAL_STT_URL", "")
+        self.local_stt_url = raw_local_url.strip().rstrip("/")
+        self.local_stt_language = (
+            local_stt_language if local_stt_language is not None else os.environ.get("LOCAL_STT_LANGUAGE", "ko")
+        ).strip().lower() or "ko"
+        self.local_stt_timeout = (
+            float(local_stt_timeout)
+            if local_stt_timeout is not None
+            else float(os.environ.get("LOCAL_STT_TIMEOUT", "5.0"))
+        )
+        if cloud_fallback is not None:
+            self.cloud_fallback = bool(cloud_fallback)
+        else:
+            self.cloud_fallback = os.environ.get("VOICE_CLOUD_FALLBACK", "1").strip().lower() not in ("0", "false", "no", "off")
+
+        self._session = _requests.Session() if _requests is not None else None
+        self._local_health_cache: tuple[float, dict[str, Any]] | None = None
 
         requested = (provider or os.environ.get("VOICE_PROVIDER", "auto")).strip().lower()
         if requested == "auto":
@@ -154,13 +186,67 @@ class HybridVoiceInterpreter:
         else:
             self.provider = requested
 
+    def has_cloud_api(self) -> bool:
+        return bool(
+            (self.provider == "gemini" and self.gemini_api_key)
+            or (self.provider == "openai" and self.openai_api_key)
+        )
+
+    def can_transcribe_audio(self) -> bool:
+        """True if local SenseVoice STT is configured or a cloud provider is active."""
+        return bool(self.local_stt_url) or self.provider != "local"
+
+    def local_stt_health(self, force_refresh: bool = False) -> dict[str, Any]:
+        """Check local SenseVoice STT HTTP server health (cached for 10s)."""
+        if not self.local_stt_url:
+            return {"configured": False, "available": False, "url": ""}
+        now = time.monotonic()
+        if not force_refresh and self._local_health_cache is not None and (now - self._local_health_cache[0]) < 10.0:
+            return self._local_health_cache[1]
+        url = f"{self.local_stt_url}/health"
+        info: dict[str, Any] = {"configured": True, "available": False, "url": self.local_stt_url}
+        try:
+            if self._session is not None:
+                resp = self._session.get(url, timeout=1.5)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    info["available"] = bool(data.get("ok", True))
+                    info["engine"] = data.get("engine", "sensevoice")
+                    info["language"] = data.get("default_language", self.local_stt_language)
+            else:
+                with urllib.request.urlopen(url, timeout=1.5) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    info["available"] = bool(data.get("ok", True))
+                    info["engine"] = data.get("engine", "sensevoice")
+                    info["language"] = data.get("default_language", self.local_stt_language)
+        except Exception:
+            info["available"] = False
+        self._local_health_cache = (now, info)
+        return info
+
+    def transcribe_local_audio(self, wav_bytes: bytes, *, language: str | None = None) -> dict[str, Any]:
+        """Transcribe WAV bytes via the local SenseVoice-Small INT8 HTTP server (~0.15-0.35s)."""
+        if not self.local_stt_url:
+            raise RuntimeError("LOCAL_STT_URL is not configured.")
+        lang = (language or self.local_stt_language or "ko").strip().lower()
+        url = f"{self.local_stt_url}/transcribe?{urllib.parse.urlencode({'language': lang})}"
+        headers = {"Content-Type": "audio/wav"}
+        if self._session is not None:
+            resp = self._session.post(url, data=wav_bytes, headers=headers, timeout=self.local_stt_timeout)
+            if resp.status_code != 200:
+                raise RuntimeError(f"Local STT HTTP {resp.status_code}: {resp.text[:200]}")
+            return resp.json()
+        req = urllib.request.Request(url, data=wav_bytes, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=self.local_stt_timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
     def interpret_text(self, text: str, use_cloud_fallback: bool = True) -> VoiceIntent:
         """Fast-path local rule parsing first; optionally escalate complex/unknown text to cloud LLM."""
         local_intent = parse_command(text)
         if local_intent.action != IntentAction.UNKNOWN and local_intent.confidence >= 0.9:
             return local_intent
 
-        if not use_cloud_fallback or self.provider == "local":
+        if not use_cloud_fallback or not self.cloud_fallback or not self.has_cloud_api():
             return local_intent
 
         try:
@@ -173,7 +259,52 @@ class HybridVoiceInterpreter:
         return local_intent
 
     def interpret_audio(self, wav_bytes: bytes) -> VoiceIntent:
-        """Send recorded WAV audio to configured cloud provider (Gemini single-shot or OpenAI STT+fast-path)."""
+        """Local-first SenseVoice STT + offline rule parser (~0.3s); optional cloud fallback for Q&A/unknown."""
+        if self.local_stt_url:
+            try:
+                stt = self.transcribe_local_audio(wav_bytes)
+                transcript = str(stt.get("text") or "").strip()
+                if stt.get("is_music_only") or not transcript:
+                    return VoiceIntent(
+                        action=IntentAction.UNKNOWN,
+                        raw_text="",
+                        confidence=0.0,
+                        provider="sensevoice-local",
+                        wake_word_detected=False,
+                    )
+
+                fast = parse_command(transcript)
+                if fast.action != IntentAction.UNKNOWN and fast.confidence >= 0.9:
+                    fast.provider = "sensevoice+rule"
+                    return fast
+
+                # Bare wake-word utterance ("포코야") -> return immediately without any cloud call
+                stripped, has_wake = strip_wake_prefix(transcript)
+                if has_wake and not stripped.strip(" .!?,~"):
+                    fast.provider = "sensevoice+rule"
+                    return fast
+
+                # Unknown/complex command or Q&A: escalate text-only to cloud LLM if enabled
+                if self.cloud_fallback and self.has_cloud_api():
+                    try:
+                        if self.provider == "gemini" and self.gemini_api_key:
+                            cloud_intent = self._gemini_text_intent(transcript)
+                            cloud_intent.provider = "sensevoice+gemini-text"
+                            return cloud_intent
+                        if self.provider == "openai" and self.openai_api_key:
+                            cloud_intent = self._openai_text_intent(transcript)
+                            cloud_intent.provider = "sensevoice+openai-text"
+                            return cloud_intent
+                    except Exception as exc:
+                        log.warning("Cloud text fallback failed after local STT (%r): %s", transcript, exc)
+
+                fast.provider = "sensevoice-local"
+                return fast
+            except Exception as exc:
+                log.warning("Local SenseVoice STT unavailable (%s); falling back to cloud audio.", exc)
+                if not self.has_cloud_api():
+                    raise RuntimeError(f"Local STT error ({self.local_stt_url}): {exc}") from exc
+
         if self.provider == "gemini" and self.gemini_api_key:
             return self._gemini_audio_intent(wav_bytes)
         if self.provider == "openai" and self.openai_api_key:
@@ -187,8 +318,8 @@ class HybridVoiceInterpreter:
                 return fast
             return self._openai_text_intent(transcript)
         raise RuntimeError(
-            "Cloud STT API key not configured. Set GEMINI_API_KEY or OPENAI_API_KEY in /etc/pocobox/voice.env "
-            "(or use text command testing via `pocobox-voice say \"...\"`)."
+            "Neither LOCAL_STT_URL nor a cloud STT API key is configured. "
+            "Set LOCAL_STT_URL or GEMINI_API_KEY / OPENAI_API_KEY in /etc/pocobox/voice.env."
         )
 
     def _gemini_audio_intent(self, wav_bytes: bytes) -> VoiceIntent:
@@ -275,7 +406,18 @@ class HybridVoiceInterpreter:
         return _intent_from_llm_payload(_parse_json_response(out), provider="openai", raw_fallback=text)
 
     def transcribe_blind_audio(self, wav_bytes: bytes) -> str:
-        """Strictly literal Korean/English STT with ZERO quiz-answer context (prevents answer hallucination)."""
+        """Strictly literal Korean/English STT with ZERO quiz-answer context (local SenseVoice first)."""
+        if self.local_stt_url:
+            try:
+                stt = self.transcribe_local_audio(wav_bytes)
+                if stt.get("is_music_only"):
+                    return ""
+                return str(stt.get("text") or "").strip().strip(".,!?")
+            except Exception as exc:
+                log.warning("Local STT failed during quiz blind transcription (%s); falling back to cloud.", exc)
+                if not self.has_cloud_api():
+                    raise RuntimeError(f"Local STT error ({self.local_stt_url}): {exc}") from exc
+
         if self.provider == "gemini" and self.gemini_api_key:
             b64 = base64.b64encode(wav_bytes).decode("ascii")
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.gemini_model}:generateContent?key={self.gemini_api_key}"
@@ -461,15 +603,39 @@ class HybridVoiceInterpreter:
         headers = {"Content-Type": "application/json"}
         if extra_headers:
             headers.update(extra_headers)
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")[:300]
-            raise RuntimeError(f"Cloud API HTTP {exc.code}: {detail}") from exc
+
+        max_attempts = 2
+        for attempt in range(max_attempts):
+            if self._session is not None:
+                try:
+                    resp = self._session.post(url, json=payload, headers=headers, timeout=self.timeout)
+                except Exception as exc:
+                    if attempt + 1 < max_attempts:
+                        time.sleep(0.35)
+                        continue
+                    raise RuntimeError(f"Cloud API network error: {exc}") from exc
+                if resp.status_code in (429, 500, 502, 503, 504) and attempt + 1 < max_attempts:
+                    log.warning("Cloud API HTTP %d (attempt %d/%d); retrying...", resp.status_code, attempt + 1, max_attempts)
+                    time.sleep(0.35)
+                    continue
+                if resp.status_code >= 400:
+                    raise RuntimeError(f"Cloud API HTTP {resp.status_code}: {resp.text[:300]}")
+                return resp.json()
+
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")[:300]
+                if exc.code in (429, 500, 502, 503, 504) and attempt + 1 < max_attempts:
+                    log.warning("Cloud API HTTP %d (attempt %d/%d); retrying...", exc.code, attempt + 1, max_attempts)
+                    time.sleep(0.35)
+                    continue
+                raise RuntimeError(f"Cloud API HTTP {exc.code}: {detail}") from exc
+        raise RuntimeError("Cloud API request failed after retries.")

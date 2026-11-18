@@ -571,8 +571,8 @@ class VoiceController:
                 q = self.quiz.current_question()
                 if q is None:
                     break
-                if self.interpreter.provider == "local":
-                    log.warning("Voice quiz loop paused: no cloud STT API key configured (use text API or configure GEMINI_API_KEY).")
+                if not self.interpreter.can_transcribe_audio():
+                    log.warning("Voice quiz loop paused: neither LOCAL_STT_URL nor cloud STT API key is configured.")
                     break
 
                 # Ready chime ("quiz_prompt") was just played by _speak_quiz_response right before opening the mic
@@ -712,8 +712,8 @@ class VoiceController:
                     "ts": time.time(),
                 })
                 return
-            if self.interpreter.provider == "local":
-                log.warning("Wake command captured, but no cloud STT API key is configured.")
+            if not self.interpreter.can_transcribe_audio():
+                log.warning("Wake command captured, but neither LOCAL_STT_URL nor cloud STT API key is configured.")
                 return
             res = self.handle_wav(
                 wav_bytes,
@@ -869,6 +869,7 @@ class VoiceController:
                     self._resume_lms_after_quiz()
                 return res
 
+        t_stt = time.perf_counter()
         try:
             intent = self.interpreter.interpret_audio(boosted)
         except Exception as exc:
@@ -881,6 +882,7 @@ class VoiceController:
             self.last_result = res.to_dict()
             self.events.publish({"type": "result", "text": "", "ok": False, "message": res.message, "ignored_no_wake": False})
             return res
+        stt_ms = round((time.perf_counter() - t_stt) * 1000.0, 1)
 
         if enforce_wake_word and self.require_wake_word and not intent.wake_word_detected:
             # Feed music/ambient RMS back into continuous listener so playing music stops re-triggering!
@@ -962,6 +964,8 @@ class VoiceController:
 
         res = self.executor.execute(intent, dry_run=dry_run)
         res.details["vad"] = metrics.__dict__
+        res.details["stt_ms"] = stt_ms
+        res.details["stt_provider"] = intent.provider
         self.last_result = res.to_dict()
         self.events.publish({
             "type": "result",
@@ -972,14 +976,22 @@ class VoiceController:
             "ignored_no_wake": False,
             "ts": time.time(),
         })
-        log.info("AUDIO (%.2fs) -> '%s' action=%s ok=%s", metrics.duration_sec, intent.raw_text, res.action, res.ok)
+        log.info(
+            "AUDIO (%.2fs) [%s %.0fms] -> '%s' action=%s ok=%s",
+            metrics.duration_sec,
+            intent.provider,
+            stt_ms,
+            intent.raw_text,
+            res.action,
+            res.ok,
+        )
         return res
 
     def handle_continuous_wav(self, wav_bytes: bytes) -> None:
-        if self.interpreter.provider == "local":
+        if not self.interpreter.can_transcribe_audio():
             now = time.monotonic()
             if now - self._last_nokey_warn > 60:
-                log.warning("Speech detected in always-on mode, but no cloud STT API key is configured.")
+                log.warning("Speech detected in always-on mode, but neither LOCAL_STT_URL nor cloud STT API key is configured.")
                 self._last_nokey_warn = now
             return
         # Audio from ContinuousVoiceListener is already RNNoise + bandpass filtered
@@ -1168,6 +1180,7 @@ class VoiceController:
             else {"continuous_listen": False, "listening_state": "stopped"}
         )
         voice_info["provider"] = self.interpreter.provider
+        voice_info["local_stt"] = self.interpreter.local_stt_health()
         voice_info["require_wake_word"] = self.require_wake_word
         voice_info["duck_enabled"] = self.duck_enabled
         voice_info["duck_volume"] = self.duck_volume
@@ -1215,10 +1228,12 @@ class VoiceController:
             if self.continuous_listener is not None
             else {"continuous_listen": False, "listening_state": "stopped"}
         )
+        local_stt = self.interpreter.local_stt_health()
         return {
             "ok": True,
             "ui_version": UI_VERSION,
             "provider": self.interpreter.provider,
+            "local_stt": local_stt,
             "gemini_model": self.interpreter.gemini_model,
             "gemini_configured": bool(self.interpreter.gemini_api_key),
             "openai_configured": bool(self.interpreter.openai_api_key),
@@ -1486,10 +1501,11 @@ def main() -> int:
     start_hw_button_watcher(controller)
     server = ThreadingHTTPServer((host, port), make_handler(controller))
     log.info(
-        "PocoBox Voice & Display daemon on http://%s:%d (provider=%s continuous=%s wake_required=%s)",
+        "PocoBox Voice & Display daemon on http://%s:%d (provider=%s local_stt=%s continuous=%s wake_required=%s)",
         host,
         port,
         controller.interpreter.provider,
+        controller.interpreter.local_stt_url or "off",
         controller.continuous_enabled,
         controller.require_wake_word,
     )
