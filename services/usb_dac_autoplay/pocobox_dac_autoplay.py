@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import select
 import shlex
 import subprocess
@@ -134,6 +135,103 @@ def boost_hardware_mic_preamp() -> None:
             subprocess.run(["amixer", "-c", "0", "cset", f"name={name}", val], capture_output=True, check=False)
         except FileNotFoundError:
             return
+
+
+_AMIXER_SCONTROL_RE = re.compile(r"Simple mixer control '([^']+)',(\d+)")
+
+
+def release_usb_cards_from_pulseaudio() -> list[str]:
+    """Set PulseAudio profile to 'off' on USB audio cards so Squeezelite gets exclusive direct ALSA access."""
+    released: list[str] = []
+    try:
+        cards = _list_pa_short("cards")
+    except Exception:
+        return released
+    for line in cards:
+        parts = line.split("\t")
+        if len(parts) >= 2 and parts[1].startswith("alsa_card.usb-"):
+            card_name = parts[1]
+            res = run_pactl(["set-card-profile", card_name, "off"])
+            if res.returncode == 0:
+                released.append(card_name)
+    if released:
+        log.info("Released USB audio card(s) from PulseAudio for direct ALSA: %s", ", ".join(released))
+    return released
+
+
+def set_usb_dac_hw_full_volume(card_num: int) -> list[str]:
+    """Ensure all ALSA hardware playback mixer controls on the USB DAC are unmuted and at 100% (0 dB)."""
+    if not cfg_bool("DAC_FORCE_HW_FULL_VOLUME", True):
+        return []
+    adjusted: list[str] = []
+    try:
+        res = subprocess.run(
+            ["amixer", "-c", str(card_num), "scontrols"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return adjusted
+    if res.returncode != 0:
+        return adjusted
+
+    for match in _AMIXER_SCONTROL_RE.finditer(res.stdout or ""):
+        name, idx = match.group(1), match.group(2)
+        ctrl = f"{name},{idx}"
+        info = subprocess.run(
+            ["amixer", "-c", str(card_num), "sget", ctrl],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if info.returncode != 0:
+            continue
+        caps_line = ""
+        for line in (info.stdout or "").splitlines():
+            if "Capabilities:" in line:
+                caps_line = line
+                break
+        caps = set(caps_line.split())
+        has_pvol = bool(caps & {"pvolume", "pvolume-joined", "volume", "volume-joined"})
+        has_pswitch = bool(caps & {"pswitch", "pswitch-joined"})
+        if not has_pvol and not has_pswitch:
+            continue
+
+        set_args = ["amixer", "-c", str(card_num), "sset", ctrl]
+        if has_pvol:
+            set_args.append("100%")
+        if has_pswitch:
+            set_args.append("unmute")
+        set_res = subprocess.run(set_args, capture_output=True, text=True, check=False)
+        if set_res.returncode == 0:
+            adjusted.append(ctrl)
+    if adjusted:
+        log.info("Locked USB DAC card %d ALSA playback mixer to 100%%/unmute: %s", card_num, ", ".join(adjusted))
+    return adjusted
+
+
+def configure_dac_lms_volume(client: LMSClient, player_id: str) -> None:
+    """Apply bit-perfect LMS volume settings when USB DAC is active."""
+    fixed_vol = cfg_bool("DAC_LMS_FIXED_VOLUME", False)
+    if fixed_vol:
+        try:
+            client.call(player_id, ["playerpref", "digitalVolumeControl", 0])
+            client.set_volume(player_id, 100)
+            log.info("Locked LMS player=%s to fixed 100%% digital volume (digitalVolumeControl=0)", player_id)
+        except Exception as exc:
+            log.warning("Failed to lock LMS fixed volume: %s", exc)
+        return
+
+    raw_vol = cfg("DAC_ATTACH_LMS_VOLUME", "100").strip()
+    if not raw_vol:
+        return
+    try:
+        target_vol = max(0, min(100, int(raw_vol)))
+        client.set_volume(player_id, target_vol)
+        log.info("Set LMS player=%s volume to %d%% on USB DAC attach", player_id, target_vol)
+    except Exception as exc:
+        log.warning("Failed to set LMS volume on USB DAC attach: %s", exc)
 
 
 def setup_pulse_aec(usb_card_id: str | None) -> bool:
@@ -283,13 +381,15 @@ def wait_for_player(client: LMSClient, timeout: float = 12.0) -> str | None:
 
 
 def trigger_autoplay(client: LMSClient) -> None:
-    if not cfg_bool("AUTOPLAY_ON_ATTACH", True):
-        log.info("AUTOPLAY_ON_ATTACH disabled; skipping auto-play.")
-        return
-
     player_id = wait_for_player(client, timeout=15.0)
     if not player_id:
-        log.warning("Player did not reconnect to LMS within timeout; cannot auto-play.")
+        log.warning("Player did not reconnect to LMS within timeout; cannot configure/auto-play.")
+        return
+
+    configure_dac_lms_volume(client, player_id)
+
+    if not cfg_bool("AUTOPLAY_ON_ATTACH", True):
+        log.info("AUTOPLAY_ON_ATTACH disabled; skipping auto-play.")
         return
 
     try:
@@ -336,6 +436,7 @@ def trigger_pause(client: LMSClient) -> None:
 
 def apply_state(client: LMSClient, active_dac: str | None, is_startup: bool = False) -> str | None:
     cards = find_usb_audio_cards()
+    new_dac_num = cards[0][0] if cards else None
     new_dac = cards[0][1] if cards else None
     enable_aec = cfg_bool("ENABLE_AEC", True)
     aec_sink = cfg("AEC_SINK_NAME", "pocobox_aec_sink")
@@ -345,6 +446,8 @@ def apply_state(client: LMSClient, active_dac: str | None, is_startup: bool = Fa
 
     if new_dac is not None:
         boost_hardware_mic_preamp()
+        if new_dac_num is not None:
+            set_usb_dac_hw_full_volume(new_dac_num)
         if enable_aec:
             log.info("USB DAC attached: card_id=%s -> configuring WebRTC AEC pipeline", new_dac)
             stop_squeezelite()
@@ -359,8 +462,9 @@ def apply_state(client: LMSClient, active_dac: str | None, is_startup: bool = Fa
                 return new_dac
             log.warning("AEC setup failed for USB DAC %s; falling back to direct ALSA", new_dac)
 
-        output_dev = cfg("DAC_OUTPUT_TEMPLATE", "plughw:CARD={card_id},DEV=0").format(card_id=new_dac)
-        extra_args = cfg("DAC_SQUEEZELITE_EXTRA_ARGS", "-m 02:70:6f:63:6f:01 -p 95 -a 80:4::1 -C 5 -W")
+        release_usb_cards_from_pulseaudio()
+        output_dev = cfg("DAC_OUTPUT_TEMPLATE", "hw:CARD={card_id},DEV=0").format(card_id=new_dac)
+        extra_args = cfg("DAC_SQUEEZELITE_EXTRA_ARGS", "-m 02:70:6f:63:6f:01 -p 95 -a 80:4::1 -C 5 -W -R -u vLE")
         log.info("USB DAC attached: card_id=%s -> switching Squeezelite to %s", new_dac, output_dev)
         changed = write_squeezelite_env(output_dev, extra_args)
         write_audio_state(new_dac, aec_active=False)
