@@ -121,8 +121,21 @@ def _find_pa_mic_source() -> str | None:
     return None
 
 
+def boost_hardware_mic_preamp() -> None:
+    """Set Qualcomm WCD9340 hardware mic preamp/decimator gain for far-field (2-3m) voice pickup."""
+    controls = [
+        ("ADC2 Volume", "20"),   # +5 dB analog preamp max
+        ("ADC3 Volume", "20"),   # +5 dB analog preamp max
+        ("DEC0 Volume", "104"),  # +20 dB digital decimator (default was 80 = -4 dB handset mode!)
+        ("DEC7 Volume", "104"),  # +20 dB digital decimator
+    ]
+    for name, val in controls:
+        subprocess.run(["amixer", "-c", "0", "cset", f"name={name}", val], capture_output=True, check=False)
+
+
 def setup_pulse_aec(usb_card_id: str | None) -> bool:
     """Unload old module-echo-cancel and load WebRTC AEC bound to USB DAC (or internal speaker) + Mic."""
+    boost_hardware_mic_preamp()
     aec_sink = cfg("AEC_SINK_NAME", "pocobox_aec_sink")
     aec_source = cfg("AEC_SOURCE_NAME", "pocobox_aec_mic")
 
@@ -139,11 +152,11 @@ def setup_pulse_aec(usb_card_id: str | None) -> bool:
         log.warning("Cannot configure WebRTC AEC (sink_master=%s source_master=%s)", sink_master, source_master)
         return False
 
-    # Ensure hardware sink is unmuted & full scale, and boost POCO F1 quiet mic before AEC
+    # Ensure hardware sink is unmuted & full scale, and keep PulseAudio source at clean 100% (hardware preamp provides +24 dB)
     run_pactl(["set-sink-mute", sink_master, "0"])
     run_pactl(["set-sink-volume", sink_master, "100%"])
     run_pactl(["set-source-mute", source_master, "0"])
-    run_pactl(["set-source-volume", source_master, "150%"])
+    run_pactl(["set-source-volume", source_master, "100%"])
 
     # Pure Echo Cancellation + High-Pass Filter (avoid aggressive WebRTC noise_suppression that attenuates quiet speech)
     aec_args = '"analog_gain_control=0 digital_gain_control=0 noise_suppression=0 high_pass_filter=1 voice_detection=0"'

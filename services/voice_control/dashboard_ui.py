@@ -123,21 +123,21 @@ DASHBOARD_HTML = """<!doctype html>
       <h2>⚙️ 실시간 감도 & 호출어 조절</h2>
       <div style="margin-bottom:10px">
         <div style="display:flex; justify-content:space-between; font-size:13px">
-          <span>조용할 때 문턱 (quiet)</span><strong id="qVal">20</strong>
+          <span>조용할 때 문턱 (quiet)</span><strong id="qVal">220</strong>
         </div>
-        <input id="qSlider" type="range" min="5" max="200" step="5" value="20" oninput="qVal.textContent=this.value" onchange="saveCfg()" />
+        <input id="qSlider" type="range" min="40" max="1000" step="10" value="220" oninput="qVal.textContent=this.value" onchange="saveCfg()" />
       </div>
       <div style="margin-bottom:10px">
         <div style="display:flex; justify-content:space-between; font-size:13px">
-          <span>음악 재생 중 문턱 (playing)</span><strong id="pVal">30</strong>
+          <span>음악 재생 중 문턱 (playing)</span><strong id="pVal">280</strong>
         </div>
-        <input id="pSlider" type="range" min="10" max="300" step="5" value="30" oninput="pVal.textContent=this.value" onchange="saveCfg()" />
+        <input id="pSlider" type="range" min="40" max="1200" step="10" value="280" oninput="pVal.textContent=this.value" onchange="saveCfg()" />
       </div>
       <div style="margin-bottom:6px">
         <div style="display:flex; justify-content:space-between; font-size:13px">
-          <span>배경 대비 배수 (multiplier)</span><strong id="mVal">3.0</strong>
+          <span>배경 대비 배수 (multiplier)</span><strong id="mVal">2.5</strong>
         </div>
-        <input id="mSlider" type="range" min="1.5" max="6.0" step="0.2" value="3.0" oninput="mVal.textContent=Number(this.value).toFixed(1)" onchange="saveCfg()" />
+        <input id="mSlider" type="range" min="1.3" max="5.0" step="0.1" value="2.5" oninput="mVal.textContent=Number(this.value).toFixed(1)" onchange="saveCfg()" />
       </div>
       <label class="toggle">
         <input id="wakeCheck" type="checkbox" checked onchange="saveCfg()" />
