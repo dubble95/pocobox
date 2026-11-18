@@ -22,6 +22,8 @@ scp "${REPO_DIR}/infra/usb-dac/patch-usb-host-dtb.sh" "${HOST}:/tmp/pocobox-depl
 scp "${REPO_DIR}/infra/usb-dac/restore-usb-peripheral-dtb.sh" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/voice/voice.env.example" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/voice/pocobox-voice.service" "${HOST}:/tmp/pocobox-deploy/"
+scp "${REPO_DIR}/infra/voice/pocobox-daily-quiz.service" "${HOST}:/tmp/pocobox-deploy/"
+scp "${REPO_DIR}/infra/voice/pocobox-daily-quiz.timer" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/voice/pocobox-voice.desktop" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/system/99-pocobox-no-powersave.conf" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/system/99-pocobox-nosuspend.conf" "${HOST}:/tmp/pocobox-deploy/"
@@ -29,6 +31,8 @@ scp "${REPO_DIR}/infra/system/55_pocobox.nft" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/display/greetd-kiosk.toml" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/display/display.env" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/display/pocobox-kiosk-start.sh" "${HOST}:/tmp/pocobox-deploy/"
+scp "${REPO_DIR}/infra/display/pocobox-autorotate.py" "${HOST}:/tmp/pocobox-deploy/"
+scp "${REPO_DIR}/infra/display/pocobox-autorotate.service" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/display/pocobox-backlight.service" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/display/99-pocobox-kiosk.conf" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/display/restore-phosh-display.sh" "${HOST}:/tmp/pocobox-deploy/"
@@ -54,6 +58,7 @@ install -m 0755 \$SRC/build-aec3.sh /srv/pocobox/bin/build-aec3.sh
 install -m 0755 \$SRC/patch-usb-host-dtb.sh /srv/pocobox/bin/patch-usb-host-dtb.sh
 install -m 0755 \$SRC/restore-usb-peripheral-dtb.sh /srv/pocobox/bin/restore-usb-peripheral-dtb.sh
 install -m 0755 \$SRC/pocobox-kiosk-start.sh /srv/pocobox/bin/pocobox-kiosk-start.sh
+install -m 0755 \$SRC/pocobox-autorotate.py /srv/pocobox/bin/pocobox-autorotate.py
 install -m 0755 \$SRC/restore-phosh-display.sh /srv/pocobox/bin/restore-phosh-display.sh
 install -m 0755 \$SRC/lms_client.py /srv/pocobox/bin/lms_client.py
 install -m 0755 \$SRC/pocobox_dac_autoplay.py /srv/pocobox/bin/pocobox_dac_autoplay.py
@@ -74,7 +79,10 @@ install -m 0644 \$SRC/pocobox-pulseaudio.service /etc/systemd/system/pocobox-pul
 install -m 0644 \$SRC/pocobox-squeezelite.service /etc/systemd/system/pocobox-squeezelite.service
 install -m 0644 \$SRC/pocobox-dac-autoplay.service /etc/systemd/system/pocobox-dac-autoplay.service
 install -m 0644 \$SRC/pocobox-voice.service /etc/systemd/system/pocobox-voice.service
+install -m 0644 \$SRC/pocobox-daily-quiz.service /etc/systemd/system/pocobox-daily-quiz.service
+install -m 0644 \$SRC/pocobox-daily-quiz.timer /etc/systemd/system/pocobox-daily-quiz.timer
 install -m 0644 \$SRC/pocobox-backlight.service /etc/systemd/system/pocobox-backlight.service
+install -m 0644 \$SRC/pocobox-autorotate.service /etc/systemd/system/pocobox-autorotate.service
 install -m 0644 \$SRC/99-pocobox-kiosk.conf /etc/systemd/system/greetd.service.d/override.conf
 
 install -m 0644 \$SRC/99-pocobox-no-powersave.conf /etc/NetworkManager/conf.d/99-pocobox-no-powersave.conf
@@ -99,10 +107,14 @@ fi
 
 rm -rf \$SRC
 
+if ! command -v wlr-randr >/dev/null 2>&1 && command -v apk >/dev/null 2>&1; then
+  apk add --no-cache wlr-randr || true
+fi
+
 systemctl daemon-reload
 systemctl restart nftables 2>/dev/null || nft -f /etc/nftables.d/55_pocobox.nft 2>/dev/null || true
 systemctl reload NetworkManager 2>/dev/null || true
-systemctl enable --now pocobox-pulseaudio.service pocobox-squeezelite.service pocobox-dac-autoplay.service pocobox-voice.service pocobox-backlight.service
-systemctl restart pocobox-dac-autoplay.service pocobox-voice.service greetd.service
+systemctl enable --now pocobox-pulseaudio.service pocobox-squeezelite.service pocobox-dac-autoplay.service pocobox-voice.service pocobox-daily-quiz.timer pocobox-backlight.service pocobox-autorotate.service
+systemctl restart pocobox-dac-autoplay.service pocobox-voice.service greetd.service pocobox-autorotate.service
 "'
 echo "==> Deploy complete!"

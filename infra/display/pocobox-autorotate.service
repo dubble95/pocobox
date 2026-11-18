@@ -1,0 +1,14 @@
+[Unit]
+Description=PocoBox Kiosk Display Auto-Rotation (iio-sensor-proxy -> wlr-randr)
+After=greetd.service iio-sensor-proxy.service
+Wants=iio-sensor-proxy.service
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/pocobox/display.env
+ExecStart=/srv/pocobox/bin/pocobox-autorotate.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
