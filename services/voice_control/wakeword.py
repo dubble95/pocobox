@@ -1,4 +1,14 @@
-"""Ultra-lightweight local streaming wake-word spotter powered by Vosk grammar mode (~6% CPU)."""
+"""Ultra-lightweight local streaming wake-word spotter powered by Vosk grammar mode (~6% CPU).
+
+Hardened against false triggers (호출 오탐) in music and living-room environments:
+- Distractor / decoy vocabulary in the Kaldi grammar absorbs singing vocals, TV audio,
+  and everyday speech instead of forcing them into wake-word hypotheses.
+- Strict trigger whitelist (drops false-positive magnets like 'ok coco', 'hey coco', 'poker ya').
+- Bare 2-syllable 'poco' is disabled during music playback.
+- Requires high word-level confidence on final results (>= 0.72 in music, >= 0.60 quiet)
+  or multi-chunk consecutive partial stability (3 chunks in music, 2 chunks quiet).
+- Silence-gated periodic reset so utterances crossing the reset boundary are not cut off.
+"""
 
 from __future__ import annotations
 
@@ -12,24 +22,77 @@ log = logging.getLogger("pocobox-voice.wakeword")
 
 DEFAULT_MODEL_DIR = "/srv/pocobox/models/vosk-model-small-en-us-0.15"
 
-# Phonetic matches verified against Korean TTS ("포코야", "포코박스", "헤이 포코") and English ("Hey Poco")
-DEFAULT_WAKE_GRAMMAR: tuple[str, ...] = (
+# Clean trigger phrases verified for Korean ("포코야", "포코박스", "헤이 포코") and English ("Hey Poco")
+DEFAULT_TRIGGER_PHRASES: tuple[str, ...] = (
     "hey poco",
     "ok poco",
-    "poco",
     "poco ya",
     "poco box",
-    "hey coco",
-    "ok coco",
     "coco ya",
-    "coco box",
-    "poker ya",
     "boko ya",
+    "poco",
+)
+
+# Competing non-trigger decoy words in the Kaldi grammar so non-wake speech/singing
+# maps here instead of being forced into wake phrases.
+DEFAULT_DECOY_PHRASES: tuple[str, ...] = (
+    "okay",
+    "hey",
+    "hello",
+    "yeah",
+    "yes",
+    "no",
+    "oh",
+    "ah",
+    "go",
+    "so",
+    "know",
+    "coco",
+    "cocoa",
+    "ok coco",
+    "hey coco",
+    "coco box",
+    "poker",
+    "poker ya",
+    "local",
+    "vocal",
+    "photo",
+    "people",
+    "open",
+    "over",
+    "only",
+    "play",
+    "music",
+    "stop",
+    "what",
+    "that",
+    "this",
+    "the",
+    "and",
+    "you",
+    "for",
+    "from",
+    "with",
+    "have",
+    "are",
+    "not",
+    "but",
+    "all",
+    "can",
+    "just",
+    "like",
+    "time",
+    "one",
+    "two",
+    "three",
+    "thank you",
     "[unk]",
 )
 
-# Phrases that qualify as a wake-word trigger (exclude bare "[unk]" and filler words)
-DEFAULT_TRIGGER_PHRASES: tuple[str, ...] = tuple(p for p in DEFAULT_WAKE_GRAMMAR if p != "[unk]")
+DEFAULT_WAKE_GRAMMAR: tuple[str, ...] = DEFAULT_TRIGGER_PHRASES + DEFAULT_DECOY_PHRASES
+
+# Too short to trust alone during music playback (2-syllable singing lyrics false-trigger easily)
+QUIET_ONLY_PHRASES: frozenset[str] = frozenset({"poco"})
 
 
 class VoskWakeWordSpotter:
@@ -40,18 +103,54 @@ class VoskWakeWordSpotter:
         model_dir: str | None = None,
         sample_rate: int = 16000,
         grammar_phrases: tuple[str, ...] = DEFAULT_WAKE_GRAMMAR,
+        trigger_phrases: tuple[str, ...] | None = None,
         reset_interval_sec: float = 6.0,
+        music_confirm_chunks: int | None = None,
+        quiet_confirm_chunks: int | None = None,
+        music_min_confidence: float | None = None,
+        quiet_min_confidence: float | None = None,
     ) -> None:
         self.model_dir = model_dir or os.environ.get("VOSK_WAKE_MODEL_DIR", DEFAULT_MODEL_DIR)
         self.sample_rate = sample_rate
         self.grammar_phrases = grammar_phrases
-        self.trigger_phrases = tuple(p for p in grammar_phrases if p != "[unk]")
+        if trigger_phrases is not None:
+            self.trigger_phrases = tuple(p for p in trigger_phrases if p != "[unk]")
+        elif grammar_phrases is DEFAULT_WAKE_GRAMMAR:
+            self.trigger_phrases = DEFAULT_TRIGGER_PHRASES
+        else:
+            decoy_set = set(DEFAULT_DECOY_PHRASES)
+            self.trigger_phrases = tuple(p for p in grammar_phrases if p != "[unk]" and p not in decoy_set)
+
         self.reset_interval_sec = reset_interval_sec
+        self.music_confirm_chunks = (
+            music_confirm_chunks
+            if music_confirm_chunks is not None
+            else max(1, int(os.environ.get("VOICE_WAKE_CONFIRM_CHUNKS", "3")))
+        )
+        self.quiet_confirm_chunks = (
+            quiet_confirm_chunks
+            if quiet_confirm_chunks is not None
+            else max(1, int(os.environ.get("VOICE_WAKE_QUIET_CONFIRM_CHUNKS", "2")))
+        )
+        self.music_min_confidence = (
+            music_min_confidence
+            if music_min_confidence is not None
+            else float(os.environ.get("VOICE_WAKE_MIN_CONF", "0.72"))
+        )
+        self.quiet_min_confidence = (
+            quiet_min_confidence
+            if quiet_min_confidence is not None
+            else float(os.environ.get("VOICE_WAKE_QUIET_MIN_CONF", "0.60"))
+        )
 
         self.available = False
         self._model = None
         self._rec = None
         self._last_reset = time.monotonic()
+        self._partial_hit: str | None = None
+        self._partial_streak: int = 0
+        self._has_active_partial: bool = False
+        self.last_event: dict | None = None
 
         if os.environ.get("VOICE_WAKE_ENGINE", "vosk").strip().lower() in ("0", "off", "none", "rms"):
             log.info("Local Vosk wake-word engine disabled via VOICE_WAKE_ENGINE")
@@ -67,10 +166,26 @@ class VoskWakeWordSpotter:
             SetLogLevel(-1)
             t0 = time.monotonic()
             self._model = Model(self.model_dir)
-            self._rec = KaldiRecognizer(self._model, self.sample_rate, json.dumps(list(self.grammar_phrases)))
+            # Deduplicate grammar while keeping order
+            unique_grammar = list(dict.fromkeys(self.grammar_phrases))
+            self._rec = KaldiRecognizer(self._model, self.sample_rate, json.dumps(unique_grammar))
+            try:
+                self._rec.SetWords(True)
+            except Exception:
+                pass
             self.available = True
             self._last_reset = time.monotonic()
-            log.info("Loaded Vosk wake-word spotter (%s) in %.2fs", self.model_dir, time.monotonic() - t0)
+            log.info(
+                "Loaded Vosk wake-word spotter (%s) in %.2fs (triggers=%d decoys=%d confirm=%d/%d conf=%.2f/%.2f)",
+                self.model_dir,
+                time.monotonic() - t0,
+                len(self.trigger_phrases),
+                max(0, len(unique_grammar) - len(self.trigger_phrases)),
+                self.music_confirm_chunks,
+                self.quiet_confirm_chunks,
+                self.music_min_confidence,
+                self.quiet_min_confidence,
+            )
         except Exception as exc:
             log.warning("Failed to initialize Vosk wake-word spotter: %s", exc)
             self.available = False
@@ -82,39 +197,145 @@ class VoskWakeWordSpotter:
             except Exception:
                 pass
         self._last_reset = time.monotonic()
+        self._partial_hit = None
+        self._partial_streak = 0
+        self._has_active_partial = False
 
-    def _match_text(self, text: str) -> str | None:
+    def _match_text(self, text: str, music_playing: bool = False) -> str | None:
         cleaned = (text or "").strip().lower()
         if not cleaned or cleaned == "[unk]":
             return None
         tokens = [t for t in cleaned.split() if t != "[unk]"]
-        joined = " ".join(tokens)
-        if not joined:
+        if not tokens:
             return None
-        for phrase in self.trigger_phrases:
-            if phrase in joined:
-                return phrase
+
+        # Prefer longer / more specific phrases first; require exact token-sequence match
+        ordered = sorted(self.trigger_phrases, key=len, reverse=True)
+        for phrase in ordered:
+            if music_playing and phrase in QUIET_ONLY_PHRASES:
+                continue
+            p_tokens = phrase.split()
+            plen = len(p_tokens)
+            for i in range(len(tokens) - plen + 1):
+                if tokens[i : i + plen] == p_tokens:
+                    return phrase
         return None
 
-    def accept_pcm16k(self, pcm_bytes: bytes) -> str | None:
+    def _phrase_confidence(self, result_obj: dict, phrase: str) -> tuple[float | None, float | None]:
+        words = result_obj.get("result")
+        if not isinstance(words, list) or not words:
+            return None, None
+        phrase_tokens = set(phrase.split())
+        confs = [
+            float(w.get("conf", 1.0))
+            for w in words
+            if isinstance(w, dict) and str(w.get("word", "")).lower() in phrase_tokens
+        ]
+        if not confs:
+            return None, None
+        return sum(confs) / len(confs), min(confs)
+
+    def _check_result_confidence(self, result_obj: dict, phrase: str, min_conf: float) -> bool:
+        avg_conf, min_word_conf = self._phrase_confidence(result_obj, phrase)
+        if avg_conf is None or min_word_conf is None:
+            return True
+        return avg_conf >= min_conf and min_word_conf >= (min_conf - 0.15)
+
+    def accept_pcm16k(
+        self,
+        pcm_bytes: bytes,
+        *,
+        is_silent: bool = False,
+        music_playing: bool = False,
+    ) -> str | None:
         """Feed one 16kHz mono s16le chunk. Returns matched wake phrase or None."""
+        self.last_event = None
         if not self.available or self._rec is None or not pcm_bytes:
             return None
 
         now = time.monotonic()
-        if now - self._last_reset >= self.reset_interval_sec:
+        elapsed = now - self._last_reset
+        # Silence-gated reset: avoid chopping an in-progress wake utterance at the 6s mark
+        if elapsed >= self.reset_interval_sec * 2.5 or (
+            elapsed >= self.reset_interval_sec and (is_silent or not self._has_active_partial)
+        ):
             self.reset()
 
         try:
-            if self._rec.AcceptWaveform(pcm_bytes):
-                text = json.loads(self._rec.Result()).get("text", "")
+            is_final = bool(self._rec.AcceptWaveform(pcm_bytes))
+            if is_final:
+                payload = json.loads(self._rec.Result())
+                text = payload.get("text", "")
             else:
-                text = json.loads(self._rec.PartialResult()).get("partial", "")
+                payload = json.loads(self._rec.PartialResult())
+                text = payload.get("partial", "")
         except Exception:
             return None
 
-        hit = self._match_text(text)
-        if hit:
+        self._has_active_partial = (not is_final) and bool((text or "").strip().replace("[unk]", "").strip())
+        hit = self._match_text(text, music_playing=music_playing)
+        min_conf = self.music_min_confidence if music_playing else self.quiet_min_confidence
+        confirm_needed = self.music_confirm_chunks if music_playing else self.quiet_confirm_chunks
+
+        if is_final:
+            self._partial_hit = None
+            self._partial_streak = 0
+            if hit:
+                avg_conf, min_w_conf = self._phrase_confidence(payload, hit)
+                if not self._check_result_confidence(payload, hit, min_conf):
+                    self.last_event = {
+                        "status": "rejected_conf",
+                        "phrase": hit,
+                        "is_final": True,
+                        "confidence": avg_conf,
+                        "min_word_conf": min_w_conf,
+                        "text": text,
+                    }
+                    log.debug("Rejected low-confidence wake hit '%s' (conf=%s music=%s)", hit, avg_conf, music_playing)
+                    return None
+                self.last_event = {
+                    "status": "triggered",
+                    "phrase": hit,
+                    "is_final": True,
+                    "confidence": avg_conf,
+                    "min_word_conf": min_w_conf,
+                    "text": text,
+                }
+                self.reset()
+                return hit
+            return None
+
+        # Partial result handling: require consecutive stable chunks before firing
+        if not hit:
+            self._partial_hit = None
+            self._partial_streak = 0
+            return None
+
+        if confirm_needed <= 1:
+            self.last_event = {
+                "status": "triggered",
+                "phrase": hit,
+                "is_final": False,
+                "streak": 1,
+                "text": text,
+            }
+            self.reset()
+            return hit
+
+        if hit == self._partial_hit:
+            self._partial_streak += 1
+        else:
+            self._partial_hit = hit
+            self._partial_streak = 1
+
+        if self._partial_streak >= confirm_needed:
+            self.last_event = {
+                "status": "triggered",
+                "phrase": hit,
+                "is_final": False,
+                "streak": self._partial_streak,
+                "text": text,
+            }
             self.reset()
             return hit
         return None

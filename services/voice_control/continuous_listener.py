@@ -1,4 +1,5 @@
-"""Always-on 24/7 hands-free microphone listener with RNNoise DSP, local Vosk wake-word, and auto-ducking hooks."""
+"""Always-on 24/7 hands-free microphone listener with decoupled WebRTC AEC3, anti-aliased DSP,
+local Vosk wake-word spotting, music-safe trigger gating, and auto-ducking hooks."""
 
 from __future__ import annotations
 
@@ -10,19 +11,25 @@ import threading
 import time
 from typing import Callable
 
+from .audio_aec import SqueezeliteVisClient, WebRTCAEC3Processor
 from .audio_capture import CHUNK_BYTES, CHUNK_MS, SAMPLE_RATE, chunk_rms, pcm_to_wav_bytes
 from .audio_dsp import (
     RNNOISE_SAMPLE_RATE,
+    AntiAliasDecimator48kTo16k,
     RNNoiseProcessor,
     SpeechBandpassFilter,
-    decimate_48k_to_16k,
     extract_mono_channel,
+    measure_pcm_peak_and_clip,
 )
+from .telemetry import VoiceTelemetryLogger
 from .wakeword import VoskWakeWordSpotter
 
 log = logging.getLogger("pocobox-voice.continuous")
 
-CHUNK_48K_STEREO_BYTES = (RNNOISE_SAMPLE_RATE * CHUNK_MS // 1000) * 4  # 100ms @ 48kHz, 2ch, s16le = 19200 bytes
+SUBCHUNK_MS = 20
+SUBCHUNKS_PER_CHUNK = max(1, CHUNK_MS // SUBCHUNK_MS)  # 5 x 20ms = 100ms
+SUBCHUNK_48K_STEREO_BYTES = (RNNOISE_SAMPLE_RATE * SUBCHUNK_MS // 1000) * 4  # 3840 bytes
+SUBCHUNK_16K_FRAMES = SAMPLE_RATE * SUBCHUNK_MS // 1000  # 320 frames
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -33,7 +40,7 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 class ContinuousVoiceListener:
-    """Continuously monitors PulseAudio mic with RNNoise + Bandpass DSP + local Vosk wake-word spotting."""
+    """Continuously monitors PulseAudio mic with AEC3 + anti-aliased Bandpass + local Vosk wake-word."""
 
     def __init__(
         self,
@@ -43,6 +50,7 @@ class ContinuousVoiceListener:
         is_music_playing_fn: Callable[[], bool] | None = None,
         on_wake_detected: Callable[[str], None] | None = None,
         on_wake_utterance: Callable[[bytes | None, str], None] | None = None,
+        telemetry: VoiceTelemetryLogger | None = None,
     ) -> None:
         self.on_utterance = on_utterance
         self.is_paused_fn = is_paused_fn or (lambda: False)
@@ -50,8 +58,9 @@ class ContinuousVoiceListener:
         self.is_music_playing_fn = is_music_playing_fn or (lambda: False)
         self.on_wake_detected = on_wake_detected
         self.on_wake_utterance = on_wake_utterance
+        self.telemetry = telemetry
 
-        # Quiet-room thresholds (on RNNoise + bandpass cleaned 16kHz audio)
+        # Quiet-room thresholds (on cleaned 16kHz audio)
         self.min_threshold = float(os.environ.get("VOICE_VAD_THRESHOLD", "40.0"))
         self.speech_multiplier = float(os.environ.get("VOICE_VAD_MULTIPLIER", "3.0"))
         # Playback-aware thresholds (when LMS is actively playing music)
@@ -67,20 +76,52 @@ class ContinuousVoiceListener:
         self.cooldown_sec = float(os.environ.get("VOICE_COOLDOWN_SEC", "1.8"))
         self.source = os.environ.get("VOICE_PULSE_SOURCE") or None
 
-        # DSP & local wake-word configuration
+        # DSP, decoupled AEC3 & local wake-word configuration
         self.mic_channel = os.environ.get("VOICE_MIC_CHANNEL", "right").strip().lower()
         self.use_rnnoise = _env_bool("VOICE_USE_RNNOISE", True)
+        self.rnnoise_on_wake = _env_bool("VOICE_RNNOISE_ON_WAKE", False)
         self.use_bandpass = _env_bool("VOICE_USE_BANDPASS", True)
+        self.use_aec3 = _env_bool("VOICE_USE_AEC3", True)
+        self.rms_fallback_during_music = _env_bool("VOICE_RMS_FALLBACK_DURING_MUSIC", False)
+        self.wake_min_rms = float(os.environ.get("VOICE_WAKE_MIN_RMS", "55.0"))
+        self.wake_snr_ratio = float(os.environ.get("VOICE_WAKE_SNR_RATIO", "1.25"))
+
+        self.bandpass_low_hz = float(os.environ.get("VOICE_BANDPASS_LOW_HZ", "150.0"))
+        self.bandpass_high_hz = float(os.environ.get("VOICE_BANDPASS_HIGH_HZ", "6000.0"))
+
         self.rnnoise = RNNoiseProcessor() if self.use_rnnoise else None
-        self.bandpass = SpeechBandpassFilter(sample_rate=SAMPLE_RATE, low_hz=250.0, high_hz=3500.0) if self.use_bandpass else None
+        self.decimator_wake = AntiAliasDecimator48kTo16k()
+        self.decimator_stt = AntiAliasDecimator48kTo16k()
+        self.wake_bandpass = (
+            SpeechBandpassFilter(sample_rate=SAMPLE_RATE, low_hz=self.bandpass_low_hz, high_hz=self.bandpass_high_hz)
+            if self.use_bandpass
+            else None
+        )
+        self.stt_bandpass = (
+            SpeechBandpassFilter(sample_rate=SAMPLE_RATE, low_hz=self.bandpass_low_hz, high_hz=self.bandpass_high_hz)
+            if self.use_bandpass
+            else None
+        )
+
+        self.aec3 = WebRTCAEC3Processor(sample_rate=SAMPLE_RATE) if self.use_aec3 else None
+        self.vis_client = SqueezeliteVisClient(target_rate=SAMPLE_RATE) if self.use_aec3 else None
         self.wake_spotter = VoskWakeWordSpotter(sample_rate=SAMPLE_RATE)
 
         self.state: str = "stopped"  # stopped | waiting | wake | recording | processing | paused
         self.ambient_rms: float = 20.0
+        self.wake_ambient_rms: float = 20.0
         self.current_rms: float = 0.0
+        self.raw_peak: int = 0
+        self.raw_clip_ratio: float = 0.0
+        self._clip_warn_until: float = 0.0
         self.music_playing: bool = False
         self.last_speech_at: float | None = None
         self.last_wake_phrase: str | None = None
+        self.last_wake_meta: dict = {}
+        self.false_wake_rejected_count: int = 0
+        self._last_clip_log_at: float = 0.0
+        self._wake_rms_window: collections.deque[float] = collections.deque(maxlen=6)
+        self._wake_clip_ring: collections.deque[bytes] = collections.deque(maxlen=20)  # 2.0s @ 100ms
 
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -91,12 +132,20 @@ class ContinuousVoiceListener:
         return bool(self.rnnoise and self.rnnoise.available)
 
     @property
+    def aec3_available(self) -> bool:
+        return bool(self.aec3 and self.aec3.available)
+
+    @property
+    def aec3_active(self) -> bool:
+        return bool(self.aec3 and self.aec3.active)
+
+    @property
     def wake_engine_name(self) -> str:
         return "vosk" if self.wake_spotter.available else "rms"
 
     @property
     def _use_48k_stereo(self) -> bool:
-        return self.rnnoise_active or self.mic_channel in ("left", "right")
+        return self.rnnoise_active or self.aec3_available or self.mic_channel in ("left", "right")
 
     def _set_state(self, new_state: str, rms: float = 0.0) -> None:
         changed = new_state != self.state
@@ -123,13 +172,34 @@ class ContinuousVoiceListener:
     def stop(self) -> None:
         self._stop_event.set()
         self._set_state("stopped")
+        if self.vis_client is not None:
+            self.vis_client.close()
+        if self.aec3 is not None:
+            self.aec3.close()
 
     def current_threshold(self) -> float:
         if self.music_playing:
             return max(self.playing_min_threshold, self.ambient_rms * self.playing_multiplier)
         return max(self.min_threshold, self.ambient_rms * self.speech_multiplier)
 
+    def should_allow_rms_fallback(self) -> bool:
+        """During music playback with local wake-word active, suppress RMS spikes by default."""
+        if not self.music_playing:
+            return True
+        if not self.wake_spotter.available:
+            return True
+        return self.rms_fallback_during_music
+
+    def passes_wake_energy_gate(self, recent_peak_rms: float) -> bool:
+        """Reject faint reverb/music false wake hits that do not rise above floor energy."""
+        if recent_peak_rms < self.wake_min_rms:
+            return False
+        if self.music_playing and recent_peak_rms < self.wake_ambient_rms * self.wake_snr_ratio:
+            return False
+        return True
+
     def status_dict(self) -> dict:
+        now = time.monotonic()
         return {
             "continuous_listen": self._thread is not None and self._thread.is_alive(),
             "listening_state": self.state,
@@ -140,8 +210,20 @@ class ContinuousVoiceListener:
             "quiet_threshold": self.min_threshold,
             "playing_threshold": self.playing_min_threshold,
             "multiplier": self.playing_multiplier,
+            "raw_peak": self.raw_peak,
+            "raw_clip_ratio": round(self.raw_clip_ratio, 4),
+            "clip_warning": now < self._clip_warn_until,
             "rnnoise_enabled": self.rnnoise_active,
-            "bandpass_enabled": self.bandpass is not None,
+            "rnnoise_on_wake": self.rnnoise_on_wake,
+            "aec3_enabled": self.aec3_available,
+            "aec3_active": self.aec3_active,
+            "aec3_reduction_db": round(self.aec3.echo_reduction_db, 1) if self.aec3 else 0.0,
+            "vis_connected": bool(self.vis_client and self.vis_client.connected),
+            "vis_rate": self.vis_client.current_rate if self.vis_client else 0,
+            "bandpass_enabled": self.wake_bandpass is not None,
+            "bandpass_range": f"{int(self.bandpass_low_hz)}-{int(self.bandpass_high_hz)}Hz",
+            "rms_fallback_during_music": self.rms_fallback_during_music,
+            "false_wake_rejected_count": self.false_wake_rejected_count,
             "wake_engine": self.wake_engine_name,
             "mic_channel": self.mic_channel,
             "last_wake_phrase": self.last_wake_phrase,
@@ -149,6 +231,9 @@ class ContinuousVoiceListener:
         }
 
     def _refresh_music_state(self, now: float) -> None:
+        if self.vis_client is not None and self.vis_client.connected:
+            self.music_playing = self.vis_client.is_playing
+            return
         if now - self._last_music_check >= 2.0:
             self._last_music_check = now
             try:
@@ -162,57 +247,146 @@ class ContinuousVoiceListener:
         env.setdefault("PULSE_SERVER", "unix:/run/user/10000/pulse/native")
         rate = RNNOISE_SAMPLE_RATE if self._use_48k_stereo else SAMPLE_RATE
         channels = 2 if self._use_48k_stereo else 1
+        latency_ms = 40 if self._use_48k_stereo else 100
         cmd = [
             "parecord",
             "--raw",
             "--format=s16le",
             f"--rate={rate}",
             f"--channels={channels}",
-            "--latency-msec=100",
+            f"--latency-msec={latency_ms}",
         ]
         if self.source:
             cmd.extend(["--device", self.source])
         return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
 
-    def _read_clean_16k_chunk(self, proc: subprocess.Popen) -> bytes:
-        assert proc.stdout is not None
-        expected = CHUNK_48K_STEREO_BYTES if self._use_48k_stereo else CHUNK_BYTES
+    def _read_exact(self, stream, expected: int) -> bytes:
         buf = bytearray()
         while len(buf) < expected:
-            part = proc.stdout.read(expected - len(buf))
+            part = stream.read(expected - len(buf))
             if not part:
                 return b""
             buf.extend(part)
-        raw = bytes(buf)
+        return bytes(buf)
 
-        if self._use_48k_stereo:
-            mono48 = extract_mono_channel(raw, self.mic_channel)
-            if self.rnnoise is not None and self.rnnoise.available:
-                mono48, _ = self.rnnoise.process_48k_pcm(mono48)
-            pcm16 = decimate_48k_to_16k(mono48)
-        else:
-            pcm16 = raw
+    def _read_clean_16k_chunk(self, proc: subprocess.Popen) -> tuple[bytes, bytes]:
+        """Read 100ms of audio in 20ms sub-chunks and return (wake_pcm16, stt_pcm16)."""
+        assert proc.stdout is not None
+        if not self._use_48k_stereo:
+            raw = self._read_exact(proc.stdout, CHUNK_BYTES)
+            if not raw:
+                return b"", b""
+            peak, clip_ratio = measure_pcm_peak_and_clip(raw)
+            self._update_peak_stats(peak, clip_ratio)
+            out = self.wake_bandpass.process_pcm(raw) if self.wake_bandpass is not None else raw
+            return out, out
 
-        if self.bandpass is not None:
-            pcm16 = self.bandpass.process_pcm(pcm16)
-        return pcm16
+        wake_parts: list[bytes] = []
+        stt_parts: list[bytes] = []
+        max_peak = 0
+        max_clip = 0.0
+
+        for _ in range(SUBCHUNKS_PER_CHUNK):
+            raw_sub = self._read_exact(proc.stdout, SUBCHUNK_48K_STEREO_BYTES)
+            if not raw_sub:
+                return b"", b""
+
+            mono48 = extract_mono_channel(raw_sub, self.mic_channel)
+            peak, clip_ratio = measure_pcm_peak_and_clip(mono48)
+            if peak > max_peak:
+                max_peak = peak
+            if clip_ratio > max_clip:
+                max_clip = clip_ratio
+
+            # Anti-aliased 48k -> 16k decimation BEFORE bandpass & AEC3
+            clean16 = self.decimator_wake.process_48k_to_16k(mono48)
+
+            # Decoupled WebRTC AEC3 using Squeezelite VISEXPORT shm reference (zero DAC impact)
+            ref_stereo = (
+                self.vis_client.pull_16k_stereo(SUBCHUNK_16K_FRAMES)
+                if self.vis_client is not None
+                else None
+            )
+            if self.aec3 is not None and self.aec3.available:
+                aec16 = self.aec3.process_chunk(clean16, ref_stereo)
+            else:
+                aec16 = clean16
+
+            wake_sub = self.wake_bandpass.process_pcm(aec16) if self.wake_bandpass is not None else aec16
+
+            if self.aec3_active:
+                # AEC3 already subtracted music; keep STT path crisp without RNNoise vocal distortion
+                stt_sub = wake_sub
+            elif self.rnnoise is not None and self.rnnoise.available:
+                denoised48, _ = self.rnnoise.process_48k_pcm(mono48)
+                denoised16 = self.decimator_stt.process_48k_to_16k(denoised48)
+                stt_sub = self.stt_bandpass.process_pcm(denoised16) if self.stt_bandpass is not None else denoised16
+                if self.rnnoise_on_wake:
+                    wake_sub = stt_sub
+            else:
+                stt_sub = wake_sub
+
+            wake_parts.append(wake_sub)
+            stt_parts.append(stt_sub)
+
+        self._update_peak_stats(max_peak, max_clip)
+        return b"".join(wake_parts), b"".join(stt_parts)
+
+    def _update_peak_stats(self, peak: int, clip_ratio: float) -> None:
+        self.raw_peak = peak
+        self.raw_clip_ratio = clip_ratio
+        if peak >= 30000:
+            now = time.monotonic()
+            self._clip_warn_until = now + 2.5
+            if self.state == "waiting" and self.telemetry is not None and (now - self._last_clip_log_at) >= 30.0:
+                self._last_clip_log_at = now
+                self.telemetry.record(
+                    "clip_detected",
+                    raw_peak=peak,
+                    clip_ratio=clip_ratio,
+                    music_playing=self.music_playing,
+                )
+
+    def _build_wake_telemetry_meta(self, phrase: str, wake_peak: float, wake_ev: dict | None = None) -> dict:
+        amb = max(self.wake_ambient_rms, 1.0)
+        meta: dict = {
+            "phrase": phrase,
+            "music_playing": self.music_playing,
+            "wake_peak_rms": round(wake_peak, 1),
+            "wake_ambient_rms": round(self.wake_ambient_rms, 1),
+            "snr_ratio": round(wake_peak / amb, 3),
+            "raw_peak": self.raw_peak,
+            "clip_ratio": round(self.raw_clip_ratio, 4),
+            "aec3_active": self.aec3_active,
+            "aec3_reduction_db": round(self.aec3.echo_reduction_db, 1) if self.aec3 else 0.0,
+        }
+        if wake_ev:
+            for k in ("is_final", "confidence", "min_word_conf", "streak", "text"):
+                if wake_ev.get(k) is not None:
+                    meta[k] = wake_ev[k]
+        return meta
 
     def _run_loop(self) -> None:
         log.info(
-            "Starting Voice 2.0 listener (channel=%s rnnoise=%s bandpass=%s wake=%s quiet=%.0f*%.1f playing=%.0f*%.1f)",
+            "Starting Voice 2.1 listener (channel=%s aec3=%s vis=%s rnnoise=%s(wake=%s) bp=%d-%dHz wake=%s rms_in_music=%s)",
             self.mic_channel,
+            self.aec3_available,
+            bool(self.vis_client and self.vis_client.connected),
             self.rnnoise_active,
-            self.bandpass is not None,
+            self.rnnoise_on_wake,
+            int(self.bandpass_low_hz),
+            int(self.bandpass_high_hz),
             self.wake_engine_name,
-            self.min_threshold,
-            self.speech_multiplier,
-            self.playing_min_threshold,
-            self.playing_multiplier,
+            self.rms_fallback_during_music,
         )
         while not self._stop_event.is_set():
             proc = self._spawn_parecord()
-            if self.bandpass is not None:
-                self.bandpass.reset()
+            self.decimator_wake.reset()
+            self.decimator_stt.reset()
+            if self.wake_bandpass is not None:
+                self.wake_bandpass.reset()
+            if self.stt_bandpass is not None:
+                self.stt_bandpass.reset()
             self.wake_spotter.reset()
 
             preroll: collections.deque[bytes] = collections.deque(maxlen=self.preroll_chunks)
@@ -228,8 +402,8 @@ class ContinuousVoiceListener:
 
             try:
                 while not self._stop_event.is_set():
-                    data = self._read_clean_16k_chunk(proc)
-                    if not data:
+                    wake_data, stt_data = self._read_clean_16k_chunk(proc)
+                    if not wake_data:
                         break
 
                     if self.is_paused_fn():
@@ -243,28 +417,85 @@ class ContinuousVoiceListener:
 
                     now = time.monotonic()
                     self._refresh_music_state(now)
-                    rms = chunk_rms(data)
+                    rms = chunk_rms(stt_data)
+                    wake_rms = chunk_rms(wake_data)
                     self.current_rms = rms
+                    self._wake_rms_window.append(wake_rms)
+                    self._wake_clip_ring.append(wake_data)
 
                     # During cooldown, keep tracking ambient_rms cleanly
                     if now < cooldown_until:
                         self._set_state("waiting")
-                        preroll.append(data)
+                        preroll.append(stt_data)
                         capped = min(rms, 2500.0)
                         alpha = 0.15 if capped > self.ambient_rms else 0.06
                         self.ambient_rms = self.ambient_rms * (1.0 - alpha) + capped * alpha
+                        wcap = min(wake_rms, 2500.0)
+                        self.wake_ambient_rms = self.wake_ambient_rms * 0.90 + wcap * 0.10
                         continue
 
                     threshold = self.current_threshold()
 
                     if not recording:
                         self._set_state("waiting")
-                        preroll.append(data)
+                        preroll.append(stt_data)
 
-                        # Trigger Path 1: Local streaming Vosk wake-word spotter (works even during music!)
-                        hit = self.wake_spotter.accept_pcm16k(data) if self.wake_spotter.available else None
+                        # Trigger Path 1: Local streaming Vosk wake-word spotter on AEC3 + anti-aliased audio
+                        is_silent = wake_rms < max(self.min_threshold, self.wake_ambient_rms * 1.4)
+                        hit = (
+                            self.wake_spotter.accept_pcm16k(
+                                wake_data,
+                                is_silent=is_silent,
+                                music_playing=self.music_playing,
+                            )
+                            if self.wake_spotter.available
+                            else None
+                        )
+                        wake_ev = self.wake_spotter.last_event
+                        recent_peak = max(self._wake_rms_window) if self._wake_rms_window else wake_rms
+
+                        # Log low-confidence rejections from Vosk for statistical analysis
+                        if hit is None and wake_ev and wake_ev.get("status") == "rejected_conf":
+                            self.false_wake_rejected_count += 1
+                            if self.telemetry is not None:
+                                meta = self._build_wake_telemetry_meta(str(wake_ev.get("phrase", "")), recent_peak, wake_ev)
+                                clip_wav = pcm_to_wav_bytes(b"".join(self._wake_clip_ring))
+                                clip_path = self.telemetry.save_wake_clip(clip_wav, "rejected", {**meta, "reject_reason": "conf"})
+                                self.telemetry.record("wake_rejected_conf", clip_path=clip_path, **meta)
+
                         if hit and self.on_wake_utterance is not None:
-                            log.info("Local wake-word triggered: '%s' (rms=%.1f ambient=%.1f)", hit, rms, self.ambient_rms)
+                            if not self.passes_wake_energy_gate(recent_peak):
+                                self.false_wake_rejected_count += 1
+                                log.info(
+                                    "Rejected weak wake false-positive '%s' (peak=%.1f wake_amb=%.1f music=%s)",
+                                    hit,
+                                    recent_peak,
+                                    self.wake_ambient_rms,
+                                    self.music_playing,
+                                )
+                                if self.telemetry is not None:
+                                    meta = self._build_wake_telemetry_meta(hit, recent_peak, wake_ev)
+                                    clip_wav = pcm_to_wav_bytes(b"".join(self._wake_clip_ring))
+                                    clip_path = self.telemetry.save_wake_clip(clip_wav, "rejected", {**meta, "reject_reason": "energy"})
+                                    self.telemetry.record("wake_rejected_energy", clip_path=clip_path, **meta)
+                                hit = None
+                        if hit and self.on_wake_utterance is not None:
+                            meta = self._build_wake_telemetry_meta(hit, recent_peak, wake_ev)
+                            clip_path = None
+                            if self.telemetry is not None:
+                                clip_wav = pcm_to_wav_bytes(b"".join(self._wake_clip_ring))
+                                clip_path = self.telemetry.save_wake_clip(clip_wav, "pending", meta)
+                                self.telemetry.record("wake_triggered", clip_path=clip_path, **meta)
+                            self.last_wake_meta = {**meta, "clip_path": clip_path}
+                            log.info(
+                                "Local wake-word triggered: '%s' (rms=%.1f wake_peak=%.1f wake_amb=%.1f music=%s aec3=%.1fdB)",
+                                hit,
+                                rms,
+                                recent_peak,
+                                self.wake_ambient_rms,
+                                self.music_playing,
+                                self.aec3.echo_reduction_db if self.aec3 else 0.0,
+                            )
                             self.last_wake_phrase = hit
                             self.last_speech_at = time.time()
                             wake_phrase = hit
@@ -283,8 +514,10 @@ class ContinuousVoiceListener:
                             self._set_state("recording", rms)
                             continue
 
-                        # Trigger Path 2: Adaptive RMS speech-spike fallback (1-breath command over RNNoise floor)
-                        if rms >= threshold:
+                        # Trigger Path 2: Adaptive RMS speech-spike fallback
+                        # Disabled during active music playback when local wake-word is running so
+                        # musical crescendos / drums never hijack the listener or waste cloud STT calls.
+                        if self.should_allow_rms_fallback() and rms >= threshold:
                             consecutive_speech += 1
                             if consecutive_speech >= self.onset_chunks:
                                 recording = True
@@ -298,8 +531,11 @@ class ContinuousVoiceListener:
                             capped = min(rms, 2500.0)
                             alpha = 0.12 if capped > self.ambient_rms else 0.06
                             self.ambient_rms = self.ambient_rms * (1.0 - alpha) + capped * alpha
+                            wcap = min(wake_rms, 2500.0)
+                            walpha = 0.12 if wcap > self.wake_ambient_rms else 0.06
+                            self.wake_ambient_rms = self.wake_ambient_rms * (1.0 - walpha) + wcap * walpha
                     else:
-                        captured.append(data)
+                        captured.append(stt_data)
                         if wake_mode:
                             # Music is ducked to ~18%, so use sensitive quiet-room command threshold
                             cmd_threshold = max(self.min_threshold, 35.0)
@@ -334,7 +570,11 @@ class ContinuousVoiceListener:
                             # Keep feeding local Vosk wake spotter during the first 1.5s of RMS recording
                             # so "포코야" still triggers instant Auto-Ducking even if RMS onset fired on syllable 1!
                             if self.wake_spotter.available and self.on_wake_utterance is not None and len(captured) <= 15:
-                                hit = self.wake_spotter.accept_pcm16k(data)
+                                hit = self.wake_spotter.accept_pcm16k(
+                                    wake_data,
+                                    is_silent=False,
+                                    music_playing=self.music_playing,
+                                )
                                 if hit:
                                     log.info("Local wake-word triggered mid-onset: '%s' (rms=%.1f)", hit, rms)
                                     self.last_wake_phrase = hit

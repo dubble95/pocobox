@@ -1,9 +1,11 @@
-"""Speech-band DSP filters (250Hz-3500Hz bandpass) and RNNoise neural denoiser for PocoBox.
+"""Speech-band DSP filters, anti-aliased 48k->16k decimator, clipping meter, and RNNoise for PocoBox.
 
-- SpeechBandpassFilter: Cascaded 2nd-order Butterworth HPF (250Hz) + LPF (3500Hz)
-  to remove low-frequency speaker bass/kick energy and high-frequency hiss.
-- RNNoiseProcessor: Optional ctypes wrapper around native librnnoise.so.0 (48kHz, 10ms frames)
-  that suppresses room noise (-40dB+) and background music (-10dB) while keeping speech intact.
+- AntiAliasDecimator48kTo16k: 21-tap windowed-sinc linear-phase FIR low-pass (~6.5kHz)
+  applied at 48kHz BEFORE 3:1 decimation so 8-24kHz speaker cymbals/hiss do not alias
+  into the 0-8kHz speech band.
+- SpeechBandpassFilter: Cascaded 2nd-order Butterworth HPF (150Hz) + LPF (6000Hz)
+  to remove low-frequency speaker bass/rumble while preserving consonant bursts ('ㅍ'/'ㅋ').
+- RNNoiseProcessor: Optional ctypes wrapper around native librnnoise.so.0 (48kHz, 10ms frames).
 - Works cleanly with zero mandatory external dependencies (graceful pure-Python fallback).
 """
 
@@ -88,13 +90,13 @@ def make_lowpass(cutoff_hz: float = 3500.0, sample_rate: int = 16000, q: float =
 
 
 class SpeechBandpassFilter:
-    """Cascaded 250Hz HPF + 3500Hz LPF tailored for human speech intelligibility."""
+    """Cascaded HPF + LPF tailored for human speech & wake-word intelligibility."""
 
     def __init__(
         self,
         sample_rate: int = 16000,
-        low_hz: float = 250.0,
-        high_hz: float = 3500.0,
+        low_hz: float = 150.0,
+        high_hz: float = 6000.0,
     ) -> None:
         self.sample_rate = sample_rate
         self.low_hz = low_hz
@@ -118,10 +120,10 @@ class SpeechBandpassFilter:
 
 def filter_wav_speech_band(
     wav_bytes: bytes,
-    low_hz: float = 250.0,
-    high_hz: float = 3500.0,
+    low_hz: float = 150.0,
+    high_hz: float = 6000.0,
 ) -> bytes:
-    """Apply 250Hz-3500Hz bandpass filter to a 16-bit mono WAV payload."""
+    """Apply speech bandpass filter to a 16-bit mono WAV payload."""
     with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
         rate = wf.getframerate()
         ch = wf.getnchannels()
@@ -163,6 +165,114 @@ def extract_mono_channel(stereo_pcm: bytes, channel: str = "right") -> bytes:
     for i in range(n_frames):
         out[i] = (samples[2 * i] + samples[2 * i + 1]) // 2
     return out.tobytes()
+
+
+def measure_pcm_peak_and_clip(pcm_bytes: bytes, clip_level: int = 30000) -> tuple[int, float]:
+    """Measure maximum absolute sample value and fraction of samples >= clip_level."""
+    n = len(pcm_bytes) // 2
+    if n == 0:
+        return 0, 0.0
+    try:
+        import numpy as np  # type: ignore
+
+        arr = np.abs(np.frombuffer(pcm_bytes[: n * 2], dtype=np.int16).astype(np.int32))
+        peak = int(arr.max())
+        clip_ratio = float(np.count_nonzero(arr >= clip_level)) / float(n)
+        return peak, clip_ratio
+    except Exception:
+        samples = array.array("h")
+        samples.frombytes(pcm_bytes[: n * 2])
+        peak = 0
+        clipped = 0
+        for s in samples:
+            a = -s if s < 0 else s
+            if a > peak:
+                peak = a
+            if a >= clip_level:
+                clipped += 1
+        return peak, clipped / float(n)
+
+
+def _design_lowpass_fir(num_taps: int = 21, cutoff_hz: float = 6500.0, sample_rate: int = 48000) -> list[float]:
+    """Design a unity-gain Hann-windowed sinc linear-phase FIR low-pass filter."""
+    fc = cutoff_hz / float(sample_rate)
+    mid = (num_taps - 1) / 2.0
+    taps: list[float] = []
+    for i in range(num_taps):
+        n = i - mid
+        sinc = 2.0 * fc if abs(n) < 1e-9 else math.sin(2.0 * math.pi * fc * n) / (math.pi * n)
+        window = 0.5 - 0.5 * math.cos(2.0 * math.pi * i / (num_taps - 1))
+        taps.append(sinc * window)
+    total = sum(taps) or 1.0
+    return [t / total for t in taps]
+
+
+class AntiAliasDecimator48kTo16k:
+    """Streaming linear-phase anti-aliasing FIR LPF (6.5kHz @ 48kHz) + 3:1 decimation to 16kHz."""
+
+    def __init__(self, num_taps: int = 21, cutoff_hz: float = 6500.0) -> None:
+        self.num_taps = num_taps
+        self.cutoff_hz = cutoff_hz
+        self._coeffs_list = _design_lowpass_fir(num_taps=num_taps, cutoff_hz=cutoff_hz, sample_rate=48000)
+        self._tail_len = num_taps - 1
+        self._np = None
+        self._coeffs_np = None
+        self._tail_np = None
+        self._tail_py = [0.0] * self._tail_len
+        try:
+            import numpy as np  # type: ignore
+
+            self._np = np
+            self._coeffs_np = np.array(self._coeffs_list, dtype=np.float32)
+            self._tail_np = np.zeros(self._tail_len, dtype=np.float32)
+        except Exception:
+            pass
+
+    def reset(self) -> None:
+        self._tail_py = [0.0] * self._tail_len
+        if self._np is not None:
+            self._tail_np = self._np.zeros(self._tail_len, dtype=self._np.float32)
+
+    def process_48k_to_16k(self, pcm48_mono: bytes) -> bytes:
+        n_out = (len(pcm48_mono) // 2) // 3
+        if n_out == 0:
+            return b""
+        n_in = n_out * 3
+
+        if self._np is not None and self._coeffs_np is not None and self._tail_np is not None:
+            np = self._np
+            cur = np.frombuffer(pcm48_mono[: n_in * 2], dtype=np.int16).astype(np.float32)
+            ext = np.concatenate((self._tail_np, cur))
+            # Build strided view of shape (n_out, num_taps) stepping by 3 samples -> SIMD dot product
+            stride = ext.strides[0]
+            windows = np.lib.stride_tricks.as_strided(
+                ext,
+                shape=(n_out, self.num_taps),
+                strides=(stride * 3, stride),
+            )
+            dec = windows @ self._coeffs_np
+            self._tail_np = ext[-self._tail_len :].copy()
+            return np.clip(np.rint(dec), -32768, 32767).astype(np.int16).tobytes()
+
+        samples = array.array("h")
+        samples.frombytes(pcm48_mono[: n_in * 2])
+        ext_py = self._tail_py + [float(x) for x in samples]
+        coeffs = self._coeffs_list
+        taps = self.num_taps
+        out = array.array("h", [0] * n_out)
+        for i in range(n_out):
+            base = i * 3
+            acc = 0.0
+            for k in range(taps):
+                acc += ext_py[base + k] * coeffs[k]
+            if acc > 32767.0:
+                out[i] = 32767
+            elif acc < -32768.0:
+                out[i] = -32768
+            else:
+                out[i] = int(round(acc))
+        self._tail_py = ext_py[-self._tail_len :]
+        return out.tobytes()
 
 
 def decimate_48k_to_16k(pcm48_mono: bytes) -> bytes:

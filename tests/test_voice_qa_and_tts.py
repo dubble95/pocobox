@@ -117,7 +117,7 @@ class TestVoiceQAAndTTS(unittest.TestCase):
         spoken_texts: list[str] = []
         observed_ducked_vol: list[int] = []
 
-        def fake_speak(text: str, lang: str | None = None) -> bool:
+        def fake_speak(text: str, lang: str | None = None, **kwargs: object) -> bool:
             spoken_texts.append(text)
             observed_ducked_vol.append(fake_lms.volume)
             return True

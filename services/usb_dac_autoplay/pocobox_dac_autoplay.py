@@ -201,14 +201,44 @@ def write_audio_state(card_id: str | None, aec_active: bool) -> None:
         log.warning("Failed writing %s: %s", AUDIO_STATE_FILE, exc)
 
 
+_VISEXPORT_SUPPORTED: bool | None = None
+
+
+def squeezelite_supports_visexport() -> bool:
+    """Return True if installed squeezelite binary supports -v (VISEXPORT shared memory PCM tap)."""
+    global _VISEXPORT_SUPPORTED
+    if _VISEXPORT_SUPPORTED is not None:
+        return _VISEXPORT_SUPPORTED
+    try:
+        res = subprocess.run(["/usr/local/bin/squeezelite", "-?"], capture_output=True, text=True, timeout=3.0)
+        help_text = ((res.stdout or "") + "\n" + (res.stderr or "")).lower()
+        _VISEXPORT_SUPPORTED = ("visexport" in help_text) or ("-v" in help_text and ("visualiz" in help_text or "visualis" in help_text))
+    except Exception:
+        _VISEXPORT_SUPPORTED = False
+    return _VISEXPORT_SUPPORTED
+
+
+def ensure_visexport_arg(extra_args: str) -> str:
+    """Append -v when ENABLE_VISEXPORT=1 and squeezelite supports -DVISEXPORT (zero impact on ALSA DAC)."""
+    if not cfg_bool("ENABLE_VISEXPORT", True):
+        return extra_args
+    tokens = shlex.split(extra_args)
+    if "-v" in tokens:
+        return extra_args
+    if squeezelite_supports_visexport():
+        return f"{extra_args} -v".strip()
+    return extra_args
+
+
 def write_squeezelite_env(output_device: str, extra_args: str, pulse_sink: str | None = None) -> bool:
     """Write /etc/pocobox/squeezelite.env. Return True if content changed."""
+    final_extra = ensure_visexport_arg(extra_args)
     lines = [
         "# Managed by pocobox-dac-autoplay",
         f"SQUEEZELITE_NAME={cfg('PLAYER_NAME', 'pocobox')}",
         f"SQUEEZELITE_SERVER={cfg('LMS_HOST', '127.0.0.1')}",
         f"SQUEEZELITE_OUTPUT={output_device}",
-        f"SQUEEZELITE_EXTRA_ARGS={extra_args}",
+        f"SQUEEZELITE_EXTRA_ARGS={final_extra}",
     ]
     if pulse_sink:
         lines.append(f"PULSE_SINK={pulse_sink}")

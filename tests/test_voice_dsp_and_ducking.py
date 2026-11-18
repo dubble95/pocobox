@@ -14,13 +14,17 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "services"))
 sys.path.insert(0, str(REPO_ROOT / "services" / "lms_client"))
 
+from voice_control.audio_aec import WebRTCAEC3Processor, resample_stereo_pcm  # noqa: E402
 from voice_control.audio_capture import chunk_rms, pcm_to_wav_bytes  # noqa: E402
 from voice_control.audio_dsp import (  # noqa: E402
+    AntiAliasDecimator48kTo16k,
     SpeechBandpassFilter,
     decimate_48k_to_16k,
     extract_mono_channel,
     filter_wav_speech_band,
+    measure_pcm_peak_and_clip,
 )
+from voice_control.continuous_listener import ContinuousVoiceListener  # noqa: E402
 from voice_control.daemon import VoiceController  # noqa: E402
 from voice_control.intent_schema import IntentAction, VoiceIntent  # noqa: E402
 from voice_control.wakeword import VoskWakeWordSpotter  # noqa: E402
@@ -164,6 +168,264 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
         ), mock.patch.object(ctrl, "listen_once") as mock_listen:
             ctrl.handle_continuous_wav(wav)
             mock_listen.assert_called_once_with(dry_run=False)
+
+    def test_antialias_decimator_rejects_12khz_alias_and_preserves_1khz(self) -> None:
+        # 12kHz at 48kHz would fold straight to 4kHz with naive decimation; FIR anti-alias must crush it
+        hf_48k = _make_sine_pcm(12000.0, dur_sec=0.2, sample_rate=48000, amp=12000)
+        voice_48k = _make_sine_pcm(1000.0, dur_sec=0.2, sample_rate=48000, amp=12000)
+
+        dec_hf = AntiAliasDecimator48kTo16k()
+        # Process in 20ms streaming sub-chunks (1920 bytes @ 48kHz mono) to verify boundary continuity
+        hf_out = b"".join(dec_hf.process_48k_to_16k(hf_48k[i : i + 1920]) for i in range(0, len(hf_48k), 1920))
+
+        dec_v = AntiAliasDecimator48kTo16k()
+        v_out = b"".join(dec_v.process_48k_to_16k(voice_48k[i : i + 1920]) for i in range(0, len(voice_48k), 1920))
+
+        rms_hf = chunk_rms(hf_out[640:])
+        rms_v = chunk_rms(v_out[640:])
+        self.assertGreater(rms_v, 7500.0)
+        self.assertLess(rms_hf, rms_v * 0.05)  # > 26 dB stopband rejection
+
+    def test_measure_pcm_peak_and_clip(self) -> None:
+        pcm = struct.pack("<4h", 500, -31500, 32700, -1000)
+        peak, ratio = measure_pcm_peak_and_clip(pcm, clip_level=30000)
+        self.assertEqual(peak, 32700)
+        self.assertAlmostEqual(ratio, 0.5, places=3)
+
+    def test_wake_spotter_music_mode_filtering_and_confirmation(self) -> None:
+        import json as _json
+
+        class _FakeRec:
+            def __init__(self, responses: list[tuple[bool, dict]]) -> None:
+                self._responses = list(responses)
+                self.resets = 0
+
+            def AcceptWaveform(self, data: bytes) -> bool:
+                return self._responses[0][0]
+
+            def Result(self) -> str:
+                return _json.dumps(self._responses.pop(0)[1])
+
+            def PartialResult(self) -> str:
+                return _json.dumps(self._responses.pop(0)[1])
+
+            def Reset(self) -> None:
+                self.resets += 1
+
+        with mock.patch.dict(os.environ, {"VOICE_WAKE_ENGINE": "off"}):
+            spotter = VoskWakeWordSpotter(music_confirm_chunks=2, music_min_confidence=0.6)
+
+        # Bare 2-syllable 'poco' ignored while music plays, allowed when quiet
+        self.assertIsNone(spotter._match_text("poco", music_playing=True))
+        self.assertEqual(spotter._match_text("poco", music_playing=False), "poco")
+        self.assertEqual(spotter._match_text("poco ya", music_playing=True), "poco ya")
+
+        # Require 2 consecutive partials during music; 1 transient blip must not fire
+        spotter.available = True
+        spotter._rec = _FakeRec([
+            (False, {"partial": "poco ya"}),
+            (False, {"partial": "[unk]"}),
+            (False, {"partial": "hey poco"}),
+            (False, {"partial": "hey poco"}),
+        ])
+        chunk = b"\x00\x01" * 160
+        self.assertIsNone(spotter.accept_pcm16k(chunk, music_playing=True))
+        self.assertIsNone(spotter.accept_pcm16k(chunk, music_playing=True))
+        self.assertIsNone(spotter.accept_pcm16k(chunk, music_playing=True))
+        self.assertEqual(spotter.accept_pcm16k(chunk, music_playing=True), "hey poco")
+
+        # Low-confidence final result rejected during music; high-confidence accepted
+        spotter._rec = _FakeRec([
+            (True, {"text": "poco ya", "result": [{"word": "poco", "conf": 0.3}, {"word": "ya", "conf": 0.4}]}),
+            (True, {"text": "poco ya", "result": [{"word": "poco", "conf": 0.9}, {"word": "ya", "conf": 0.85}]}),
+        ])
+        self.assertIsNone(spotter.accept_pcm16k(chunk, music_playing=True))
+        self.assertEqual(spotter.accept_pcm16k(chunk, music_playing=True), "poco ya")
+
+    def test_rms_fallback_suppressed_during_music_when_wake_active(self) -> None:
+        with mock.patch.dict(os.environ, {"VOICE_WAKE_ENGINE": "off", "VOICE_USE_AEC3": "0", "VOICE_USE_RNNOISE": "0"}):
+            listener = ContinuousVoiceListener(on_utterance=lambda b: None)
+        listener.wake_spotter.available = True
+        listener.music_playing = True
+        self.assertFalse(listener.should_allow_rms_fallback())
+        listener.music_playing = False
+        self.assertTrue(listener.should_allow_rms_fallback())
+        listener.music_playing = True
+        listener.rms_fallback_during_music = True
+        self.assertTrue(listener.should_allow_rms_fallback())
+
+    def test_resample_stereo_pcm_and_aec3_graceful_fallback(self) -> None:
+        # 480 stereo frames @ 48kHz (10ms) with L=2000, R=-4000 -> 160 stereo frames @ 16kHz
+        stereo_48k = struct.pack("<" + "hh" * 480, *([2000, -4000] * 480))
+        stereo_16k = resample_stereo_pcm(stereo_48k, src_rate=48000, dst_rate=16000)
+        self.assertEqual(len(stereo_16k), 160 * 4)
+        s = struct.unpack("<" + "hh" * 160, stereo_16k)
+        self.assertEqual(s[0], 2000)
+        self.assertEqual(s[1], -4000)
+
+        # 44.1kHz -> 16kHz preserves stereo separation and expected frame count
+        stereo_44k = struct.pack("<" + "hh" * 441, *([1500, -2500] * 441))
+        stereo_16k_b = resample_stereo_pcm(stereo_44k, src_rate=44100, dst_rate=16000)
+        self.assertEqual(len(stereo_16k_b), 160 * 4)
+
+        # Without native .so, WebRTCAEC3Processor passes audio through untouched
+        aec = WebRTCAEC3Processor(lib_path="/nonexistent/libpocobox_aec3.so")
+        self.assertFalse(aec.available)
+        cap = b"\x01\x02" * 160
+        self.assertEqual(aec.process_chunk(cap, stereo_16k), cap)
+
+    def test_decoy_phrases_rejected_and_wake_energy_gate_blocks_reverb(self) -> None:
+        with mock.patch.dict(os.environ, {"VOICE_WAKE_ENGINE": "off"}):
+            spotter = VoskWakeWordSpotter()
+        # False-positive magnets must NEVER trigger
+        for decoy in ("ok coco", "hey coco", "coco box", "poker ya", "okay", "vocal", "local"):
+            self.assertIsNone(spotter._match_text(decoy, music_playing=True), f"decoy should not match: {decoy}")
+            self.assertIsNone(spotter._match_text(decoy, music_playing=False), f"decoy should not match: {decoy}")
+        # Legitimate wake phrases still match
+        self.assertEqual(spotter._match_text("poco ya", music_playing=True), "poco ya")
+        self.assertEqual(spotter._match_text("hey poco", music_playing=True), "hey poco")
+
+        # Energy/SNR gate blocks weak residual music (e.g. rms=174 when ambient=1101)
+        with mock.patch.dict(os.environ, {"VOICE_WAKE_ENGINE": "off", "VOICE_USE_AEC3": "0", "VOICE_USE_RNNOISE": "0"}):
+            listener = ContinuousVoiceListener(on_utterance=lambda b: None)
+        listener.music_playing = True
+        listener.wake_ambient_rms = 300.0
+        self.assertFalse(listener.passes_wake_energy_gate(174.5))
+        self.assertFalse(listener.passes_wake_energy_gate(320.0))  # < 300 * 1.25 = 375
+        self.assertTrue(listener.passes_wake_energy_gate(450.0))
+
+    def test_telemetry_logging_clip_relabeling_and_recommendations(self) -> None:
+        import tempfile
+        from voice_control.telemetry import VoiceTelemetryLogger
+
+        with tempfile.TemporaryDirectory() as td:
+            log_path = Path(td) / "telemetry.jsonl"
+            clips_dir = Path(td) / "clips"
+            tel = VoiceTelemetryLogger(path=log_path, clips_dir=clips_dir)
+
+            # Save a pending wake clip and relabel it to fp / tp
+            wav = pcm_to_wav_bytes(_make_sine_pcm(1000.0, dur_sec=0.3, amp=4000))
+            pending = tel.save_wake_clip(wav, "pending", {"phrase": "coco ya", "music_playing": True, "snr_ratio": 1.3})
+            self.assertIsNotNone(pending)
+            moved = tel.relabel_wake_clip(pending, "fp", {"fp_reason": "timeout_no_speech"})
+            self.assertIsNotNone(moved)
+            self.assertTrue(Path(moved).exists())
+            self.assertEqual(Path(moved).parent.name, "fp")
+
+            # Record synthetic TP/FP distribution and verify statistical analyzer + recommendations
+            for _ in range(4):
+                tel.record("wake_timeout_false_alarm", phrase="coco ya", music_playing=True, snr_ratio=1.3, confidence=0.65)
+            for _ in range(3):
+                tel.record("wake_command_ok", phrase="poco ya", music_playing=True, snr_ratio=2.4, confidence=0.88, aec3_active=True, aec3_reduction_db=18.5)
+            tel.record("wake_rejected_energy", phrase="poco ya", music_playing=True, snr_ratio=0.7)
+
+            summary = tel.summarize(hours=24.0)
+            self.assertEqual(summary["wake_true_positives"], 3)
+            self.assertEqual(summary["wake_false_alarms"], 4)
+            self.assertEqual(summary["wake_gates_rejected"], 1)
+            self.assertAlmostEqual(summary["wake_precision"], 3 / 7, places=3)
+            self.assertEqual(summary["by_phrase"]["coco ya"]["fp"], 4)
+            self.assertTrue(any("coco ya" in r for r in summary["recommendations"]))
+            self.assertTrue(any("VOICE_WAKE_SNR_RATIO" in r for r in summary["recommendations"]))
+
+    def test_runtime_config_reset_defaults_restores_all_values(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "CONTINUOUS_LISTEN": "1",
+                "VOICE_WAKE_ENGINE": "off",
+                "VOICE_USE_AEC3": "0",
+                "VOICE_USE_RNNOISE": "0",
+                "VOICE_VAD_THRESHOLD": "40.0",
+                "VOICE_PLAYING_VAD_THRESHOLD": "180.0",
+                "VOICE_PLAYING_MULTIPLIER": "2.1",
+                "VOICE_DUCK_VOLUME": "18",
+                "VOICE_DUCK_ENABLED": "1",
+                "REQUIRE_WAKE_WORD": "1",
+                "VOICE_RMS_FALLBACK_DURING_MUSIC": "0",
+            },
+        ):
+            ctrl = VoiceController()
+        ctrl.update_runtime_config({
+            "quiet_threshold": 320,
+            "playing_threshold": 550,
+            "multiplier": 4.2,
+            "duck_volume": 45,
+            "duck_enabled": False,
+            "require_wake_word": False,
+            "rms_fallback_during_music": True,
+        })
+        self.assertEqual(ctrl.vad_threshold, 320.0)
+        self.assertFalse(ctrl.duck_enabled)
+        self.assertTrue(ctrl.continuous_listener.rms_fallback_during_music)
+
+        res = ctrl.update_runtime_config({"reset_defaults": True})
+        self.assertTrue(res["ok"])
+        self.assertTrue(res["reset"])
+        self.assertEqual(ctrl.vad_threshold, 40.0)
+        self.assertEqual(ctrl.duck_volume, 18)
+        self.assertTrue(ctrl.duck_enabled)
+        self.assertTrue(ctrl.require_wake_word)
+        self.assertEqual(ctrl.continuous_listener.min_threshold, 40.0)
+        self.assertEqual(ctrl.continuous_listener.playing_min_threshold, 180.0)
+        self.assertAlmostEqual(ctrl.continuous_listener.playing_multiplier, 2.1)
+        self.assertFalse(ctrl.continuous_listener.rms_fallback_during_music)
+
+    def test_select_internal_speaker_sink_ignores_usb_dac_and_headphones(self) -> None:
+        from voice_control.feedback import select_internal_speaker_sink
+
+        sample = (
+            "0\talsa_output.usb-Burr-Brown_from_TI_USB_Audio_DAC-00.analog-stereo\tmodule-alsa-card.c\ts16le 2ch 44100Hz\tIDLE\n"
+            "1\talsa_output.platform-sound.Voice_Call__Headphones__sink\tmodule-alsa-card.c\ts16le 2ch 44100Hz\tSUSPENDED\n"
+            "2\talsa_output.platform-sound.Voice_Call__Speaker__sink\tmodule-alsa-card.c\ts16le 2ch 48000Hz\tIDLE\n"
+        )
+        self.assertEqual(
+            select_internal_speaker_sink(sample),
+            "alsa_output.platform-sound.Voice_Call__Speaker__sink",
+        )
+
+    def test_speaker_and_voice_prefs_update_persist_and_reset(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            prefs_file = Path(td) / "voice_prefs.json"
+            with mock.patch.dict(
+                os.environ,
+                {"CONTINUOUS_LISTEN": "0", "VOICE_PREFS_FILE": str(prefs_file)},
+            ), mock.patch("voice_control.daemon.get_internal_speaker_volume", return_value=100), mock.patch(
+                "voice_control.daemon.set_internal_speaker_volume", side_effect=lambda v: max(0, min(150, int(v)))
+            ):
+                ctrl = VoiceController()
+                res = ctrl.update_runtime_config({
+                    "speaker_volume": 75,
+                    "chime_volume_pct": 40,
+                    "tts_voice": "ko-KR-InJoonNeural",
+                    "tts_rate_pct": 10,
+                    "tts_pitch_hz": -3,
+                    "enable_chime": False,
+                    "enable_tts": True,
+                })
+                self.assertTrue(res["ok"])
+                self.assertEqual(ctrl.speaker_volume, 75)
+                self.assertEqual(ctrl.tts_voice, "ko-KR-InJoonNeural")
+                self.assertEqual(ctrl.tts_rate_pct, 10)
+                self.assertEqual(ctrl.tts_pitch_hz, -3)
+                self.assertFalse(ctrl.enable_chime)
+                self.assertTrue(prefs_file.exists())
+
+                # Reload into a new controller to confirm persistence
+                ctrl2 = VoiceController()
+                self.assertEqual(ctrl2.speaker_volume, 75)
+                self.assertEqual(ctrl2.tts_voice, "ko-KR-InJoonNeural")
+                self.assertEqual(ctrl2.tts_rate_pct, 10)
+
+                # Reset speaker/voice defaults
+                r2 = ctrl2.update_runtime_config({"reset_speaker_defaults": True})
+                self.assertTrue(r2["ok"])
+                self.assertEqual(ctrl2.speaker_volume, 100)
+                self.assertEqual(ctrl2.tts_rate_pct, 0)
+                self.assertEqual(ctrl2.tts_pitch_hz, 0)
+                self.assertTrue(ctrl2.enable_chime)
 
 
 if __name__ == "__main__":

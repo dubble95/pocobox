@@ -128,9 +128,9 @@ def record_utterance_wav(
     """Capture one spoken command from PulseAudio microphone using RNNoise + Bandpass + adaptive RMS VAD."""
     from .audio_dsp import (
         RNNOISE_SAMPLE_RATE,
+        AntiAliasDecimator48kTo16k,
         RNNoiseProcessor,
         SpeechBandpassFilter,
-        decimate_48k_to_16k,
         extract_mono_channel,
     )
 
@@ -141,8 +141,11 @@ def record_utterance_wav(
     mic_channel = os.environ.get("VOICE_MIC_CHANNEL", "right").strip().lower()
     use_rnnoise = os.environ.get("VOICE_USE_RNNOISE", "1").strip().lower() not in ("0", "false", "no")
     use_bandpass = os.environ.get("VOICE_USE_BANDPASS", "1").strip().lower() not in ("0", "false", "no")
+    bp_low = float(os.environ.get("VOICE_BANDPASS_LOW_HZ", "150.0"))
+    bp_high = float(os.environ.get("VOICE_BANDPASS_HIGH_HZ", "6000.0"))
     rnnoise = RNNoiseProcessor() if use_rnnoise else None
-    bandpass = SpeechBandpassFilter(sample_rate=SAMPLE_RATE, low_hz=250.0, high_hz=3500.0) if use_bandpass else None
+    decimator = AntiAliasDecimator48kTo16k()
+    bandpass = SpeechBandpassFilter(sample_rate=SAMPLE_RATE, low_hz=bp_low, high_hz=bp_high) if use_bandpass else None
     use_48k_stereo = bool((rnnoise and rnnoise.available) or mic_channel in ("left", "right"))
 
     rate = RNNOISE_SAMPLE_RATE if use_48k_stereo else SAMPLE_RATE
@@ -188,7 +191,7 @@ def record_utterance_wav(
                 mono48 = extract_mono_channel(raw, mic_channel)
                 if rnnoise is not None and rnnoise.available:
                     mono48, _ = rnnoise.process_48k_pcm(mono48)
-                data = decimate_48k_to_16k(mono48)
+                data = decimator.process_48k_to_16k(mono48)
             else:
                 data = raw
             if bandpass is not None:

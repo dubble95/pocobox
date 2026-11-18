@@ -128,6 +128,22 @@ class TestUsbDacAutoplay(unittest.TestCase):
             mock_restart.assert_called_once()
             self.assertIn("SQUEEZELITE_OUTPUT=pulse", env_file.read_text())
 
+    def test_ensure_visexport_arg_appends_only_when_supported(self) -> None:
+        with patch.object(dac_mod, "squeezelite_supports_visexport", return_value=True):
+            self.assertEqual(
+                dac_mod.ensure_visexport_arg("-m 02:70:6f:63:6f:01 -W"),
+                "-m 02:70:6f:63:6f:01 -W -v",
+            )
+            self.assertEqual(
+                dac_mod.ensure_visexport_arg("-m 02:70:6f:63:6f:01 -W -v"),
+                "-m 02:70:6f:63:6f:01 -W -v",
+            )
+        with patch.object(dac_mod, "squeezelite_supports_visexport", return_value=False):
+            self.assertEqual(
+                dac_mod.ensure_visexport_arg("-m 02:70:6f:63:6f:01 -W"),
+                "-m 02:70:6f:63:6f:01 -W",
+            )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
