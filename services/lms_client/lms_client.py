@@ -46,10 +46,11 @@ class LMSClient:
         players = self.list_players()
         if not players:
             raise RuntimeError("No LMS players connected.")
-        for player in players:
+        connected = [p for p in players if p.get("connected")] or players
+        for player in connected:
             if player.get("name", "").lower() == preferred_name.lower():
                 return player["playerid"]
-        return players[0]["playerid"]
+        return connected[0]["playerid"]
 
     def player_status(self, player_id: str) -> dict[str, Any]:
         return self.call(player_id, ["status", "-", 1, "tags:aAlKd"])
