@@ -203,6 +203,7 @@ class VoiceController:
         self._duck_saved: tuple[str, int] | None = None
         self._manual_busy = False
         self._tts_speaking = False
+        self._display_wake_until = 0.0
         self._last_nokey_warn = 0.0
         self.last_result: dict[str, Any] | None = None
 
@@ -322,11 +323,35 @@ class VoiceController:
         except Exception as exc:
             log.warning("Failed to restore ducked volume to %d%%: %s", prev_vol, exc)
 
+    def _wake_display(self, duration_sec: float = 15.0) -> None:
+        if duration_sec <= 0:
+            return
+        target = time.monotonic() + float(duration_sec)
+        if target > self._display_wake_until:
+            self._display_wake_until = target
+
+    def _cap_display_wake(self, max_remaining_sec: float) -> None:
+        limit = time.monotonic() + max(0.0, float(max_remaining_sec))
+        if self._display_wake_until > limit:
+            self._display_wake_until = limit
+
+    def _clear_display_wake(self) -> None:
+        self._display_wake_until = 0.0
+
+    def _update_display_wake_for_action(self, action: str) -> None:
+        if action == IntentAction.PAUSE.value:
+            self._cap_display_wake(3.0)
+        elif self._is_spoken_action(action):
+            self._wake_display(15.0)
+        else:
+            self._wake_display(10.0)
+
     def _on_listener_state(self, state: str, rms: float) -> None:
         self.events.publish({"type": "state", "state": state, "rms": round(rms, 1), "ts": time.time()})
 
     def handle_wake_detected(self, phrase: str) -> None:
         """Fired immediately when local Vosk spots '포코야'/'헤이 포코'."""
+        self._wake_display(12.0)
         self._begin_duck()
         threading.Thread(target=self._play_chime, args=("listen",), daemon=True).start()
         self.events.publish({
@@ -336,7 +361,7 @@ class VoiceController:
             "ts": time.time(),
         })
 
-    def _speak_answer(self, text: str) -> bool:
+    def _speak_answer(self, text: str, *, keep_awake_after_sec: float = 0.0) -> bool:
         """Speak Q&A / Now-Playing / command confirmation via TTS while pausing mic and keeping music ducked."""
         if not text or not self.enable_tts:
             return False
@@ -355,11 +380,14 @@ class VoiceController:
             )
         finally:
             self._tts_speaking = False
+            if keep_awake_after_sec > 0.0:
+                self._wake_display(keep_awake_after_sec)
             if did_duck:
                 self._restore_duck(skip_restore=False)
 
     def test_speaker(self, text: str | None = None) -> dict[str, Any]:
         """Play a test chime + TTS sample directly on the built-in speaker."""
+        self._wake_display(8.0)
         sample = (text or "").strip() or f"안녕하세요, 포코박스입니다. 현재 내장 스피커 음량은 {self.speaker_volume}퍼센트입니다."
         self._play_chime("ok")
         spoken = False
@@ -587,11 +615,14 @@ class VoiceController:
 
         if not turn.active:
             self._quiz_loop_stop.set()
+            if not dry_run:
+                self._wake_display(10.0)
 
         if not dry_run and speak:
             def _speak_and_cleanup() -> None:
                 self._speak_quiz_response(turn)
                 if not turn.active:
+                    self._wake_display(10.0)
                     self._resume_lms_after_quiz()
 
             threading.Thread(target=_speak_and_cleanup, daemon=True).start()
@@ -604,9 +635,12 @@ class VoiceController:
         turn = self.quiz.stop(reason=reason)
         self._publish_quiz_event(turn)
         res = self._quiz_turn_to_result(turn, IntentAction.STOP_QUIZ.value)
+        if not dry_run:
+            self._wake_display(10.0)
         if not dry_run and speak:
             def _speak_and_resume() -> None:
                 self._speak_quiz_response(turn)
+                self._wake_display(10.0)
                 self._resume_lms_after_quiz()
 
             threading.Thread(target=_speak_and_resume, daemon=True).start()
@@ -752,6 +786,7 @@ class VoiceController:
             log.error("Quiz voice loop error: %s", exc)
         finally:
             self._quiz_loop_active = False
+            self._wake_display(10.0)
             if not self.quiz.active:
                 self._resume_lms_after_quiz()
             self.events.publish({"type": "state", "state": "waiting", "rms": 0.0, "ts": time.time()})
@@ -764,6 +799,7 @@ class VoiceController:
         clip_path = wake_meta.pop("clip_path", None)
         try:
             if wav_bytes is None:
+                self._clear_display_wake()
                 log.info("Wake word '%s' timed out with no follow-up speech.", phrase)
                 new_clip = self.telemetry.relabel_wake_clip(clip_path, "fp", {"fp_reason": "timeout_no_speech"})
                 self.telemetry.record("wake_timeout_false_alarm", clip_path=new_clip, **wake_meta)
@@ -815,7 +851,7 @@ class VoiceController:
             if self._is_quiz_action(res.action):
                 pass  # quiz handler already speaks bilingual TTS + chime
             elif res.ok and self._is_spoken_action(res.action):
-                self._speak_answer(res.message)
+                self._speak_answer(res.message, keep_awake_after_sec=15.0)
             elif res.ok and not res.details.get("ack_spoken"):
                 self._play_chime("ok")
         finally:
@@ -869,6 +905,8 @@ class VoiceController:
             return self.stop_quiz(dry_run=dry_run)
 
         res, _ = self._execute_intent_with_ack(intent, dry_run=dry_run)
+        if not dry_run:
+            self._update_display_wake_for_action(res.action)
         self.last_result = res.to_dict()
         self.events.publish({
             "type": "result",
@@ -881,7 +919,12 @@ class VoiceController:
         })
         log.info("TEXT '%s' -> action=%s ok=%s msg=%s", text, res.action, res.ok, res.message)
         if not dry_run and res.ok and self._is_spoken_action(res.action):
-            threading.Thread(target=self._speak_answer, args=(res.message,), daemon=True).start()
+            threading.Thread(
+                target=self._speak_answer,
+                args=(res.message,),
+                kwargs={"keep_awake_after_sec": 15.0},
+                daemon=True,
+            ).start()
         return res
 
     def handle_wav(
@@ -1004,6 +1047,7 @@ class VoiceController:
             and not dry_run
             and enforce_wake_word
         ):
+            self._wake_display(12.0)
             log.info("Bare wake word '%s' recognized via cloud -> entering auto-duck follow-up listen", intent.raw_text)
             self.events.publish({
                 "type": "transcript",
@@ -1036,6 +1080,8 @@ class VoiceController:
             return res
 
         res, _ = self._execute_intent_with_ack(intent, dry_run=dry_run)
+        if not dry_run:
+            self._update_display_wake_for_action(res.action)
         res.details["vad"] = metrics.__dict__
         res.details["stt_ms"] = stt_ms
         res.details["stt_provider"] = intent.provider
@@ -1082,7 +1128,7 @@ class VoiceController:
         if self._is_quiz_action(res.action):
             return
         if res.ok and self._is_spoken_action(res.action):
-            self._speak_answer(res.message)
+            self._speak_answer(res.message, keep_awake_after_sec=15.0)
         elif res.ok and not res.details.get("ack_spoken"):
             self._play_chime("ok")
 
@@ -1127,7 +1173,7 @@ class VoiceController:
             if self._is_quiz_action(res.action):
                 pass
             elif not dry_run and res.ok and self._is_spoken_action(res.action):
-                self._speak_answer(res.message)
+                self._speak_answer(res.message, keep_awake_after_sec=15.0)
             elif not dry_run and res.details.get("ack_spoken"):
                 pass  # spoken pre-execution ack (and failure TTS if failed) already played
             else:
@@ -1239,6 +1285,8 @@ class VoiceController:
             self.lms.adjust_volume(player_id, -5)
         else:
             return {"ok": False, "error": f"Unknown control action: {action}"}
+        if action != "toggle":
+            self._wake_display(15.0)
         return {"ok": True, "action": action}
 
     def display_state(self) -> dict[str, Any]:
@@ -1269,10 +1317,23 @@ class VoiceController:
         voice_info["edge_tts_available"] = edge_tts_available()
         voice_info["available_voices"] = list(AVAILABLE_VOICES)
         voice_info["last_result"] = self.last_result
+
+        music_playing = str(np.get("mode") or "").strip().lower() == "play"
+        quiz_active = bool(self.quiz.active or self._quiz_loop_active)
+        voice_active = bool(self._tts_speaking or self._manual_busy)
+        wake_rem = max(0.0, self._display_wake_until - time.monotonic())
+        keep_awake = bool(music_playing or quiz_active or voice_active or wake_rem > 0.0)
         return {
             "ok": True,
             "ui_version": UI_VERSION,
             "now_playing": np,
+            "display": {
+                "music_playing": music_playing,
+                "quiz_active": quiz_active,
+                "voice_active": voice_active,
+                "wake_remaining_sec": round(wake_rem, 2),
+                "keep_awake": keep_awake,
+            },
             "audio_output_label": _read_audio_output_label(),
             "voice": voice_info,
             "quiz": self.quiz.public_state(),
@@ -1309,6 +1370,7 @@ class VoiceController:
 
     def rotate_display(self, mode: str = "next") -> dict[str, Any]:
         """Rotate local Wayland kiosk output via wlr-randr (or re-enable sensor auto-rotate)."""
+        self._wake_display(15.0)
         valid_transforms = ("normal", "90", "180", "270")
         req_mode = (mode or "next").strip().lower()
         runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"

@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import re
+import struct
 import subprocess
 import sys
 import tempfile
@@ -157,6 +158,159 @@ class DisplayUITests(unittest.TestCase):
         self.assertEqual(mod.map_orientation("bottom-up"), "180")
         self.assertEqual(mod.map_orientation("right-up"), "270")
         self.assertIsNone(mod.map_orientation("undefined"))
+
+
+def _load_backlight_module():
+    spec = importlib.util.spec_from_file_location(
+        "pocobox_backlight",
+        str(REPO_ROOT / "infra" / "display" / "pocobox-backlight.py"),
+    )
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["pocobox_backlight"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class DisplayBacklightTests(unittest.TestCase):
+    def test_power_policy_auto_turns_off_when_not_playing(self) -> None:
+        mod = _load_backlight_module()
+        policy = mod.DisplayPowerPolicy(power_mode="auto", idle_off_sec=10.0, touch_wake_sec=15.0)
+        idle = mod.ActivitySnapshot(music_playing=False, keep_awake=False, source="voice_api")
+        playing = mod.ActivitySnapshot(music_playing=True, keep_awake=True, source="voice_api")
+        voice = mod.ActivitySnapshot(music_playing=False, keep_awake=True, source="voice_api")
+
+        # On startup when idle, turn off immediately
+        self.assertEqual(policy.evaluate(idle, 100.0), (False, "idle_off"))
+
+        # Music starts -> turns ON immediately
+        self.assertEqual(policy.evaluate(playing, 105.0), (True, "music_playing"))
+
+        # Music pauses / track transition -> stays ON during idle_off_sec grace
+        self.assertEqual(policy.evaluate(idle, 110.0), (True, "idle_grace"))
+        self.assertEqual(policy.evaluate(idle, 114.9), (True, "idle_grace"))
+
+        # Grace expires -> turns OFF
+        self.assertEqual(policy.evaluate(idle, 115.0), (False, "idle_off"))
+
+        # Voice / quiz interaction while idle -> turns ON, then OFF when done
+        self.assertEqual(policy.evaluate(voice, 120.0), (True, "voice_or_quiz_active"))
+        self.assertEqual(policy.evaluate(idle, 121.0), (False, "idle_off"))
+
+        # Touchscreen or button press wakes display for touch_wake_sec
+        policy.on_input_event(200.0)
+        self.assertEqual(policy.evaluate(idle, 200.5), (True, "input_wake"))
+        self.assertEqual(policy.evaluate(idle, 214.9), (True, "input_wake"))
+        self.assertEqual(policy.evaluate(idle, 215.0), (False, "idle_off"))
+
+    def test_power_policy_always_on_mode(self) -> None:
+        mod = _load_backlight_module()
+        policy = mod.DisplayPowerPolicy(power_mode="always_on", idle_off_sec=10.0)
+        idle = mod.ActivitySnapshot(music_playing=False, keep_awake=False, source="voice_api")
+        self.assertEqual(policy.evaluate(idle, 0.0), (True, "always_on"))
+
+    def test_parse_display_state_payload(self) -> None:
+        mod = _load_backlight_module()
+        snap = mod.parse_display_state_payload({
+            "now_playing": {"mode": "pause"},
+            "display": {"music_playing": False, "keep_awake": True},
+        })
+        self.assertFalse(snap.music_playing)
+        self.assertTrue(snap.keep_awake)
+        self.assertEqual(snap.source, "voice_api")
+
+        snap_legacy = mod.parse_display_state_payload({
+            "now_playing": {"mode": "play"},
+            "quiz": {"active": False},
+        })
+        self.assertTrue(snap_legacy.music_playing)
+        self.assertTrue(snap_legacy.keep_awake)
+        self.assertEqual(snap_legacy.source, "voice_api_legacy")
+
+    def test_sysfs_backlight_on_and_off(self) -> None:
+        mod = _load_backlight_module()
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            (base / "max_brightness").write_text("4095\n", encoding="utf-8")
+            (base / "brightness").write_text("1800\n", encoding="utf-8")
+            (base / "bl_power").write_text("0\n", encoding="utf-8")
+
+            bl = mod.SysfsBacklight(base)
+            self.assertEqual(bl.max_brightness, 4095)
+
+            self.assertTrue(bl.set_off())
+            self.assertEqual((base / "brightness").read_text(encoding="utf-8").strip(), "0")
+            self.assertEqual((base / "bl_power").read_text(encoding="utf-8").strip(), "4")
+
+            self.assertTrue(bl.set_on(1800))
+            self.assertEqual((base / "bl_power").read_text(encoding="utf-8").strip(), "0")
+            self.assertEqual((base / "brightness").read_text(encoding="utf-8").strip(), "1800")
+
+            # Clamps above max_brightness
+            self.assertTrue(bl.set_on(9999))
+            self.assertEqual((base / "brightness").read_text(encoding="utf-8").strip(), "4095")
+
+    def test_input_device_matching_and_event_filtering(self) -> None:
+        mod = _load_backlight_module()
+        self.assertTrue(mod.is_wake_input_device_name("generic ft5x06 (d0)"))
+        self.assertTrue(mod.is_wake_input_device_name("pm8941_pwrkey"))
+        self.assertTrue(mod.is_wake_input_device_name("gpio-keys"))
+        self.assertFalse(mod.is_wake_input_device_name("Burr-Brown from TI USB Audio DAC"))
+        self.assertFalse(mod.is_wake_input_device_name("Xiaomi Poco F1 Headset Jack"))
+        self.assertFalse(mod.is_wake_input_device_name("spmi_haptics"))
+
+        ev_key_press = struct.pack("qqHHi", 0, 0, 1, 116, 1)
+        ev_key_release = struct.pack("qqHHi", 0, 0, 1, 116, 0)
+        ev_touch_down = struct.pack("qqHHi", 0, 0, 3, 57, 42)
+        ev_touch_up = struct.pack("qqHHi", 0, 0, 3, 57, -1)
+        ev_syn = struct.pack("qqHHi", 0, 0, 0, 0, 0)
+
+        self.assertTrue(mod.has_wake_trigger_in_input_bytes(ev_key_press))
+        self.assertFalse(mod.has_wake_trigger_in_input_bytes(ev_key_release))
+        self.assertTrue(mod.has_wake_trigger_in_input_bytes(ev_touch_down))
+        self.assertFalse(mod.has_wake_trigger_in_input_bytes(ev_touch_up + ev_syn))
+
+    def test_voice_controller_display_state_reports_keep_awake(self) -> None:
+        from voice_control.daemon import VoiceController
+
+        with mock.patch.dict(os.environ, {"CONTINUOUS_LISTEN": "0", "LOCAL_STT_URL": ""}, clear=False):
+            with mock.patch("voice_control.daemon.get_internal_speaker_volume", return_value=85):
+                ctrl = VoiceController()
+
+        ctrl.lms = mock.MagicMock()
+        ctrl.lms.resolve_player_id.return_value = "02:70:6f:63:6f:01"
+        ctrl.lms.now_playing.return_value = {"mode": "pause", "title": "Test"}
+
+        # Idle paused state -> keep_awake False
+        st = ctrl.display_state()
+        self.assertFalse(st["display"]["music_playing"])
+        self.assertFalse(st["display"]["keep_awake"])
+
+        # Playing music -> music_playing & keep_awake True
+        ctrl.lms.now_playing.return_value = {"mode": "play", "title": "Test"}
+        st_play = ctrl.display_state()
+        self.assertTrue(st_play["display"]["music_playing"])
+        self.assertTrue(st_play["display"]["keep_awake"])
+
+        # Paused + wake word detected -> keep_awake True; timeout clears it
+        ctrl.lms.now_playing.return_value = {"mode": "pause", "title": "Test"}
+        with mock.patch.object(ctrl, "_play_chime"):
+            ctrl.handle_wake_detected("poco")
+        self.assertTrue(ctrl.display_state()["display"]["keep_awake"])
+        ctrl.handle_wake_utterance(None, "poco")
+        self.assertFalse(ctrl.display_state()["display"]["keep_awake"])
+
+        # Paused + TTS speaking -> keep_awake True
+        ctrl._tts_speaking = True
+        self.assertTrue(ctrl.display_state()["display"]["voice_active"])
+        self.assertTrue(ctrl.display_state()["display"]["keep_awake"])
+        ctrl._tts_speaking = False
+        self.assertFalse(ctrl.display_state()["display"]["keep_awake"])
+
+        # Pause command caps any long wake timer to <= 3s
+        ctrl._wake_display(20.0)
+        ctrl._update_display_wake_for_action("pause")
+        self.assertLessEqual(ctrl.display_state()["display"]["wake_remaining_sec"], 3.1)
 
 
 if __name__ == "__main__":

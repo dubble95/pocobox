@@ -33,6 +33,7 @@ scp "${REPO_DIR}/infra/display/display.env" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/display/pocobox-kiosk-start.sh" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/display/pocobox-autorotate.py" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/display/pocobox-autorotate.service" "${HOST}:/tmp/pocobox-deploy/"
+scp "${REPO_DIR}/infra/display/pocobox-backlight.py" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/display/pocobox-backlight.service" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/display/99-pocobox-kiosk.conf" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/display/restore-phosh-display.sh" "${HOST}:/tmp/pocobox-deploy/"
@@ -59,6 +60,7 @@ install -m 0755 \$SRC/patch-usb-host-dtb.sh /srv/pocobox/bin/patch-usb-host-dtb.
 install -m 0755 \$SRC/restore-usb-peripheral-dtb.sh /srv/pocobox/bin/restore-usb-peripheral-dtb.sh
 install -m 0755 \$SRC/pocobox-kiosk-start.sh /srv/pocobox/bin/pocobox-kiosk-start.sh
 install -m 0755 \$SRC/pocobox-autorotate.py /srv/pocobox/bin/pocobox-autorotate.py
+install -m 0755 \$SRC/pocobox-backlight.py /srv/pocobox/bin/pocobox-backlight.py
 install -m 0755 \$SRC/restore-phosh-display.sh /srv/pocobox/bin/restore-phosh-display.sh
 install -m 0755 \$SRC/lms_client.py /srv/pocobox/bin/lms_client.py
 install -m 0755 \$SRC/pocobox_dac_autoplay.py /srv/pocobox/bin/pocobox_dac_autoplay.py
@@ -115,6 +117,6 @@ systemctl daemon-reload
 systemctl restart nftables 2>/dev/null || nft -f /etc/nftables.d/55_pocobox.nft 2>/dev/null || true
 systemctl reload NetworkManager 2>/dev/null || true
 systemctl enable --now pocobox-pulseaudio.service pocobox-squeezelite.service pocobox-dac-autoplay.service pocobox-voice.service pocobox-daily-quiz.timer pocobox-backlight.service pocobox-autorotate.service
-systemctl restart pocobox-dac-autoplay.service pocobox-voice.service greetd.service pocobox-autorotate.service
+systemctl restart pocobox-dac-autoplay.service pocobox-voice.service greetd.service pocobox-backlight.service pocobox-autorotate.service
 "'
 echo "==> Deploy complete!"

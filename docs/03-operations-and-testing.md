@@ -16,7 +16,7 @@
 | `pocobox-dac-autoplay.service` | USB DAC 핫플러그 감시 → 출력 자동 전환 → 이어재생 / 분리 시 일시정지 | `udevadm monitor` + `/sys/class/sound` |
 | `pocobox-voice.service` | 상시 핸즈프리 음성명령 데몬 (24시간 마이크 감시 + Gemini 3.1 Flash-Lite + Now Playing 웹 UI) | `http://pocobox.local:8765/display` |
 | `greetd` (`cage` + `firefox-esr`) | 항상 켜지는 풀스크린 Now Playing 키오스크 (잠금 화면 없음, 2.5x HiDPI) | POCO F1 디스플레이 (VT7) |
-| `pocobox-backlight.service` | POCO F1 백라이트 상시 유지 (`DISPLAY_BRIGHTNESS=1800/4095`) | `/sys/class/backlight/backlight` |
+| `pocobox-backlight.service` | 스마트 백라이트 제어 (재생/음성·퀴즈/터치 시 ON, 유휴 시 자동 OFF, `DISPLAY_BRIGHTNESS=1800/4095`) | `/sys/class/backlight/backlight` |
 | `avahi-daemon` | mDNS 브로드캐스트 (`pocobox.local`) | UDP 5353 |
 
 방화벽 규칙은 `/etc/nftables.d/55_pocobox.nft`에 등록되어 있어 `3483`, `8765`, `9000`, `9090` 포트가 재부팅 후에도 유지됩니다.
@@ -62,7 +62,7 @@ ssh pocobox 'sudo systemctl restart pocobox-voice.service'
 4. **CLI / HTTP API (Mac 또는 `pocobox` 터미널)**:
 
 > **디스플레이 밝기 / Phosh 복구**:
-> - 화면 밝기 조절: `pocobox:/etc/pocobox/display.env`의 `DISPLAY_BRIGHTNESS` (`0~4095`, 기본 `1800`) 수정 후 `sudo systemctl restart pocobox-backlight.service`
+> - 화면 밝기 / 자동 꺼짐 설정: `pocobox:/etc/pocobox/display.env`의 `DISPLAY_BRIGHTNESS` (`0~4095`, 기본 `1800`), `DISPLAY_POWER_MODE` (`auto` | `always_on`), `DISPLAY_IDLE_OFF_SEC` (기본 `10`초), `DISPLAY_TOUCH_WAKE_SEC` (기본 `15`초) 수정 후 `sudo systemctl restart pocobox-backlight.service`
 > - 기존 Phosh 모바일 데스크톱 복구: `ssh pocobox 'sudo /srv/pocobox/bin/restore-phosh-display.sh'`
    ```sh
    # 상태 확인
