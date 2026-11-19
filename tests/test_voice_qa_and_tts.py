@@ -605,6 +605,75 @@ class TestVoiceQAAndTTS(unittest.TestCase):
             "Nothing is currently playing.",
         )
 
+    def test_now_playing_phrasing_coverage_and_instant_offline_parsing(self) -> None:
+        from voice_control.rule_parser import parse_command
+
+        test_phrases = [
+            "지금 음악 뭐야?",
+            "지금 음악 뭐야",
+            "지금 노래 뭐야",
+            "지금 곡 뭐야",
+            "지금 트랙 뭐야",
+            "지금 틀고 있는 음악 뭐야",
+            "지금 나오는 노래 뭐야",
+            "지금 나오는 거 뭐야",
+            "지금 듣고 있는 음악 뭐야",
+            "이 음악 뭐야",
+            "이 노래 뭐야",
+            "이 곡 뭐야",
+            "그 노래 뭐야",
+            "무슨 음악이야",
+            "무슨 노래야",
+            "무슨 곡이야",
+            "무슨 노래 나와",
+            "노래 제목 뭐야",
+            "음악 제목 알려줘",
+            "곡 제목이 뭐야",
+            "가수가 누구야",
+            "누구 노래야",
+            "현재 재생 중인 곡",
+            "현재 곡",
+            "what's playing",
+            "what song is this",
+            "current song",
+            "now playing",
+        ]
+        for phrase in test_phrases:
+            intent = parse_command(phrase)
+            self.assertEqual(
+                intent.action,
+                IntentAction.NOW_PLAYING,
+                f"Failed to parse NOW_PLAYING for phrase: {phrase}",
+            )
+            self.assertGreaterEqual(
+                intent.confidence,
+                0.9,
+                f"Low confidence for NOW_PLAYING phrase: {phrase}",
+            )
+
+    def test_empty_or_punctuation_stt_never_hits_cloud_fallback(self) -> None:
+        from voice_control.cloud_stt_intent import HybridVoiceInterpreter
+
+        interp = HybridVoiceInterpreter(
+            provider="gemini",
+            gemini_api_key="test-key",
+            local_stt_url="http://127.0.0.1:8766",
+        )
+        with mock.patch.object(interp, "_gemini_text_intent") as mock_gem:
+            # Punctuation only, whitespace, or single filler must NEVER hit cloud fallback
+            for noise in [".", "...", "!", "  ", "어", "야", "응", "포코야 ."]:
+                res = interp.interpret_text(noise, use_cloud_fallback=True)
+                self.assertEqual(res.action, IntentAction.UNKNOWN)
+            mock_gem.assert_not_called()
+
+        # In interpret_audio with local STT returning "."
+        with mock.patch.object(interp, "transcribe_local_audio", return_value={"text": "."}), mock.patch.object(
+            interp, "_gemini_text_intent"
+        ) as mock_gem:
+            res = interp.interpret_audio(b"fake_wav")
+            self.assertEqual(res.action, IntentAction.UNKNOWN)
+            mock_gem.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

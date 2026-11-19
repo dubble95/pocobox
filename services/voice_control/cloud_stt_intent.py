@@ -7,6 +7,7 @@ import datetime
 import json
 import logging
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -253,6 +254,12 @@ class HybridVoiceInterpreter:
         if local_intent.action != IntentAction.UNKNOWN and local_intent.confidence >= 0.9:
             return local_intent
 
+        clean = re.sub(r"[^\w\s]", "", text or "").strip()
+        stripped_content, _ = strip_wake_prefix(clean)
+        stripped_content = stripped_content.strip()
+        if not stripped_content or len(stripped_content) < 2 or stripped_content in ("어", "응", "야", "음", "아", "네"):
+            return local_intent
+
         if not use_cloud_fallback or not self.cloud_fallback or not self.has_cloud_api():
             return local_intent
 
@@ -278,7 +285,8 @@ class HybridVoiceInterpreter:
             try:
                 stt = self.transcribe_local_audio(wav_bytes)
                 transcript = str(stt.get("text") or "").strip()
-                if stt.get("is_music_only") or not transcript:
+                clean_text = re.sub(r"[^\w\s]", "", transcript).strip()
+                if stt.get("is_music_only") or not clean_text:
                     return VoiceIntent(
                         action=IntentAction.UNKNOWN,
                         raw_text="",
@@ -294,8 +302,14 @@ class HybridVoiceInterpreter:
 
                 # Bare wake-word utterance ("포코야") -> return immediately without any cloud call
                 stripped, has_wake = strip_wake_prefix(transcript)
-                if has_wake and not stripped.strip(" .!?,~"):
+                clean_stripped = re.sub(r"[^\w\s]", "", stripped).strip()
+                if has_wake and not clean_stripped:
                     fast.provider = "sensevoice+rule"
+                    return fast
+
+                # Skip cloud fallback for empty punctuation or short ambient filler sounds (< 2 chars or simple filler)
+                if not clean_stripped or len(clean_stripped) < 2 or clean_stripped in ("어", "응", "야", "음", "아", "네"):
+                    fast.provider = "sensevoice-local"
                     return fast
 
                 # Unknown/complex command, unresolved Korean search, or Q&A: escalate text-only to cloud LLM if enabled

@@ -61,7 +61,7 @@ _KO_PLAY_SUFFIX_RE = re.compile(
     r"\s+(?:좀|한번|한 번|바로|지금|빨리|계속)?"
     r"(?:\s*(?:노래|음악|곡|트랙|앨범|플레이리스트|믹스|메들리))?"
     r"(?:\s*(?:좀|한번|한 번))?"
-    r"\s*(?:틀어\s*줘|틀어\s*주세요|틀어\s*줄래|틀어|재생해\s*줘|재생해\s*주세요|재생해|재생|들려\s*줘|들려\s*주세요|들려|켜\s*줘|켜줘|플레이\s*해\s*줘|플레이해줘|검색해서\s*틀어\s*줘|검색해\s*줘|찾아\s*줘|찾아서\s*틀어\s*줘)"
+    r"\s*(?:틀어\s*줘|틀어\s*주세요|틀어\s*줄래|틀어|틀줘|재생해\s*줘|재생해\s*주세요|재생해|재생|들려\s*줘|들려\s*주세요|들려|켜\s*줘|켜줘|플레이\s*해\s*줘|플레이해줘|플레이|검색해서\s*틀어\s*줘|검색해\s*줘|찾아\s*줘|찾아서\s*틀어\s*줘)"
     r")$",
     re.IGNORECASE,
 )
@@ -138,7 +138,23 @@ def parse_command(raw_text: str) -> VoiceIntent:
 
     # 1. NOW PLAYING queries
     if re.search(
-        r"(지금\s*(나오는|재생\s*중인|듣고\s*있는)\s*(노래|음악|곡)|이\s*(노래|곡)\s*(뭐야|제목|누구)|무슨\s*(노래|곡)|현재\s*곡|what'?s\s+playing|what\s+song\s+is\s+this|current\s+(song|track)|now\s+playing)",
+        r"(?:"
+        r"(?:지금|현재)\s*(?:(?:나오는|재생\s*중인|재생\s*중|틀고\s*있는|틀어\s*(?:놓은|둔)|듣고\s*있는)\s*(?:노래|음악|곡|트랙|거)?|(?:노래|음악|곡|트랙))\s*(?:이\s*)?(?:뭐야|뭐니|뭐냐|뭔지|무엇|제목|가수|누구|알려\s*(?:줘|줄래|주세요))"
+        r"|(?:이|그|요|저|이거|그거)\s*(?:노래|음악|곡|트랙)\s*(?:이\s*)?(?:뭐야|뭐니|뭐냐|뭔지|무엇|제목|가수|누구|알려\s*(?:줘|줄래|주세요))"
+        r"|(?:이거|그거)\s*(?:누구\s*(?:노래|곡)|무슨\s*(?:노래|음악|곡)|제목)"
+        r"|무슨\s*(?:노래|음악|곡|트랙)"
+        r"|(?:지금|현재)?\s*(?:노래|음악|곡|트랙)\s*(?:제목|이름|가수|아티스트)"
+        r"|(?:가수|아티스트)\s*(?:가\s*)?누구(?:야|예요|에요|니|냐|인가요)?"
+        r"|누구\s*(?:노래|곡)(?:야|예요|에요|니|냐|인가요)?"
+        r"|(?:현재|지금)\s*(?:재생\s*중인\s*)?(?:곡|트랙|노래|음악)"
+        r"|^(?:곡명|노래\s*제목|음악\s*제목|제목)(?:\s*(?:알려\s*줘|알려줘|이\s*뭐야|이\s*뭐니|이\s*뭐냐|뭐야|뭐니|뭐냐))?$"
+        r"|what(?:\x27s|\s+is)\s+(?:playing|this\s+(?:song|music|track)|the\s+(?:song|music|track|title|artist))"
+        r"|what\s+song\s+is\s+this"
+        r"|who\s+(?:sings|is\s+singing)\s+this"
+        r"|who\s+is\s+the\s+artist"
+        r"|current\s+(?:song|track|music)"
+        r"|now\s+playing"
+        r")",
         low,
     ):
         return VoiceIntent(
@@ -253,8 +269,8 @@ def parse_command(raw_text: str) -> VoiceIntent:
                 language=lang,
             )
 
-    # Handle implicit volume commands without word "볼륨" (e.g. "조금만 줄여줘", "좀 키워줘")
-    if re.fullmatch(r"(?:좀|조금|조금만|살짝|많이|확)?\s*(?:키워\s*줘|키워|올려\s*줘|올려)", low):
+    # Handle implicit volume commands without word "볼륨" (e.g. "조금만 줄여줘", "좀 키워줘", "더 크게", "더 작게")
+    if re.fullmatch(r"(?:좀|조금|조금만|살짝|많이|확|더)?\s*(?:키워\s*줘|키워|올려\s*줘|올려|크게(?:\s*해\s*줘)?)", low):
         delta = 5 if re.search(r"(조금|살짝)", low) else (20 if re.search(r"(많이|확)", low) else 10)
         return VoiceIntent(
             action=IntentAction.VOLUME_UP,
@@ -264,7 +280,7 @@ def parse_command(raw_text: str) -> VoiceIntent:
             wake_word_detected=wake_detected,
             language=lang,
         )
-    if re.fullmatch(r"(?:좀|조금|조금만|살짝|많이|확)?\s*(?:줄여\s*줘|줄여|내려\s*줘|내려)", low):
+    if re.fullmatch(r"(?:좀|조금|조금만|살짝|많이|확|더)?\s*(?:줄여\s*줘|줄여|내려\s*줘|내려|작게(?:\s*해\s*줘)?)", low):
         delta = 5 if re.search(r"(조금|살짝)", low) else (20 if re.search(r"(많이|확)", low) else 10)
         return VoiceIntent(
             action=IntentAction.VOLUME_DOWN,
@@ -277,7 +293,7 @@ def parse_command(raw_text: str) -> VoiceIntent:
 
     # 4. NEXT / PREVIOUS track
     if re.search(
-        r"(다음\s*(곡|노래|트랙|거)|넘겨\s*줘|넘겨|스킵|넥스트|^next(?:\s+(?:song|track))?$|^skip(?:\s+(?:this\s+)?(?:track|song))?$)",
+        r"(^(?:다음\s*(?:곡|노래|트랙|거)?|다음(?:으로)?)$|다음\s*(?:곡|노래|트랙|거)(?:\s*(?:틀어|재생|넘겨))?|넘겨\s*줘|넘겨|스킵|넥스트|^next(?:\s+(?:song|track))?$|^skip(?:\s+(?:this\s+)?(?:track|song))?$)",
         low,
     ):
         return VoiceIntent(
@@ -289,7 +305,7 @@ def parse_command(raw_text: str) -> VoiceIntent:
         )
 
     if re.search(
-        r"(이전\s*(곡|노래|트랙|거)|앞\s*(곡|노래)|아까\s*(그\s*)?(곡|노래)|전\s*곡|되돌려|^previous(\s+(song|track))?$|^prev$|^back$|go\s+back)",
+        r"(^(?:이전\s*(?:곡|노래|트랙|거)?|이전(?:으로)?)$|이전\s*(?:곡|노래|트랙|거)(?:\s*(?:틀어|재생|돌려))?|앞\s*(?:곡|노래)|아까\s*(?:그\s*)?(?:곡|노래)|전\s*곡|되돌려|^previous(\s+(song|track))?$|^prev$|^back$|go\s+back)",
         low,
     ):
         return VoiceIntent(
@@ -302,7 +318,7 @@ def parse_command(raw_text: str) -> VoiceIntent:
 
     # 5. PAUSE / STOP
     if re.search(
-        r"(^(?:잠깐\s*)?(?:멈춰|멈춰\s*줘|멈춰줘|정지|일시정지|스톱|스탑|그만|꺼\s*줘|꺼줘|노래\s*꺼|음악\s*꺼|음악\s*멈춰|노래\s*멈춰|잠시\s*멈춰)(?:\s*줘|\s*주세요)?$|^pause(\s+(the\s+)?(music|song|playback))?$|^stop(\s+(the\s+)?(music|song|playback))?$)",
+        r"(^(?:잠깐|잠시)?\s*(?:(?:음악|노래|재생)\s*)?(?:멈춰|정지|일시정지|스톱|스탑|그만|꺼)(?:\s*(?:줘|주세요))?$|^(?:음악|노래)\s*그만(?:\s*틀어)?$|^pause(\s+(the\s+)?(music|song|playback))?$|^stop(\s+(the\s+)?(music|song|playback))?$)",
         low,
     ):
         return VoiceIntent(
@@ -315,7 +331,7 @@ def parse_command(raw_text: str) -> VoiceIntent:
 
     # 6. RESUME (generic play with no query)
     if re.fullmatch(
-        r"(?:다시\s*(?:틀어\s*줘|틀어|재생해\s*줘|재생|켜\s*줘)|계속\s*(?:틀어\s*줘|틀어|재생해\s*줘|재생)|이어서\s*(?:틀어\s*줘|틀어|재생해\s*줘|재생)|재생\s*(?:해\s*줘|해)?|음악\s*(?:틀어\s*줘|켜\s*줘|재생)|노래\s*(?:틀어\s*줘|켜\s*줘|재생)|resume(?:\s+(?:music|playback))?|continue(?:\s+(?:music|playback))?|play)",
+        r"(?:(?:다시|계속|이어서)\s*(?:틀어\s*줘|틀어|틀줘|재생해\s*줘|재생해|재생|켜\s*줘|켜)|재생\s*(?:해\s*줘|해)?|(?:음악|노래)\s*(?:틀어\s*줘|틀어|틀줘|재생해\s*줘|재생해|재생|켜\s*줘|켜)|resume(?:\s+(?:music|playback))?|continue(?:\s+(?:music|playback))?|play(?:\s+(?:music|the\s+music))?|플레이(?:\s*해\s*줘)?)",
         low,
     ):
         return VoiceIntent(
