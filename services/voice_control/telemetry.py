@@ -284,7 +284,7 @@ def summarize_events(
         )
     if clip_count >= 5:
         recommendations.append(
-            f"마이크 하드웨어 클리핑 {clip_count}회 감지 -> WCD9340 DEC7 게인을 현재(94)보다 4~6dB 낮추는 것 권장"
+            f"마이크 하드웨어 클리핑 {clip_count}회 감지 -> WCD9340 DEC7 게인을 4~6dB 낮추는 것 권장 (DEC7=88)"
         )
     if not recommendations:
         recommendations.append("현재 수집된 데이터 기준 특이 오탐 패턴 없음 (데이터가 더 쌓이면 자동 제안이 표시됩니다).")

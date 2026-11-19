@@ -84,8 +84,9 @@ def resample_stereo_pcm(stereo_pcm: bytes, src_rate: int, dst_rate: int = AEC3_S
         if n_cur == 1:
             out = np.repeat(arr, out_frames, axis=0)
         else:
+            step = float(src_rate) / float(dst_rate)
+            dst_x = np.clip(np.arange(out_frames, dtype=np.float32) * step, 0.0, float(n_cur - 1))
             src_x = np.arange(n_cur, dtype=np.float32)
-            dst_x = np.linspace(0.0, float(n_cur - 1), num=out_frames, dtype=np.float32)
             left = np.interp(dst_x, src_x, arr[:, 0])
             right = np.interp(dst_x, src_x, arr[:, 1])
             out = np.stack((left, right), axis=1)
@@ -192,7 +193,12 @@ class SqueezeliteVisClient:
             return
 
         self.current_rate = int(rate_out.value)
-        self.is_playing = bool(running_out.value)
+        new_is_playing = bool(running_out.value)
+
+        # Clear stale reference audio when playback restarts after pause/stop
+        if new_is_playing and not self.is_playing:
+            self._fifo.clear()
+        self.is_playing = new_is_playing
 
         if not self.is_playing:
             self._fifo.clear()
@@ -253,7 +259,7 @@ class WebRTCAEC3Processor:
         self.sample_rate = sample_rate
         self.render_channels = render_channels
         self.capture_channels = capture_channels
-        self.delay_ms = delay_ms if delay_ms is not None else int(os.environ.get("VOICE_AEC3_DELAY_MS", "60"))
+        self.delay_ms = delay_ms if delay_ms is not None else int(os.environ.get("VOICE_AEC3_DELAY_MS", "150"))
         self.frame_samples = sample_rate * AEC3_FRAME_MS // 1000
         self.render_frame_bytes = self.frame_samples * render_channels * 2
         self.capture_frame_bytes = self.frame_samples * capture_channels * 2

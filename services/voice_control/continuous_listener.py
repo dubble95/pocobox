@@ -84,8 +84,8 @@ class ContinuousVoiceListener:
         self.use_bandpass = _env_bool("VOICE_USE_BANDPASS", True)
         self.use_aec3 = _env_bool("VOICE_USE_AEC3", True)
         self.rms_fallback_during_music = _env_bool("VOICE_RMS_FALLBACK_DURING_MUSIC", False)
-        self.wake_min_rms = float(os.environ.get("VOICE_WAKE_MIN_RMS", "55.0"))
-        self.wake_snr_ratio = float(os.environ.get("VOICE_WAKE_SNR_RATIO", "1.25"))
+        self.wake_min_rms = float(os.environ.get("VOICE_WAKE_MIN_RMS", "45.0"))
+        self.wake_snr_ratio = float(os.environ.get("VOICE_WAKE_SNR_RATIO", "1.08"))
 
         self.bandpass_low_hz = float(os.environ.get("VOICE_BANDPASS_LOW_HZ", "150.0"))
         self.bandpass_high_hz = float(os.environ.get("VOICE_BANDPASS_HIGH_HZ", "6000.0"))
@@ -215,8 +215,15 @@ class ContinuousVoiceListener:
         """Reject faint reverb/music false wake hits that do not rise above floor energy."""
         if recent_peak_rms < self.wake_min_rms:
             return False
-        if self.music_playing and recent_peak_rms < self.wake_ambient_rms * self.wake_snr_ratio:
-            return False
+        if self.music_playing:
+            # During loud playback, speech adds non-coherent power to the music floor.
+            # Demanding a 25% jump on top of 1000 RMS music requires shouting; we require
+            # either an SNR ratio (>=1.08) OR an envelope delta (>=25.0 RMS) above ambient.
+            if (
+                recent_peak_rms < self.wake_ambient_rms * self.wake_snr_ratio
+                and (recent_peak_rms - self.wake_ambient_rms) < 25.0
+            ):
+                return False
         return True
 
     def status_dict(self) -> dict:
@@ -247,6 +254,10 @@ class ContinuousVoiceListener:
             "false_wake_rejected_count": self.false_wake_rejected_count,
             "wake_engine": self.wake_engine_name,
             "mic_channel": self.mic_channel,
+            "wake_snr_ratio": round(self.wake_snr_ratio, 2),
+            "wake_min_rms": round(self.wake_min_rms, 1),
+            "music_confirm_chunks": self.wake_spotter.music_confirm_chunks if self.wake_spotter else 2,
+            "music_min_conf": round(self.wake_spotter.music_min_confidence, 2) if self.wake_spotter else 0.65,
             "last_wake_phrase": self.last_wake_phrase,
             "last_speech_at": self.last_speech_at,
         }
@@ -463,7 +474,10 @@ class ContinuousVoiceListener:
                         preroll.append(stt_data)
 
                         # Trigger Path 1: Local streaming Vosk wake-word spotter on AEC3 + anti-aliased audio
-                        is_silent = wake_rms < max(self.min_threshold, self.wake_ambient_rms * 1.4)
+                        if self.music_playing:
+                            is_silent = False
+                        else:
+                            is_silent = wake_rms < max(self.min_threshold, self.wake_ambient_rms * 1.4)
                         hit = (
                             self.wake_spotter.accept_pcm16k(
                                 wake_data,

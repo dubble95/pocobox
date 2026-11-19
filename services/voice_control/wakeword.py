@@ -25,11 +25,8 @@ DEFAULT_MODEL_DIR = "/srv/pocobox/models/vosk-model-small-en-us-0.15"
 # Clean trigger phrases verified for Korean ("포코야", "포코박스", "헤이 포코") and English ("Hey Poco")
 DEFAULT_TRIGGER_PHRASES: tuple[str, ...] = (
     "hey poco",
-    "ok poco",
     "poco ya",
     "poco box",
-    "coco ya",
-    "boko ya",
     "poco",
 )
 
@@ -52,6 +49,9 @@ DEFAULT_DECOY_PHRASES: tuple[str, ...] = (
     "ok coco",
     "hey coco",
     "coco box",
+    "boko ya",
+    "coco ya",
+    "ok poco",
     "poker",
     "poker ya",
     "local",
@@ -125,7 +125,7 @@ class VoskWakeWordSpotter:
         self.music_confirm_chunks = (
             music_confirm_chunks
             if music_confirm_chunks is not None
-            else max(1, int(os.environ.get("VOICE_WAKE_CONFIRM_CHUNKS", "3")))
+            else max(1, int(os.environ.get("VOICE_WAKE_CONFIRM_CHUNKS", "2")))
         )
         self.quiet_confirm_chunks = (
             quiet_confirm_chunks
@@ -135,7 +135,7 @@ class VoskWakeWordSpotter:
         self.music_min_confidence = (
             music_min_confidence
             if music_min_confidence is not None
-            else float(os.environ.get("VOICE_WAKE_MIN_CONF", "0.72"))
+            else float(os.environ.get("VOICE_WAKE_MIN_CONF", "0.65"))
         )
         self.quiet_min_confidence = (
             quiet_min_confidence

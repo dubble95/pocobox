@@ -109,7 +109,9 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
             spotter = VoskWakeWordSpotter()
         self.assertFalse(spotter.available)
         self.assertEqual(spotter._match_text("hey poco [unk]"), "hey poco")
-        self.assertEqual(spotter._match_text("coco ya"), "coco ya")
+        self.assertEqual(spotter._match_text("poco ya"), "poco ya")
+        self.assertIsNone(spotter._match_text("coco ya"))
+        self.assertIsNone(spotter._match_text("boko ya"))
         self.assertIsNone(spotter._match_text("[unk] [unk]"))
         self.assertIsNone(spotter._match_text(""))
 
@@ -282,20 +284,20 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
         with mock.patch.dict(os.environ, {"VOICE_WAKE_ENGINE": "off"}):
             spotter = VoskWakeWordSpotter()
         # False-positive magnets must NEVER trigger
-        for decoy in ("ok coco", "hey coco", "coco box", "poker ya", "okay", "vocal", "local"):
+        for decoy in ("boko ya", "coco ya", "ok coco", "hey coco", "coco box", "poker ya", "okay", "vocal", "local"):
             self.assertIsNone(spotter._match_text(decoy, music_playing=True), f"decoy should not match: {decoy}")
             self.assertIsNone(spotter._match_text(decoy, music_playing=False), f"decoy should not match: {decoy}")
         # Legitimate wake phrases still match
         self.assertEqual(spotter._match_text("poco ya", music_playing=True), "poco ya")
         self.assertEqual(spotter._match_text("hey poco", music_playing=True), "hey poco")
 
-        # Energy/SNR gate blocks weak residual music (e.g. rms=174 when ambient=1101)
+        # Energy/SNR gate blocks weak residual music
         with mock.patch.dict(os.environ, {"VOICE_WAKE_ENGINE": "off", "VOICE_USE_AEC3": "0", "VOICE_USE_RNNOISE": "0"}):
             listener = ContinuousVoiceListener(on_utterance=lambda b: None)
         listener.music_playing = True
         listener.wake_ambient_rms = 300.0
         self.assertFalse(listener.passes_wake_energy_gate(174.5))
-        self.assertFalse(listener.passes_wake_energy_gate(320.0))  # < 300 * 1.25 = 375
+        self.assertFalse(listener.passes_wake_energy_gate(315.0))  # < 300 * 1.08 = 324 and diff=15 < 25
         self.assertTrue(listener.passes_wake_energy_gate(450.0))
 
     def test_telemetry_logging_clip_relabeling_and_recommendations(self) -> None:
@@ -358,14 +360,23 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
             "duck_enabled": False,
             "require_wake_word": False,
             "rms_fallback_during_music": True,
+            "wake_snr_ratio": 1.45,
+            "music_confirm_chunks": 4,
+            "music_min_conf": 0.85,
         })
         self.assertEqual(ctrl.vad_threshold, 320.0)
         self.assertFalse(ctrl.duck_enabled)
         self.assertTrue(ctrl.continuous_listener.rms_fallback_during_music)
+        self.assertEqual(ctrl.continuous_listener.wake_snr_ratio, 1.45)
+        self.assertEqual(ctrl.continuous_listener.wake_spotter.music_confirm_chunks, 4)
+        self.assertEqual(ctrl.continuous_listener.wake_spotter.music_min_confidence, 0.85)
 
         res = ctrl.update_runtime_config({"reset_defaults": True})
         self.assertTrue(res["ok"])
         self.assertTrue(res["reset"])
+        self.assertEqual(ctrl.continuous_listener.wake_snr_ratio, 1.08)
+        self.assertEqual(ctrl.continuous_listener.wake_spotter.music_confirm_chunks, 2)
+        self.assertEqual(ctrl.continuous_listener.wake_spotter.music_min_confidence, 0.65)
         self.assertEqual(ctrl.vad_threshold, 40.0)
         self.assertEqual(ctrl.duck_volume, 18)
         self.assertTrue(ctrl.duck_enabled)

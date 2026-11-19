@@ -390,7 +390,10 @@ class VoiceController:
             "speech_multiplier": self.continuous_listener.speech_multiplier if self.continuous_listener else float(os.environ.get("VOICE_VAD_MULTIPLIER", "3.0")),
             "playing_multiplier": self.continuous_listener.playing_multiplier if self.continuous_listener else float(os.environ.get("VOICE_PLAYING_MULTIPLIER", "2.1")),
             "rms_fallback_during_music": self.continuous_listener.rms_fallback_during_music if self.continuous_listener else _env_bool("VOICE_RMS_FALLBACK_DURING_MUSIC", False),
-            "aec3_delay_ms": (self.continuous_listener.aec3.delay_ms if (self.continuous_listener and self.continuous_listener.aec3) else int(os.environ.get("VOICE_AEC3_DELAY_MS", "60"))),
+            "aec3_delay_ms": (self.continuous_listener.aec3.delay_ms if (self.continuous_listener and self.continuous_listener.aec3) else int(os.environ.get("VOICE_AEC3_DELAY_MS", "150"))),
+            "wake_snr_ratio": self.continuous_listener.wake_snr_ratio if self.continuous_listener else float(os.environ.get("VOICE_WAKE_SNR_RATIO", "1.08")),
+            "music_confirm_chunks": (self.continuous_listener.wake_spotter.music_confirm_chunks if (self.continuous_listener and self.continuous_listener.wake_spotter) else int(os.environ.get("VOICE_WAKE_CONFIRM_CHUNKS", "2"))),
+            "music_min_conf": (self.continuous_listener.wake_spotter.music_min_confidence if (self.continuous_listener and self.continuous_listener.wake_spotter) else float(os.environ.get("VOICE_WAKE_MIN_CONF", "0.65"))),
         }
 
     def _load_voice_prefs(self) -> None:
@@ -986,7 +989,11 @@ class VoiceController:
                 start_quiz_voice_loop=True,
             )
             transcript = (res.intent or {}).get("raw_text", "") if isinstance(res.intent, dict) else ""
-            if res.ok and res.action != IntentAction.UNKNOWN.value:
+            is_wake_only = (
+                bool(res.details and res.details.get("wake_only"))
+                or (isinstance(res.intent, dict) and bool(res.intent.get("wake_word_detected")))
+            )
+            if (res.ok and res.action != IntentAction.UNKNOWN.value) or is_wake_only:
                 new_clip = self.telemetry.relabel_wake_clip(
                     clip_path, "tp", {"transcript": transcript, "action": res.action}
                 )
@@ -1362,6 +1369,12 @@ class VoiceController:
                 self.continuous_listener.rms_fallback_during_music = bool(d["rms_fallback_during_music"])
                 if self.continuous_listener.aec3:
                     self.continuous_listener.aec3.set_delay_ms(int(d["aec3_delay_ms"]))
+                if "wake_snr_ratio" in d:
+                    self.continuous_listener.wake_snr_ratio = float(d["wake_snr_ratio"])
+                if "music_confirm_chunks" in d and self.continuous_listener.wake_spotter:
+                    self.continuous_listener.wake_spotter.music_confirm_chunks = int(d["music_confirm_chunks"])
+                if "music_min_conf" in d and self.continuous_listener.wake_spotter:
+                    self.continuous_listener.wake_spotter.music_min_confidence = float(d["music_min_conf"])
             return {"ok": True, "reset": True, "voice": self.display_state()["voice"]}
 
         if data.get("reset_speaker_defaults"):
@@ -1428,6 +1441,12 @@ class VoiceController:
             self.continuous_listener.rms_fallback_during_music = bool(data["rms_fallback_during_music"])
         if "aec3_delay_ms" in data and self.continuous_listener and self.continuous_listener.aec3:
             self.continuous_listener.aec3.set_delay_ms(int(float(data["aec3_delay_ms"])))
+        if "wake_snr_ratio" in data and self.continuous_listener:
+            self.continuous_listener.wake_snr_ratio = max(1.0, min(3.0, float(data["wake_snr_ratio"])))
+        if "music_confirm_chunks" in data and self.continuous_listener and self.continuous_listener.wake_spotter:
+            self.continuous_listener.wake_spotter.music_confirm_chunks = max(1, min(5, int(float(data["music_confirm_chunks"]))))
+        if "music_min_conf" in data and self.continuous_listener and self.continuous_listener.wake_spotter:
+            self.continuous_listener.wake_spotter.music_min_confidence = max(0.1, min(0.99, float(data["music_min_conf"])))
         if data.get("reset_ambient") and self.continuous_listener:
             self.continuous_listener.ambient_rms = 10.0
         return {"ok": True, "voice": self.display_state()["voice"]}
