@@ -68,12 +68,15 @@ class DisplayUITests(unittest.TestCase):
         _check_js_syntax(js)
 
     def test_display_is_fullscreen_without_persistent_bars(self) -> None:
-        self.assertEqual(UI_VERSION, "6")
+        self.assertEqual(UI_VERSION, "7")
         self.assertIn('viewport-fit=cover', DISPLAY_HTML)
         self.assertIn('apple-mobile-web-app-capable', DISPLAY_HTML)
         self.assertIn('apple-mobile-web-app-status-bar-style', DISPLAY_HTML)
         self.assertIn('/display/manifest.webmanifest', DISPLAY_HTML)
         self.assertIn('requestFullscreen', DISPLAY_HTML)
+        # Cover art tap toggles play/pause with visual feedback
+        self.assertIn("togglePlaybackFromCover", DISPLAY_HTML)
+        self.assertIn("artTapBadge", DISPLAY_HTML)
         # No persistent topbar or footer status bars
         self.assertNotIn('class="topbar"', DISPLAY_HTML)
         self.assertNotIn('class="footer"', DISPLAY_HTML)
@@ -81,6 +84,16 @@ class DisplayUITests(unittest.TestCase):
         self.assertIn("@media (orientation: landscape)", DISPLAY_HTML)
         self.assertIn("layout-landscape", DISPLAY_HTML)
         self.assertIn("rotateDisplay", DISPLAY_HTML)
+
+    def test_kiosk_touch_and_udev_rules(self) -> None:
+        kiosk_sh = (REPO_ROOT / "infra" / "display" / "pocobox-kiosk-start.sh").read_text(encoding="utf-8")
+        self.assertIn('user_pref("dom.w3c_touch_events.enabled", 1);', kiosk_sh)
+
+        rules_path = REPO_ROOT / "infra" / "display" / "95-pocobox-touchscreen.rules"
+        self.assertTrue(rules_path.exists())
+        rules = rules_path.read_text(encoding="utf-8")
+        self.assertIn('ENV{WL_OUTPUT}="DSI-1"', rules)
+        self.assertIn("generic ft5x06", rules)
 
     def test_display_manifest_is_valid_fullscreen_pwa(self) -> None:
         manifest = json.loads(DISPLAY_MANIFEST)

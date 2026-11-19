@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-UI_VERSION = "6"
+UI_VERSION = "7"
 
 DISPLAY_MANIFEST = json.dumps(
     {
@@ -101,9 +101,29 @@ DISPLAY_HTML = r"""<!doctype html>
     box-shadow: 0 28px 64px rgba(0, 0, 0, 0.68);
     display: flex; align-items: center; justify-content: center;
     position: relative;
+    cursor: pointer;
+    touch-action: manipulation;
+    user-select: none;
+    -webkit-user-select: none;
+    transition: transform 0.12s ease;
   }
+  .art-wrap:active { transform: scale(0.97); }
   .art-wrap img { width: 100%; height: 100%; object-fit: cover; display: block; }
   .art-placeholder { font-size: clamp(56px, 12vmin, 96px); opacity: 0.35; }
+  .art-tap-badge {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: clamp(48px, 11vmin, 76px);
+    color: #ffffff;
+    background: rgba(11, 13, 18, 0.45);
+    border-radius: inherit;
+    opacity: 0; pointer-events: none;
+    transform: scale(0.72);
+    transition: opacity 0.22s cubic-bezier(0.16, 1, 0.3, 1), transform 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+    backdrop-filter: blur(6px);
+    z-index: 5;
+  }
+  .art-tap-badge.show { opacity: 1; transform: scale(1); }
 
   .info-col {
     width: 100%;
@@ -469,9 +489,10 @@ DISPLAY_HTML = r"""<!doctype html>
 
   <div class="app" id="appRoot">
     <div class="stage">
-      <div class="art-wrap" id="artWrap">
+      <div class="art-wrap" id="artWrap" onclick="togglePlaybackFromCover(event)" title="재생 / 일시정지">
         <img id="coverImg" alt="" style="display:none" />
         <div id="artPlaceholder" class="art-placeholder">🎵</div>
+        <div id="artTapBadge" class="art-tap-badge">▶</div>
       </div>
 
       <div class="info-col">
@@ -808,6 +829,21 @@ DISPLAY_HTML = r"""<!doctype html>
     } catch (_) {}
   }
 
+  function togglePlaybackFromCover(ev) {
+    if (ev) {
+      ev.stopPropagation();
+      ev.preventDefault();
+    }
+    const willPlay = (playbackState.mode !== "play");
+    const badge = document.getElementById("artTapBadge");
+    if (badge) {
+      badge.textContent = willPlay ? "▶" : "⏸";
+      badge.classList.add("show");
+      setTimeout(() => badge.classList.remove("show"), 450);
+    }
+    ctrl("toggle");
+  }
+
   async function triggerMic() {
     try {
       const r = await fetch("/voice/listen", {method: "POST", body: "{}"});
@@ -924,15 +960,16 @@ DISPLAY_HTML = r"""<!doctype html>
     }
   }
 
-  // Tap empty background to briefly toggle minimal HUD; double-tap cover art for fullscreen
+  // Tap empty background to briefly toggle minimal HUD; tap cover art to play/pause
   document.getElementById("appRoot").addEventListener("click", (e) => {
-    if (e.target.closest("button, a")) return;
+    if (e.target.closest("button, a, .art-wrap")) return;
     const hud = document.getElementById("hud");
     if (hud && hud.classList.contains("visible")) hideHud();
     else showHud(4000);
   });
 
   document.getElementById("artWrap").addEventListener("dblclick", (e) => {
+    e.stopPropagation();
     if (!IS_KIOSK) toggleFullscreen(e);
   });
 

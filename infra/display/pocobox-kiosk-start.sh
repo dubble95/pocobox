@@ -26,6 +26,7 @@ user_pref("browser.tabs.warnOnClose", false);
 user_pref("browser.startup.homepage_override.mstone", "ignore");
 user_pref("dom.disable_beforeunload", true);
 user_pref("media.autoplay.default", 0);
+user_pref("dom.w3c_touch_events.enabled", 1);
 EOF
 
 # Force-hide all Firefox chrome/toolbars/status bars in BOTH portrait and landscape

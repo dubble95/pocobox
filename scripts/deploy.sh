@@ -37,6 +37,7 @@ scp "${REPO_DIR}/infra/display/pocobox-autorotate.service" "${HOST}:/tmp/pocobox
 scp "${REPO_DIR}/infra/display/pocobox-backlight.py" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/display/pocobox-backlight.service" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/display/99-pocobox-kiosk.conf" "${HOST}:/tmp/pocobox-deploy/"
+scp "${REPO_DIR}/infra/display/95-pocobox-touchscreen.rules" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/display/restore-phosh-display.sh" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/services/lms_client/lms_client.py" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/services/usb_dac_autoplay/pocobox_dac_autoplay.py" "${HOST}:/tmp/pocobox-deploy/"
@@ -103,6 +104,10 @@ install -m 0644 \$SRC/pocobox-daily-quiz.timer /etc/systemd/system/pocobox-daily
 install -m 0644 \$SRC/pocobox-backlight.service /etc/systemd/system/pocobox-backlight.service
 install -m 0644 \$SRC/pocobox-autorotate.service /etc/systemd/system/pocobox-autorotate.service
 install -m 0644 \$SRC/99-pocobox-kiosk.conf /etc/systemd/system/greetd.service.d/override.conf
+mkdir -p /etc/udev/rules.d
+install -m 0644 \$SRC/95-pocobox-touchscreen.rules /etc/udev/rules.d/95-pocobox-touchscreen.rules
+udevadm control --reload-rules
+udevadm trigger --subsystem-match=input --action=change 2>/dev/null || true
 
 install -m 0644 \$SRC/99-pocobox-no-powersave.conf /etc/NetworkManager/conf.d/99-pocobox-no-powersave.conf
 install -m 0644 \$SRC/99-pocobox-nosuspend.conf /etc/systemd/sleep.conf.d/99-pocobox-nosuspend.conf

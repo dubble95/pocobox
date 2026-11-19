@@ -1487,7 +1487,11 @@ class VoiceController:
     def display_control(self, action: str) -> dict[str, Any]:
         player_id = self.lms.resolve_player_id(self.player_name)
         if action == "toggle":
-            self.lms.toggle_pause(player_id)
+            np = self.lms.now_playing(player_id)
+            if (np.get("mode") or "").strip().lower() == "stop":
+                self.lms.play(player_id)
+            else:
+                self.lms.toggle_pause(player_id)
         elif action == "next":
             self.executor._ensure_next_track_available(player_id)
             self.lms.next_track(player_id)
@@ -1500,8 +1504,7 @@ class VoiceController:
             self.lms.adjust_volume(player_id, delta)
         else:
             return {"ok": False, "error": f"Unknown control action: {action}"}
-        if action != "toggle":
-            self._wake_display(15.0)
+        self._wake_display(15.0)
         return {"ok": True, "action": action}
 
     def get_daily_quiz_schedule(self, force_refresh: bool = False) -> dict[str, Any]:
