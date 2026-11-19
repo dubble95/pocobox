@@ -155,12 +155,14 @@ def main() -> int:
     if rot_mode in ("normal", "90", "180", "270"):
         log.info("Fixed display rotation mode: %s", rot_mode)
         last_sock = None
+        applied_rot = None
         while not stop:
             cur_sock = _socket_id(wayland_sock)
-            if cur_sock and cur_sock != last_sock:
+            if cur_sock and (cur_sock != last_sock or applied_rot != rot_mode):
                 if apply_transform(runtime_dir, rot_mode, preferred_output):
                     last_sock = cur_sock
-            time.sleep(2.0)
+                    applied_rot = rot_mode
+            time.sleep(1.0)
         return 0
 
     monitor_bin = shutil.which("monitor-sensor")
@@ -171,6 +173,7 @@ def main() -> int:
     log.info("Starting accelerometer auto-rotation (runtime_dir=%s)", runtime_dir)
     current_transform: str | None = None
     applied_sock: tuple[int, int] | None = None
+    applied_transform: str | None = None
 
     while not stop:
         master_fd, slave_fd = pty.openpty()
@@ -185,7 +188,7 @@ def main() -> int:
         buf = ""
         try:
             while not stop:
-                rlist, _, _ = select.select([master_fd], [], [], 2.0)
+                rlist, _, _ = select.select([master_fd], [], [], 1.0)
                 if rlist:
                     try:
                         chunk = os.read(master_fd, 4096)
@@ -197,35 +200,44 @@ def main() -> int:
                     while "\n" in buf:
                         line, buf = buf.split("\n", 1)
                         orient = parse_orientation_line(line)
-                        if not orient:
-                            continue
-                        transform = map_orientation(orient)
-                        if not transform:
-                            continue
-                        if lock_file.exists():
-                            continue
-                        if transform != current_transform:
-                            current_transform = transform
-                            cur_sock = _socket_id(wayland_sock)
-                            if cur_sock and apply_transform(runtime_dir, transform, preferred_output):
-                                applied_sock = cur_sock
-                # Fallback to direct DBus query if monitor-sensor emitted undefined on startup
-                if current_transform is None and not lock_file.exists():
-                    dbus_orient = query_current_orientation()
-                    if dbus_orient:
-                        tr = map_orientation(dbus_orient)
-                        if tr:
-                            current_transform = tr
-                            cur_sock = _socket_id(wayland_sock)
-                            if cur_sock and apply_transform(runtime_dir, tr, preferred_output):
-                                applied_sock = cur_sock
+                        if orient:
+                            tr = map_orientation(orient)
+                            if tr:
+                                current_transform = tr
 
-                # Re-apply current orientation if cage/greetd restarted
-                if current_transform and not lock_file.exists():
-                    cur_sock = _socket_id(wayland_sock)
-                    if cur_sock and cur_sock != applied_sock:
-                        if apply_transform(runtime_dir, current_transform, preferred_output):
+                # Read rotation lock if set manually (e.g. /display/rotate or UI HUD button)
+                locked_target: str | None = None
+                if lock_file.exists():
+                    try:
+                        val = lock_file.read_text(encoding="utf-8").strip().lower()
+                        if val in ORIENTATION_TO_TRANSFORM.values():
+                            locked_target = val
+                    except OSError:
+                        pass
+
+                cur_sock = _socket_id(wayland_sock)
+
+                if locked_target:
+                    # Locked mode: ensure the locked target is applied, including across cage/greetd restarts
+                    if cur_sock and (cur_sock != applied_sock or locked_target != applied_transform):
+                        if apply_transform(runtime_dir, locked_target, preferred_output):
                             applied_sock = cur_sock
+                            applied_transform = locked_target
+                            current_transform = locked_target
+                else:
+                    # Auto mode: if orientation not yet known, query SensorProxy DBus directly
+                    if current_transform is None:
+                        dbus_orient = query_current_orientation()
+                        if dbus_orient:
+                            current_transform = map_orientation(dbus_orient)
+
+                    # Apply detected orientation whenever changed OR when cage/greetd restarted
+                    if current_transform and cur_sock:
+                        if cur_sock != applied_sock or current_transform != applied_transform:
+                            if apply_transform(runtime_dir, current_transform, preferred_output):
+                                applied_sock = cur_sock
+                                applied_transform = current_transform
+
                 if proc.poll() is not None:
                     break
         finally:

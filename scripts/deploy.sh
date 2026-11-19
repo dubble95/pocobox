@@ -75,6 +75,14 @@ ln -sf /srv/pocobox/bin/voice_control/cli.py /usr/local/bin/pocobox-voice
 [ -f /etc/pocobox/squeezelite.env ] || install -m 0644 \$SRC/squeezelite.env /etc/pocobox/squeezelite.env
 [ -f /etc/pocobox/dac-autoplay.env ] || install -m 0644 \$SRC/dac-autoplay.env /etc/pocobox/dac-autoplay.env
 [ -f /etc/pocobox/display.env ] || install -m 0644 \$SRC/display.env /etc/pocobox/display.env
+grep -q "DISPLAY_ROTATION" /etc/pocobox/display.env 2>/dev/null || cat << "DISP_EOF" >> /etc/pocobox/display.env
+
+# Screen rotation: auto (accelerometer via iio-sensor-proxy), or fixed normal|90|180|270
+DISPLAY_ROTATION=auto
+DISPLAY_POWER_MODE=auto
+DISPLAY_IDLE_OFF_SEC=10
+DISPLAY_TOUCH_WAKE_SEC=15
+DISP_EOF
 [ -f /etc/pocobox/voice.env ] || install -m 0600 -o user -g user \$SRC/voice.env.example /etc/pocobox/voice.env
 grep -q "ENABLE_LOCAL_LLM" /etc/pocobox/voice.env 2>/dev/null || cat << "ENV_EOF" >> /etc/pocobox/voice.env
 

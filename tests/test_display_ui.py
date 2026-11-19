@@ -159,6 +159,10 @@ class DisplayUITests(unittest.TestCase):
         self.assertEqual(mod.map_orientation("right-up"), "270")
         self.assertIsNone(mod.map_orientation("undefined"))
 
+        # query_current_orientation falls back gracefully when GI/Gio not on test host
+        res = mod.query_current_orientation()
+        self.assertTrue(res is None or isinstance(res, str))
+
 
 def _load_backlight_module():
     spec = importlib.util.spec_from_file_location(
