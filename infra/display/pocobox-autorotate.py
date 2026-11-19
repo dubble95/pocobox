@@ -45,6 +45,28 @@ def map_orientation(orient: str) -> str | None:
     return ORIENTATION_TO_TRANSFORM.get(orient.strip().lower())
 
 
+def query_current_orientation() -> str | None:
+    """Directly query SensorProxy DBus property when monitor-sensor emits 'undefined' on start."""
+    try:
+        from gi.repository import Gio, GLib  # type: ignore
+
+        bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+        proxy = Gio.DBusProxy.new_sync(
+            bus, 0, None, "net.hadess.SensorProxy", "/net/hadess/SensorProxy", "net.hadess.SensorProxy", None
+        )
+        proxy.call_sync("ClaimAccelerometer", None, 0, -1, None)
+        prop = Gio.DBusProxy.new_sync(
+            bus, 0, None, "net.hadess.SensorProxy", "/net/hadess/SensorProxy", "org.freedesktop.DBus.Properties", None
+        )
+        v = prop.call_sync("Get", GLib.Variant("(ss)", ("net.hadess.SensorProxy", "AccelerometerOrientation")), 0, -1, None)
+        val = str(v.unpack()[0]).strip().lower()
+        if val and val != "undefined":
+            return val
+    except Exception:
+        pass
+    return None
+
+
 def _wayland_env(runtime_dir: str) -> dict[str, str]:
     env = os.environ.copy()
     env["XDG_RUNTIME_DIR"] = runtime_dir
@@ -187,6 +209,17 @@ def main() -> int:
                             cur_sock = _socket_id(wayland_sock)
                             if cur_sock and apply_transform(runtime_dir, transform, preferred_output):
                                 applied_sock = cur_sock
+                # Fallback to direct DBus query if monitor-sensor emitted undefined on startup
+                if current_transform is None and not lock_file.exists():
+                    dbus_orient = query_current_orientation()
+                    if dbus_orient:
+                        tr = map_orientation(dbus_orient)
+                        if tr:
+                            current_transform = tr
+                            cur_sock = _socket_id(wayland_sock)
+                            if cur_sock and apply_transform(runtime_dir, tr, preferred_output):
+                                applied_sock = cur_sock
+
                 # Re-apply current orientation if cage/greetd restarted
                 if current_transform and not lock_file.exists():
                     cur_sock = _socket_id(wayland_sock)
