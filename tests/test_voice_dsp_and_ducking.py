@@ -266,10 +266,11 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
         with mock.patch.dict(os.environ, {"VOICE_WAKE_ENGINE": "off"}):
             spotter = VoskWakeWordSpotter(music_confirm_chunks=2, music_min_confidence=0.6)
 
-        # Bare 2-syllable 'poco' ignored while music plays, allowed when quiet
+        # Bare 2-syllable 'poco' ignored in both quiet and music to prevent false-triggers
         self.assertIsNone(spotter._match_text("poco", music_playing=True))
-        self.assertEqual(spotter._match_text("poco", music_playing=False), "poco")
+        self.assertIsNone(spotter._match_text("poco", music_playing=False))
         self.assertEqual(spotter._match_text("poco ya", music_playing=True), "poco ya")
+        self.assertEqual(spotter._match_text("poco ya", music_playing=False), "poco ya")
 
         # Require 2 consecutive partials during music; 1 transient blip must not fire
         spotter.available = True

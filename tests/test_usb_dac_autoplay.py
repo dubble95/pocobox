@@ -86,6 +86,32 @@ class TestUsbDacAutoplay(unittest.TestCase):
             fake_client.set_volume.assert_called_once_with("02:70:6f:63:6f:01", 100)
             fake_client.play.assert_called_once_with("02:70:6f:63:6f:01")
 
+    def test_startup_configures_volume_without_forcing_autoplay(self) -> None:
+        """On boot or daemon restart, pre-existing DAC must not force-play a paused queue."""
+        with tempfile.TemporaryDirectory() as td:
+            env_file = Path(td) / "squeezelite.env"
+            state_file = Path(td) / "audio-state.json"
+            fake_client = MagicMock()
+            fake_client.list_players.return_value = [
+                {"playerid": "02:70:6f:63:6f:01", "name": "pocobox", "connected": 1}
+            ]
+            fake_client.player_status.return_value = {"mode": "pause", "playlist_tracks": 100}
+
+            with patch.dict(os.environ, {"ENABLE_AEC": "0"}), \
+                 patch.object(dac_mod, "SQUEEZELITE_ENV", env_file), \
+                 patch.object(dac_mod, "AUDIO_STATE_FILE", state_file), \
+                 patch.object(dac_mod, "find_usb_audio_cards", return_value=[(1, "DAC")]), \
+                 patch.object(dac_mod, "set_usb_dac_hw_full_volume", return_value=["PCM,0"]), \
+                 patch.object(dac_mod, "release_usb_cards_from_pulseaudio", return_value=[]), \
+                 patch.object(dac_mod, "restart_squeezelite"):
+                new_state = dac_mod.apply_state(fake_client, active_dac=None, is_startup=True)
+
+            self.assertEqual(new_state, "DAC")
+            # Must configure hardware/LMS volume to 100%
+            fake_client.set_volume.assert_called_once_with("02:70:6f:63:6f:01", 100)
+            # But MUST NOT force-play paused music on startup!
+            fake_client.play.assert_not_called()
+
     def test_attach_with_webrtc_aec_routes_through_aec_sink(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             env_file = Path(td) / "squeezelite.env"

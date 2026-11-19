@@ -23,16 +23,18 @@ log = logging.getLogger("pocobox-voice.wakeword")
 DEFAULT_MODEL_DIR = "/srv/pocobox/models/vosk-model-small-en-us-0.15"
 
 # Clean trigger phrases verified for Korean ("포코야", "포코박스", "헤이 포코") and English ("Hey Poco")
+# Note: single-word "poco" alone is intentionally excluded from triggers to prevent high false-positives
+# during quiet/paused conversation; use "poco ya" ("포코야"), "hey poco", or "poco box".
 DEFAULT_TRIGGER_PHRASES: tuple[str, ...] = (
     "hey poco",
     "poco ya",
     "poco box",
-    "poco",
 )
 
 # Competing non-trigger decoy words in the Kaldi grammar so non-wake speech/singing
 # maps here instead of being forced into wake phrases.
 DEFAULT_DECOY_PHRASES: tuple[str, ...] = (
+    "poco",  # Decoy: bare "poco" alone does not trigger without "hey" / "ya" / "box"
     "okay",
     "hey",
     "hello",
@@ -92,7 +94,7 @@ DEFAULT_DECOY_PHRASES: tuple[str, ...] = (
 DEFAULT_WAKE_GRAMMAR: tuple[str, ...] = DEFAULT_TRIGGER_PHRASES + DEFAULT_DECOY_PHRASES
 
 # Too short to trust alone during music playback (2-syllable singing lyrics false-trigger easily)
-QUIET_ONLY_PHRASES: frozenset[str] = frozenset({"poco"})
+QUIET_ONLY_PHRASES: frozenset[str] = frozenset()
 
 # Phrases requiring stricter confirmation during active music playback
 # Singing vocals in music frequently false-trigger English vocal phrases like 'hey poco' (0 TP, 5 FP)

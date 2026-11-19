@@ -459,7 +459,12 @@ def apply_state(client: LMSClient, active_dac: str | None, is_startup: bool = Fa
                 write_audio_state(new_dac, aec_active=True)
                 restart_squeezelite()
                 restart_voice_if_active()
-                trigger_autoplay(client)
+                if not is_startup:
+                    trigger_autoplay(client)
+                else:
+                    player_id = wait_for_player(client, timeout=10.0)
+                    if player_id:
+                        configure_dac_lms_volume(client, player_id)
                 return new_dac
             log.warning("AEC setup failed for USB DAC %s; falling back to direct ALSA", new_dac)
 
@@ -471,7 +476,12 @@ def apply_state(client: LMSClient, active_dac: str | None, is_startup: bool = Fa
         write_audio_state(new_dac, aec_active=False)
         if changed or not is_startup:
             restart_squeezelite()
-        trigger_autoplay(client)
+        if not is_startup:
+            trigger_autoplay(client)
+        else:
+            player_id = wait_for_player(client, timeout=10.0)
+            if player_id:
+                configure_dac_lms_volume(client, player_id)
         return new_dac
 
     # No USB DAC present

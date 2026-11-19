@@ -651,6 +651,19 @@ class HybridVoiceInterpreter:
                     fast.provider = "sensevoice-local"
                     return fast
 
+                # Intent Gating: Do not escalate random noise/household chatter to SLM or Gemini unless it has intent cues!
+                if not is_meaningful_cloud_candidate(transcript):
+                    self.quota_tracker.record_skipped_ambient()
+                    if self.telemetry:
+                        self.telemetry.record(
+                            "gemini_skipped_ambient",
+                            transcript=transcript,
+                            reason="no_intent_cues",
+                        )
+                    log.info("Skipped SLM/cloud LLM for ambient utterance without intent cues: %r", transcript)
+                    fast.provider = "sensevoice-local"
+                    return fast
+
                 # Tier 3: Local SLM (Qwen2.5-0.5B via llama-server on 127.0.0.1:8767, ~1.2s on-device)
                 if self.enable_local_llm and self.local_llm_url:
                     try:
@@ -662,19 +675,6 @@ class HybridVoiceInterpreter:
                             return slm_intent
                     except Exception as exc:
                         log.debug("Local SLM audio fallback failed after STT (%r): %s", transcript, exc)
-
-                # Intent Gating: Do not escalate random noise/fragment to Gemini unless it has intent cues!
-                if not is_meaningful_cloud_candidate(transcript):
-                    self.quota_tracker.record_skipped_ambient()
-                    if self.telemetry:
-                        self.telemetry.record(
-                            "gemini_skipped_ambient",
-                            transcript=transcript,
-                            reason="no_intent_cues",
-                        )
-                    log.info("Skipped cloud LLM for ambient utterance without intent cues: %r", transcript)
-                    fast.provider = "sensevoice-local"
-                    return fast
 
                 # Tier 4: Unknown/complex command or Q&A: escalate text-only to cloud LLM if enabled
                 if self.cloud_fallback and self.has_cloud_api():
