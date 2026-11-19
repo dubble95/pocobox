@@ -162,6 +162,25 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
         self.assertEqual(mock_speak.call_args[0][0], "네, 볼륨을 55로 맞출게요.")
         self.assertEqual(fake_lms.volume, 55)
 
+    def test_dac_mode_auto_ducking(self) -> None:
+        with mock.patch.dict(os.environ, {"CONTINUOUS_LISTEN": "0", "VOICE_DUCK_ENABLED": "1", "VOICE_DUCK_VOLUME": "18", "ENABLE_CHIME": "0"}):
+            ctrl = VoiceController()
+        fake_lms = _FakeLMS(mode="play", volume=100)
+        ctrl.lms = fake_lms  # type: ignore[assignment]
+        ctrl.executor.lms = fake_lms  # type: ignore[assignment]
+
+        with mock.patch.object(ctrl, "is_dac_mode", return_value=True):
+            ctrl.dac_duck_enabled = True
+            self.assertTrue(ctrl._begin_duck())
+            self.assertEqual(fake_lms.volume, 18)
+            ctrl._restore_duck()
+            self.assertEqual(fake_lms.volume, 100)
+
+            # When explicitly disabled for DAC mode:
+            ctrl.dac_duck_enabled = False
+            self.assertFalse(ctrl._begin_duck())
+            self.assertEqual(fake_lms.volume, 100)
+
     def test_bare_wake_word_triggers_followup_listen_once(self) -> None:
         with mock.patch.dict(os.environ, {"CONTINUOUS_LISTEN": "0", "VOICE_DUCK_ENABLED": "1", "ENABLE_CHIME": "0"}):
             ctrl = VoiceController()
@@ -324,6 +343,17 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
             for _ in range(3):
                 tel.record("wake_command_ok", phrase="poco ya", music_playing=True, snr_ratio=2.4, confidence=0.88, aec3_active=True, aec3_reduction_db=18.5)
             tel.record("wake_rejected_energy", phrase="poco ya", music_playing=True, snr_ratio=0.7)
+
+            # Save command clips and verify listing & pruning
+            cmd_wav = pcm_to_wav_bytes(_make_sine_pcm(800.0, dur_sec=0.5, amp=5000))
+            saved_cmd = tel.save_command_clip(cmd_wav, "now_playing", {"transcript": "지금 노래 뭐야", "ok": True})
+            self.assertIsNotNone(saved_cmd)
+            self.assertTrue(Path(saved_cmd).exists())
+            clips = tel.list_command_clips(limit=10)
+            self.assertEqual(len(clips), 1)
+            self.assertEqual(clips[0]["action"], "now_playing")
+            self.assertEqual(clips[0]["transcript"], "지금 노래 뭐야")
+            self.assertTrue(clips[0]["wav_exists"])
 
             summary = tel.summarize(hours=24.0)
             self.assertEqual(summary["wake_true_positives"], 3)

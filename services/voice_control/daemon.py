@@ -323,6 +323,7 @@ class VoiceController:
         self.continuous_enabled = _env_bool("CONTINUOUS_LISTEN", True)
         self.vad_threshold = float(os.environ.get("VOICE_VAD_THRESHOLD", "40.0"))
         self.duck_enabled = _env_bool("VOICE_DUCK_ENABLED", True)
+        self.dac_duck_enabled = _env_bool("VOICE_DAC_DUCK_ENABLED", True)
         self.duck_volume = max(5, min(60, int(os.environ.get("VOICE_DUCK_VOLUME", "18"))))
         self.use_bandpass = _env_bool("VOICE_USE_BANDPASS", True)
 
@@ -459,8 +460,7 @@ class VoiceController:
         """Immediately lower LMS music volume while listening so 2-3m voice is crystal clear."""
         if not self.duck_enabled:
             return False
-        if self.is_dac_mode():
-            # In DAC bit-perfect mode, digital volume is strictly 100% fixed (AEC3 handles echo cancellation)
+        if self.is_dac_mode() and not self.dac_duck_enabled:
             return False
         with self._duck_lock:
             if self._duck_saved is not None:
@@ -1002,24 +1002,31 @@ class VoiceController:
                 bool(res.details and res.details.get("wake_only"))
                 or (isinstance(res.intent, dict) and bool(res.intent.get("wake_word_detected")))
             )
+            cmd_clip = res.details.get("command_clip_path") if res.details else None
+            extra_meta = {"transcript": transcript, "action": res.action}
+            if cmd_clip:
+                extra_meta["command_clip"] = cmd_clip
+
             if (res.ok and res.action != IntentAction.UNKNOWN.value) or is_wake_only:
                 new_clip = self.telemetry.relabel_wake_clip(
-                    clip_path, "tp", {"transcript": transcript, "action": res.action}
+                    clip_path, "tp", extra_meta
                 )
                 self.telemetry.record(
                     "wake_command_ok",
                     clip_path=new_clip,
+                    command_clip=cmd_clip,
                     transcript=transcript,
                     action=res.action,
                     **wake_meta,
                 )
             else:
                 new_clip = self.telemetry.relabel_wake_clip(
-                    clip_path, "fp", {"fp_reason": "empty_or_unknown", "transcript": transcript, "action": res.action}
+                    clip_path, "fp", {**extra_meta, "fp_reason": "empty_or_unknown"}
                 )
                 self.telemetry.record(
                     "wake_command_empty",
                     clip_path=new_clip,
+                    command_clip=cmd_clip,
                     transcript=transcript,
                     action=res.action,
                     **wake_meta,
@@ -1263,6 +1270,23 @@ class VoiceController:
         res.details["vad"] = metrics.__dict__
         res.details["stt_ms"] = stt_ms
         res.details["stt_provider"] = intent.provider
+
+        if self.telemetry is not None and not dry_run and wav_bytes:
+            cmd_meta = {
+                "transcript": intent.raw_text,
+                "action": res.action,
+                "ok": res.ok,
+                "message": res.message,
+                "provider": intent.provider,
+                "confidence": intent.confidence,
+                "stt_ms": stt_ms,
+                "vad": metrics.__dict__,
+                "music_playing": bool(self.continuous_listener.music_playing) if self.continuous_listener else False,
+            }
+            cmd_clip = self.telemetry.save_command_clip(wav_bytes, res.action, cmd_meta)
+            if cmd_clip:
+                res.details["command_clip_path"] = cmd_clip
+
         self.last_result = res.to_dict()
         self.events.publish({
             "type": "result",
@@ -1824,6 +1848,52 @@ def make_handler(controller: VoiceController) -> type[BaseHTTPRequestHandler]:
                     except ValueError:
                         limit = 50
                 self._send_json(200, {"ok": True, "events": controller.telemetry.read_recent(limit=limit)})
+                return
+            if path == "/telemetry/command_clips":
+                limit = 50
+                if "limit=" in self.path:
+                    try:
+                        limit = max(1, min(200, int(self.path.split("limit=", 1)[1].split("&", 1)[0])))
+                    except ValueError:
+                        limit = 50
+                clips = controller.telemetry.list_command_clips(limit=limit) if controller.telemetry else []
+                self._send_json(200, {"ok": True, "clips": clips})
+                return
+            if path == "/telemetry/command_clip":
+                import urllib.parse
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                fname = qs.get("file", [""])[0]
+                if not fname or "/" in fname or "\\" in fname or ".." in fname:
+                    self._send_json(400, {"ok": False, "error": "Invalid file parameter"})
+                    return
+                if not controller.telemetry:
+                    self._send_json(404, {"ok": False, "error": "Telemetry disabled"})
+                    return
+                target = controller.telemetry.command_clips_dir / fname
+                if not target.exists() or not target.is_file():
+                    self._send_json(404, {"ok": False, "error": "Clip not found"})
+                    return
+                ctype = "audio/wav" if target.suffix == ".wav" else "application/json; charset=utf-8"
+                self._send_bytes(200, target.read_bytes(), ctype)
+                return
+            if path == "/telemetry/wake_clip":
+                import urllib.parse
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                fname = qs.get("file", [""])[0]
+                label = qs.get("label", ["pending"])[0]
+                safe_label = "".join(c for c in label if c.isalnum() or c in ("_", "-"))
+                if not fname or "/" in fname or "\\" in fname or ".." in fname:
+                    self._send_json(400, {"ok": False, "error": "Invalid file parameter"})
+                    return
+                if not controller.telemetry:
+                    self._send_json(404, {"ok": False, "error": "Telemetry disabled"})
+                    return
+                target = controller.telemetry.clips_dir / safe_label / fname
+                if not target.exists() or not target.is_file():
+                    self._send_json(404, {"ok": False, "error": "Clip not found"})
+                    return
+                ctype = "audio/wav" if target.suffix == ".wav" else "application/json; charset=utf-8"
+                self._send_bytes(200, target.read_bytes(), ctype)
                 return
             if path == "/display/events":
                 self.send_response(200)

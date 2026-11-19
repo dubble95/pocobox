@@ -23,6 +23,7 @@ log = logging.getLogger("pocobox-voice.telemetry")
 _KST = datetime.timezone(datetime.timedelta(hours=9))
 DEFAULT_TELEMETRY_PATH = "/srv/pocobox/logs/voice_telemetry.jsonl"
 DEFAULT_WAKE_CLIPS_DIR = "/srv/pocobox/logs/wake_clips"
+DEFAULT_COMMAND_CLIPS_DIR = "/srv/pocobox/logs/command_clips"
 MAX_LOG_BYTES = 10 * 1024 * 1024  # 10 MB rotation threshold
 
 
@@ -44,14 +45,23 @@ class VoiceTelemetryLogger:
         self,
         path: str | Path | None = None,
         clips_dir: str | Path | None = None,
+        command_clips_dir: str | Path | None = None,
         max_bytes: int = MAX_LOG_BYTES,
     ) -> None:
         env_path = os.environ.get("VOICE_TELEMETRY_LOG", DEFAULT_TELEMETRY_PATH).strip()
         env_clips = os.environ.get("VOICE_WAKE_CLIPS_DIR", DEFAULT_WAKE_CLIPS_DIR).strip()
+        env_cmd_clips = os.environ.get("VOICE_COMMAND_CLIPS_DIR", DEFAULT_COMMAND_CLIPS_DIR).strip()
         self.path = Path(path) if path is not None else Path(env_path)
         self.clips_dir = Path(clips_dir) if clips_dir is not None else Path(env_clips)
+        if command_clips_dir is not None:
+            self.command_clips_dir = Path(command_clips_dir)
+        elif clips_dir is not None:
+            self.command_clips_dir = self.clips_dir.parent / "command_clips"
+        else:
+            self.command_clips_dir = Path(env_cmd_clips)
         self.max_bytes = max_bytes
         self.max_clip_files = max(10, int(os.environ.get("VOICE_WAKE_CLIP_MAX_FILES", "200")))
+        self.max_command_clip_files = max(10, int(os.environ.get("VOICE_COMMAND_CLIP_MAX_FILES", "100")))
         self.save_clips = os.environ.get("VOICE_SAVE_WAKE_CLIPS", "1").strip().lower() not in ("0", "false", "no", "off")
         self._lock = threading.Lock()
         self.enabled = os.environ.get("VOICE_TELEMETRY_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
@@ -136,6 +146,72 @@ class VoiceTelemetryLogger:
                 return str(dst_wav)
             except OSError:
                 return None
+
+    def _prune_command_clips_unlocked(self) -> None:
+        """Keep total saved command WAV clips <= max_command_clip_files by deleting oldest pairs."""
+        try:
+            wavs = sorted(self.command_clips_dir.glob("*.wav"), key=lambda p: p.stat().st_mtime)
+        except OSError:
+            return
+        excess = len(wavs) - self.max_command_clip_files
+        for old_wav in wavs[: max(0, excess)]:
+            try:
+                old_wav.unlink(missing_ok=True)
+                old_wav.with_suffix(".json").unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def save_command_clip(self, wav_bytes: bytes, action: str, meta: dict[str, Any]) -> str | None:
+        """Save a 16kHz command utterance WAV + JSON metadata pair for offline inspection & regression."""
+        if not self.enabled or not self.save_clips or not wav_bytes:
+            return None
+        safe_action = "".join(c for c in (action or "unknown").lower() if c.isalnum() or c in ("_", "-")) or "unknown"
+        now = time.time()
+        stamp = datetime.datetime.fromtimestamp(now, tz=_KST).strftime("%Y%m%d_%H%M%S")
+        ms = int((now % 1.0) * 1000)
+        stem = f"{stamp}_{ms:03d}_{safe_action}"
+        wav_path = self.command_clips_dir / f"{stem}.wav"
+        meta_path = self.command_clips_dir / f"{stem}.json"
+
+        payload = {
+            "ts": round(now, 3),
+            "iso": datetime.datetime.fromtimestamp(now, tz=_KST).isoformat(timespec="seconds"),
+            "action": safe_action,
+            **{k: (round(v, 4) if isinstance(v, float) else v) for k, v in meta.items() if v is not None},
+        }
+        with self._lock:
+            try:
+                self.command_clips_dir.mkdir(parents=True, exist_ok=True)
+                wav_path.write_bytes(wav_bytes)
+                meta_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+                self._prune_command_clips_unlocked()
+                return str(wav_path)
+            except OSError as exc:
+                if not self._disabled_warned:
+                    log.warning("Cannot save command clip %s: %s", wav_path, exc)
+                    self._disabled_warned = True
+                return None
+
+    def list_command_clips(self, limit: int = 50) -> list[dict[str, Any]]:
+        """List recently captured command clips with metadata, newest first."""
+        if not self.command_clips_dir.exists():
+            return []
+        clips = []
+        try:
+            json_files = sorted(self.command_clips_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+            for jf in json_files[:limit]:
+                try:
+                    meta = json.loads(jf.read_text(encoding="utf-8"))
+                    wav_file = jf.with_suffix(".wav")
+                    meta["wav_exists"] = wav_file.exists()
+                    meta["wav_size"] = wav_file.stat().st_size if meta["wav_exists"] else 0
+                    meta["file"] = jf.stem
+                    clips.append(meta)
+                except Exception:
+                    continue
+        except OSError:
+            return []
+        return clips
 
     def record(self, event: str, **fields: Any) -> dict[str, Any]:
         now = time.time()
