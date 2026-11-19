@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -150,6 +151,196 @@ def _intent_from_llm_payload(payload: dict[str, Any], provider: str, raw_fallbac
     )
 
 
+class GeminiQuotaTracker:
+    """Tracks and limits daily and per-minute Gemini API calls to prevent quota exhaustion."""
+
+    def __init__(
+        self,
+        daily_limit: int | None = None,
+        max_rpm: int | None = None,
+    ) -> None:
+        self.daily_limit = (
+            daily_limit
+            if daily_limit is not None
+            else int(os.environ.get("GEMINI_DAILY_LIMIT", "150"))
+        )
+        self.max_rpm = (
+            max_rpm
+            if max_rpm is not None
+            else int(os.environ.get("GEMINI_MAX_RPM", "10"))
+        )
+        self._lock = threading.Lock()
+        self._today_date: datetime.date = datetime.datetime.now(tz=_KST).date()
+        self._daily_calls: int = 0
+        self._minute_calls: list[float] = []
+        self._total_calls: int = 0
+        self._cache_hits: int = 0
+        self._skipped_ambient: int = 0
+        self._rate_limited_count: int = 0
+
+    def _rollover_if_needed_unlocked(self, now_dt: datetime.datetime) -> None:
+        today = now_dt.date()
+        if today != self._today_date:
+            log.info(
+                "GeminiQuotaTracker: daily rollover %s -> %s (yesterday calls: %d)",
+                self._today_date,
+                today,
+                self._daily_calls,
+            )
+            self._today_date = today
+            self._daily_calls = 0
+
+    def can_call(self) -> tuple[bool, str]:
+        """Check if a Gemini call is permitted under RPM and daily limits."""
+        with self._lock:
+            now = time.time()
+            now_dt = datetime.datetime.fromtimestamp(now, tz=_KST)
+            self._rollover_if_needed_unlocked(now_dt)
+
+            # Check daily limit (0 or negative means unlimited)
+            if self.daily_limit > 0 and self._daily_calls >= self.daily_limit:
+                self._rate_limited_count += 1
+                return False, f"daily_limit_exceeded ({self._daily_calls}/{self.daily_limit})"
+
+            # Prune sliding 60-second window
+            cutoff = now - 60.0
+            self._minute_calls = [t for t in self._minute_calls if t > cutoff]
+            if self.max_rpm > 0 and len(self._minute_calls) >= self.max_rpm:
+                self._rate_limited_count += 1
+                return False, f"rpm_limit_exceeded ({len(self._minute_calls)}/{self.max_rpm})"
+
+            return True, ""
+
+    def record_call(self) -> None:
+        """Record an executed Gemini API call."""
+        with self._lock:
+            now = time.time()
+            now_dt = datetime.datetime.fromtimestamp(now, tz=_KST)
+            self._rollover_if_needed_unlocked(now_dt)
+            self._daily_calls += 1
+            self._total_calls += 1
+            self._minute_calls.append(now)
+
+    def record_cache_hit(self) -> None:
+        with self._lock:
+            self._cache_hits += 1
+
+    def record_skipped_ambient(self) -> None:
+        with self._lock:
+            self._skipped_ambient += 1
+
+    def stats(self) -> dict[str, Any]:
+        with self._lock:
+            now = time.time()
+            now_dt = datetime.datetime.fromtimestamp(now, tz=_KST)
+            self._rollover_if_needed_unlocked(now_dt)
+            cutoff = now - 60.0
+            rpm_current = len([t for t in self._minute_calls if t > cutoff])
+            remaining = max(0, self.daily_limit - self._daily_calls) if self.daily_limit > 0 else 9999
+            return {
+                "daily_calls": self._daily_calls,
+                "daily_limit": self.daily_limit,
+                "daily_remaining": remaining,
+                "current_rpm": rpm_current,
+                "max_rpm": self.max_rpm,
+                "total_calls": self._total_calls,
+                "cache_hits": self._cache_hits,
+                "skipped_ambient": self._skipped_ambient,
+                "rate_limited_count": self._rate_limited_count,
+                "date_kst": self._today_date.isoformat(),
+            }
+
+
+class IntentTTLCache:
+    """Thread-safe in-memory TTL cache for voice intent results to avoid redundant cloud calls."""
+
+    def __init__(self, ttl_sec: float = 1800.0, max_entries: int = 100) -> None:
+        self.ttl_sec = ttl_sec
+        self.max_entries = max_entries
+        self._cache: dict[str, tuple[float, VoiceIntent]] = {}
+        self._lock = threading.Lock()
+
+    def _normalize_key(self, text: str) -> str:
+        clean = re.sub(r"[^\w\s]", "", text or "").strip().lower()
+        clean, _ = strip_wake_prefix(clean)
+        return " ".join(clean.split())
+
+    def get(self, text: str) -> VoiceIntent | None:
+        key = self._normalize_key(text)
+        if not key:
+            return None
+        with self._lock:
+            entry = self._cache.get(key)
+            if entry is None:
+                return None
+            ts, intent = entry
+            if time.time() - ts > self.ttl_sec:
+                del self._cache[key]
+                return None
+            return intent.clone()
+
+    def put(self, text: str, intent: VoiceIntent) -> None:
+        key = self._normalize_key(text)
+        if not key or intent.action == IntentAction.UNKNOWN:
+            return
+        with self._lock:
+            if len(self._cache) >= self.max_entries:
+                oldest_key = min(self._cache.keys(), key=lambda k: self._cache[k][0])
+                del self._cache[oldest_key]
+            self._cache[key] = (time.time(), intent.clone())
+
+    def clear(self) -> None:
+        with self._lock:
+            self._cache.clear()
+
+
+_QUESTION_INDICATORS = (
+    "?", "뭐", "무슨", "어디", "언제", "왜", "어떻게", "몇", "누구", "얼마", "어때",
+    "알려줘", "알려", "가르쳐", "설명해", "말해줘", "추천", "날씨", "기온", "비 와", "비와", "눈 와", "눈와",
+    "우산", "미세먼지", "시차", "환율", "수도", "역사", "뜻", "의미", "계산", "곱하기",
+    "더하기", "빼기", "나누기", "맞아", "틀려", "상태",
+    "what", "where", "when", "why", "how", "who", "which", "weather", "tell me", "explain",
+)
+
+_MUSIC_INTENT_INDICATORS = (
+    "틀어", "재생", "들려", "노래", "음악", "곡", "앨범", "아티스트", "가수", "플레이",
+    "찾아", "선곡", "play", "music", "song", "track", "album", "artist", "listen",
+)
+
+_QUIZ_INTENT_INDICATORS = (
+    "퀴즈", "quiz", "문제",
+)
+
+_REQUEST_VERB_ENDINGS = (
+    "해줘", "해 줘", "해봐", "해 봐", "줘요", "부탁해", "하자", "할래",
+)
+
+
+def is_meaningful_cloud_candidate(text: str) -> bool:
+    """Check if an utterance has clear intent markers (question, music, quiz, or request).
+
+    Prevents escalating household chatter, TV noise fragments, or random statements
+    to Gemini/OpenAI cloud APIs.
+    """
+    clean = re.sub(r"[^\w\s\?]", " ", text or "").strip().lower()
+    stripped, has_wake = strip_wake_prefix(clean)
+    content = stripped.strip()
+    if not content or len(content) < 2:
+        return False
+    if any(q in content for q in _QUESTION_INDICATORS):
+        return True
+    if any(m in content for m in _MUSIC_INTENT_INDICATORS):
+        return True
+    if any(qz in content for qz in _QUIZ_INTENT_INDICATORS):
+        return True
+    if any(content.endswith(req) for req in _REQUEST_VERB_ENDINGS):
+        return True
+    expanded = expand_tidal_queries(content)
+    if expanded and expanded[0].lower() != content.lower():
+        return True
+    return False
+
+
 class HybridVoiceInterpreter:
     """Combines local SenseVoice INT8 STT + offline rule fast-path with optional Gemini/OpenAI fallback."""
 
@@ -169,6 +360,10 @@ class HybridVoiceInterpreter:
         enable_local_llm: bool | None = None,
         local_llm_timeout: float | None = None,
         cloud_fallback: bool | None = None,
+        gemini_daily_limit: int | None = None,
+        gemini_max_rpm: int | None = None,
+        cache_ttl_sec: float | None = None,
+        telemetry: Any | None = None,
     ) -> None:
         self.gemini_api_key = gemini_api_key if gemini_api_key is not None else os.environ.get("GEMINI_API_KEY", "").strip()
         self.gemini_model = gemini_model or os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
@@ -176,6 +371,10 @@ class HybridVoiceInterpreter:
         self.openai_stt_model = openai_stt_model or os.environ.get("OPENAI_STT_MODEL", "gpt-4o-mini-transcribe")
         self.openai_chat_model = openai_chat_model or os.environ.get("OPENAI_CHAT_MODEL", "gpt-4o-mini")
         self.timeout = timeout
+
+        self.quota_tracker = GeminiQuotaTracker(daily_limit=gemini_daily_limit, max_rpm=gemini_max_rpm)
+        self.intent_cache = IntentTTLCache(ttl_sec=cache_ttl_sec or 1800.0)
+        self.telemetry = telemetry
 
         raw_local_url = local_stt_url if local_stt_url is not None else os.environ.get("LOCAL_STT_URL", "")
         self.local_stt_url = raw_local_url.strip().rstrip("/")
@@ -227,6 +426,9 @@ class HybridVoiceInterpreter:
     def can_transcribe_audio(self) -> bool:
         """True if local SenseVoice STT is configured or a cloud provider is active."""
         return bool(self.local_stt_url) or self.provider != "local"
+
+    def set_telemetry(self, telemetry: Any) -> None:
+        self.telemetry = telemetry
 
     def local_stt_health(self, force_refresh: bool = False) -> dict[str, Any]:
         """Check local SenseVoice STT HTTP server health (cached for 10s)."""
@@ -361,6 +563,17 @@ class HybridVoiceInterpreter:
         if not use_cloud_fallback or not self.cloud_fallback or not self.has_cloud_api():
             return local_intent
 
+        # Intent Gating: Do not escalate random statements or fragments to cloud LLM
+        if not is_meaningful_cloud_candidate(text):
+            self.quota_tracker.record_skipped_ambient()
+            if self.telemetry:
+                self.telemetry.record(
+                    "gemini_skipped_ambient",
+                    transcript=text,
+                    reason="no_intent_cues",
+                )
+            return local_intent
+
         try:
             cloud_intent: VoiceIntent | None = None
             if self.provider == "gemini" and self.gemini_api_key:
@@ -377,7 +590,7 @@ class HybridVoiceInterpreter:
             pass
         return local_intent
 
-    def interpret_audio(self, wav_bytes: bytes) -> VoiceIntent:
+    def interpret_audio(self, wav_bytes: bytes, *, enforce_wake_word: bool = False) -> VoiceIntent:
         """Local-first SenseVoice STT + offline rule parser (~0.3s); optional cloud fallback for Q&A/unknown."""
         if self.local_stt_url:
             try:
@@ -393,13 +606,26 @@ class HybridVoiceInterpreter:
                         wake_word_detected=False,
                     )
 
+                stripped, has_wake = strip_wake_prefix(transcript)
+                has_wake_cue = has_wake or any(w in transcript.lower() for w in ("포코", "포쿠", "쿠쿠", "poco"))
+
+                # CRITICAL: If wake word is required and missing, drop immediately!
+                # Prevents local SLM and cloud Gemini from running on background room chatter.
+                if enforce_wake_word and not has_wake_cue:
+                    return VoiceIntent(
+                        action=IntentAction.UNKNOWN,
+                        raw_text=transcript,
+                        confidence=0.0,
+                        provider="sensevoice-local",
+                        wake_word_detected=False,
+                    )
+
                 fast = parse_command(transcript)
                 if fast.action != IntentAction.UNKNOWN and fast.confidence >= 0.85:
                     fast.provider = "sensevoice+rule"
                     return fast
 
                 # Bare wake-word utterance ("포코야") -> return immediately without any cloud call
-                stripped, has_wake = strip_wake_prefix(transcript)
                 clean_stripped = re.sub(r"[^\w\s]", "", stripped).strip()
                 if has_wake and not clean_stripped:
                     fast.provider = "sensevoice+rule"
@@ -421,6 +647,19 @@ class HybridVoiceInterpreter:
                             return slm_intent
                     except Exception as exc:
                         log.debug("Local SLM audio fallback failed after STT (%r): %s", transcript, exc)
+
+                # Intent Gating: Do not escalate random noise/fragment to Gemini unless it has intent cues!
+                if not is_meaningful_cloud_candidate(transcript):
+                    self.quota_tracker.record_skipped_ambient()
+                    if self.telemetry:
+                        self.telemetry.record(
+                            "gemini_skipped_ambient",
+                            transcript=transcript,
+                            reason="no_intent_cues",
+                        )
+                    log.info("Skipped cloud LLM for ambient utterance without intent cues: %r", transcript)
+                    fast.provider = "sensevoice-local"
+                    return fast
 
                 # Tier 4: Unknown/complex command or Q&A: escalate text-only to cloud LLM if enabled
                 if self.cloud_fallback and self.has_cloud_api():
@@ -466,6 +705,24 @@ class HybridVoiceInterpreter:
         )
 
     def _gemini_audio_intent(self, wav_bytes: bytes) -> VoiceIntent:
+        allowed, reason = self.quota_tracker.can_call()
+        if not allowed:
+            log.warning("Gemini audio call blocked by quota tracker (%s)", reason)
+            stats = self.quota_tracker.stats()
+            if self.telemetry:
+                self.telemetry.record(
+                    "gemini_quota_blocked",
+                    reason=reason,
+                    daily_calls=stats["daily_calls"],
+                    daily_limit=stats["daily_limit"],
+                )
+            return VoiceIntent(
+                action=IntentAction.UNKNOWN,
+                raw_text="",
+                confidence=0.0,
+                provider="gemini-quota-blocked",
+            )
+
         b64 = base64.b64encode(wav_bytes).decode("ascii")
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.gemini_model}:generateContent?key={self.gemini_api_key}"
         body = {
@@ -484,11 +741,66 @@ class HybridVoiceInterpreter:
                 "responseMimeType": "application/json",
             },
         }
+        t0 = time.perf_counter()
         data = self._http_json(url, body)
+        call_latency_ms = round((time.perf_counter() - t0) * 1000.0, 1)
+        self.quota_tracker.record_call()
+        stats = self.quota_tracker.stats()
         text = data["candidates"][0]["content"]["parts"][0]["text"]
-        return _intent_from_llm_payload(_parse_json_response(text), provider="gemini-audio")
+        intent = _intent_from_llm_payload(_parse_json_response(text), provider="gemini-audio")
+
+        if self.telemetry:
+            self.telemetry.record(
+                "gemini_audio_call",
+                query=intent.raw_text,
+                action=intent.action.value,
+                latency_ms=call_latency_ms,
+                daily_calls=stats["daily_calls"],
+                daily_remaining=stats["daily_remaining"],
+            )
+
+        return intent
 
     def _gemini_text_intent(self, text: str) -> VoiceIntent:
+        cached = self.intent_cache.get(text)
+        if cached is not None:
+            self.quota_tracker.record_cache_hit()
+            cached.provider = "gemini-cache"
+            if self.telemetry:
+                self.telemetry.record(
+                    "gemini_cache_hit",
+                    query=text,
+                    action=cached.action.value,
+                )
+            log.info("Gemini cache hit for %r -> action=%s", text, cached.action.value)
+            return cached
+
+        allowed, reason = self.quota_tracker.can_call()
+        if not allowed:
+            log.warning("Gemini API call blocked by quota tracker (%s): %r", reason, text)
+            stats = self.quota_tracker.stats()
+            if self.telemetry:
+                self.telemetry.record(
+                    "gemini_quota_blocked",
+                    reason=reason,
+                    query=text,
+                    daily_calls=stats["daily_calls"],
+                    daily_limit=stats["daily_limit"],
+                )
+            answer_msg = (
+                "오늘 클라우드 질문 한도에 도달하여 답변할 수 없습니다."
+                if "daily" in reason
+                else "요청이 너무 많아 잠시 후 다시 시도해주세요."
+            )
+            return VoiceIntent(
+                action=IntentAction.ANSWER_QA if any(q in text for q in ("?", "어때", "알려줘", "뭐", "몇")) else IntentAction.UNKNOWN,
+                raw_text=text,
+                answer=answer_msg,
+                confidence=0.5,
+                provider="gemini-quota-blocked",
+                wake_word_detected=True,
+            )
+
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.gemini_model}:generateContent?key={self.gemini_api_key}"
         body = {
             "system_instruction": {"parts": [{"text": _build_system_prompt()}]},
@@ -498,9 +810,29 @@ class HybridVoiceInterpreter:
                 "responseMimeType": "application/json",
             },
         }
+        t0 = time.perf_counter()
         data = self._http_json(url, body)
+        call_latency_ms = round((time.perf_counter() - t0) * 1000.0, 1)
+        self.quota_tracker.record_call()
+        stats = self.quota_tracker.stats()
         out = data["candidates"][0]["content"]["parts"][0]["text"]
-        return _intent_from_llm_payload(_parse_json_response(out), provider="gemini-text", raw_fallback=text)
+        intent = _intent_from_llm_payload(_parse_json_response(out), provider="gemini-text", raw_fallback=text)
+
+        if self.telemetry:
+            self.telemetry.record(
+                "gemini_api_call",
+                query=text,
+                action=intent.action.value,
+                latency_ms=call_latency_ms,
+                daily_calls=stats["daily_calls"],
+                daily_remaining=stats["daily_remaining"],
+                current_rpm=stats["current_rpm"],
+            )
+
+        if intent.action != IntentAction.UNKNOWN:
+            self.intent_cache.put(text, intent)
+
+        return intent
 
     def _openai_transcribe(self, wav_bytes: bytes) -> str:
         boundary = f"----PocoBoxBoundary{uuid.uuid4().hex}"
@@ -662,12 +994,17 @@ class HybridVoiceInterpreter:
         )
         try:
             if self.provider == "gemini" and self.gemini_api_key:
+                allowed, reason = self.quota_tracker.can_call()
+                if not allowed:
+                    log.warning("Gemini quiz grading blocked by quota (%s)", reason)
+                    return None
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.gemini_model}:generateContent?key={self.gemini_api_key}"
                 body = {
                     "contents": [{"role": "user", "parts": [{"text": prompt}]}],
                     "generationConfig": {"temperature": 0.0, "responseMimeType": "application/json"},
                 }
                 data = self._http_json(url, body)
+                self.quota_tracker.record_call()
                 parsed = _parse_json_response(data["candidates"][0]["content"]["parts"][0]["text"])
                 return bool(parsed.get("is_correct")) if isinstance(parsed.get("is_correct"), bool) else None
             if self.provider == "openai" and self.openai_api_key:
@@ -709,12 +1046,17 @@ class HybridVoiceInterpreter:
         )
         try:
             if self.provider == "gemini" and self.gemini_api_key:
+                allowed, reason = self.quota_tracker.can_call()
+                if not allowed:
+                    log.warning("Gemini quiz question generation blocked by quota (%s)", reason)
+                    return []
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.gemini_model}:generateContent?key={self.gemini_api_key}"
                 body = {
                     "contents": [{"role": "user", "parts": [{"text": prompt}]}],
                     "generationConfig": {"temperature": 0.7, "responseMimeType": "application/json"},
                 }
                 data = self._http_json(url, body)
+                self.quota_tracker.record_call()
                 parsed = _parse_json_response(data["candidates"][0]["content"]["parts"][0]["text"])
                 qs = parsed.get("questions")
                 return qs if isinstance(qs, list) else []

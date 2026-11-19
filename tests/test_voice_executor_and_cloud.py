@@ -471,5 +471,187 @@ class TestVoiceExecutorAndCloud(unittest.TestCase):
         self.assertEqual(lms2.queue[lms2.cur_idx]["url"], "tidal://22222222.flc")
 
 
+class TestGeminiOptimizationAndTelemetry(unittest.TestCase):
+    def test_gemini_quota_tracker_rpm_and_daily_limits(self) -> None:
+        from voice_control.cloud_stt_intent import GeminiQuotaTracker
+        tracker = GeminiQuotaTracker(daily_limit=3, max_rpm=2)
+        # 1st call
+        can, _ = tracker.can_call()
+        self.assertTrue(can)
+        tracker.record_call()
+
+        # 2nd call (at max_rpm=2)
+        can, _ = tracker.can_call()
+        self.assertTrue(can)
+        tracker.record_call()
+
+        # 3rd call in same minute -> blocked by RPM
+        can, reason = tracker.can_call()
+        self.assertFalse(can)
+        self.assertIn("rpm_limit_exceeded", reason)
+
+        # Clear minute calls to test daily limit
+        tracker._minute_calls.clear()
+        can, _ = tracker.can_call()
+        self.assertTrue(can)
+        tracker.record_call()  # 3rd daily call
+
+        # 4th daily call -> blocked by daily limit (3/3)
+        can, reason = tracker.can_call()
+        self.assertFalse(can)
+        self.assertIn("daily_limit_exceeded", reason)
+
+        stats = tracker.stats()
+        self.assertEqual(stats["daily_calls"], 3)
+        self.assertEqual(stats["daily_remaining"], 0)
+        self.assertGreaterEqual(stats["rate_limited_count"], 2)
+
+    def test_intent_ttl_cache_dedup_and_eviction(self) -> None:
+        from voice_control.cloud_stt_intent import IntentTTLCache
+        cache = IntentTTLCache(ttl_sec=1.0, max_entries=2)
+        intent = VoiceIntent(action=IntentAction.ANSWER_QA, raw_text="프랑스 수도가 어디야?", answer="파리입니다.")
+
+        cache.put("프랑스 수도가 어디야?", intent)
+        # Lookup ignoring wake word
+        cached = cache.get("포코야 프랑스 수도가 어디야")
+        self.assertIsNotNone(cached)
+        self.assertEqual(cached.answer, "파리입니다.")
+
+        # Unknown action is not cached
+        cache.put("모르는 말", VoiceIntent(action=IntentAction.UNKNOWN))
+        self.assertIsNone(cache.get("모르는 말"))
+
+    def test_is_meaningful_cloud_candidate_filters_ambient_chatter(self) -> None:
+        from voice_control.cloud_stt_intent import is_meaningful_cloud_candidate
+        # Ambient noise / statements -> False
+        self.assertFalse(is_meaningful_cloud_candidate("버지."))
+        self.assertFalse(is_meaningful_cloud_candidate("어 그날 안"))
+        self.assertFalse(is_meaningful_cloud_candidate("자기전에 안구 이건는."))
+        self.assertFalse(is_meaningful_cloud_candidate("저 어렵긴 해요."))
+
+        # Actionable question / music / quiz -> True
+        self.assertTrue(is_meaningful_cloud_candidate("포코야 프랑스 수도가 어디야?"))
+        self.assertTrue(is_meaningful_cloud_candidate("콜드플레이가 어떤 밴드야?"))
+        self.assertTrue(is_meaningful_cloud_candidate("아이유 밤편지"))
+        self.assertTrue(is_meaningful_cloud_candidate("영어 퀴즈 내줘"))
+
+    def test_interpret_audio_enforce_wake_word_skips_cloud_and_slm_on_ambient_speech(self) -> None:
+        from voice_control.telemetry import VoiceTelemetryLogger
+        telemetry = VoiceTelemetryLogger()
+        interp = HybridVoiceInterpreter(
+            provider="gemini",
+            gemini_api_key="test-key",
+            local_stt_url="http://127.0.0.1:8766",
+            telemetry=telemetry,
+        )
+        wav = synthesize_tone_wav([(440.0, 0.3)])
+        # Ambient speech without wake word
+        with patch.object(
+            interp,
+            "transcribe_local_audio",
+            return_value={"ok": True, "text": "자기전에 안구 이건는.", "lang": "ko", "event": "Speech", "is_music_only": False},
+        ), patch.object(interp, "_gemini_text_intent") as mock_gemini, patch.object(
+            interp, "_local_llm_text_intent"
+        ) as mock_slm:
+            intent = interp.interpret_audio(wav, enforce_wake_word=True)
+
+        self.assertEqual(intent.action, IntentAction.UNKNOWN)
+        self.assertFalse(intent.wake_word_detected)
+        self.assertEqual(intent.provider, "sensevoice-local")
+        # Neither SLM nor Gemini should have been called!
+        mock_slm.assert_not_called()
+        mock_gemini.assert_not_called()
+
+    def test_ambient_speech_with_wake_word_is_gated_from_gemini(self) -> None:
+        telemetry_mock = MagicMock()
+        interp = HybridVoiceInterpreter(
+            provider="gemini",
+            gemini_api_key="test-key",
+            local_stt_url="http://127.0.0.1:8766",
+            telemetry=telemetry_mock,
+        )
+        wav = synthesize_tone_wav([(440.0, 0.3)])
+        # Wake word present, but followed by unintelligible ambient fragment
+        with patch.object(
+            interp,
+            "transcribe_local_audio",
+            return_value={"ok": True, "text": "포코야 버지.", "lang": "ko", "event": "Speech", "is_music_only": False},
+        ), patch.object(interp, "_gemini_text_intent") as mock_gemini, patch.object(
+            interp, "_local_llm_text_intent", return_value=None
+        ):
+            intent = interp.interpret_audio(wav, enforce_wake_word=True)
+
+        self.assertEqual(intent.action, IntentAction.UNKNOWN)
+        self.assertTrue(intent.wake_word_detected)
+        # Gemini should NOT have been called!
+        mock_gemini.assert_not_called()
+        self.assertEqual(interp.quota_tracker.stats()["skipped_ambient"], 1)
+        telemetry_mock.record.assert_any_call(
+            "gemini_skipped_ambient",
+            transcript="포코야 버지.",
+            reason="no_intent_cues",
+        )
+
+    def test_gemini_ttl_cache_hit_avoids_duplicate_api_calls(self) -> None:
+        telemetry_mock = MagicMock()
+        interp = HybridVoiceInterpreter(
+            provider="gemini",
+            gemini_api_key="test-key",
+            telemetry=telemetry_mock,
+        )
+        fake_gemini_resp = {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {
+                                "text": json.dumps({
+                                    "action": "answer_qa",
+                                    "answer": "프랑스의 수도는 파리입니다.",
+                                    "confidence": 0.95,
+                                    "wake_word_detected": True,
+                                })
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+        with patch.object(interp, "_http_json", return_value=fake_gemini_resp) as mock_http:
+            # 1st call -> HTTP JSON called
+            intent1 = interp._gemini_text_intent("프랑스 수도가 어디야?")
+            self.assertEqual(intent1.action, IntentAction.ANSWER_QA)
+            self.assertEqual(mock_http.call_count, 1)
+            self.assertEqual(interp.quota_tracker.stats()["daily_calls"], 1)
+
+            # 2nd call with same query -> Cache HIT (0 HTTP calls)
+            intent2 = interp._gemini_text_intent("포코야 프랑스 수도가 어디야")
+            self.assertEqual(intent2.action, IntentAction.ANSWER_QA)
+            self.assertEqual(intent2.provider, "gemini-cache")
+            self.assertEqual(mock_http.call_count, 1)  # Unchanged!
+            self.assertEqual(interp.quota_tracker.stats()["cache_hits"], 1)
+
+    def test_gemini_quota_exhaustion_returns_polite_offline_answer(self) -> None:
+        interp = HybridVoiceInterpreter(
+            provider="gemini",
+            gemini_api_key="test-key",
+            gemini_daily_limit=1,
+        )
+        fake_resp = {
+            "candidates": [
+                {"content": {"parts": [{"text": json.dumps({"action": "answer_qa", "answer": "1번", "confidence": 0.9})}]}}
+            ]
+        }
+        with patch.object(interp, "_http_json", return_value=fake_resp):
+            # 1st call succeeds
+            res1 = interp._gemini_text_intent("질문 1")
+            self.assertEqual(res1.provider, "gemini-text")
+
+            # 2nd call exceeds daily quota -> graceful fallback
+            res2 = interp._gemini_text_intent("질문 2")
+            self.assertEqual(res2.provider, "gemini-quota-blocked")
+            self.assertIn("한도에 도달", res2.answer)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

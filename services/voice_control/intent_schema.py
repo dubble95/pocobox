@@ -69,6 +69,25 @@ class VoiceIntent:
                 deduped.append(q_clean)
         self.fallback_queries = deduped
 
+    def clone(self) -> VoiceIntent:
+        return VoiceIntent(
+            action=self.action,
+            raw_text=self.raw_text,
+            query=self.query,
+            display_query=self.display_query,
+            fallback_queries=list(self.fallback_queries),
+            search_type=self.search_type,
+            volume=self.volume,
+            delta=self.delta,
+            confidence=self.confidence,
+            provider=self.provider,
+            wake_word_detected=self.wake_word_detected,
+            language=self.language,
+            answer=self.answer,
+            quiz_topic=self.quiz_topic,
+            quiz_count=self.quiz_count,
+        )
+
     def all_queries(self) -> list[str]:
         candidates: list[str] = []
         seen: set[str] = set()

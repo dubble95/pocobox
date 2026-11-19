@@ -318,7 +318,8 @@ class VoiceController:
             auto_queue_radio=self.enable_tidal_autoplay,
             is_dac_mode_fn=self.is_dac_mode,
         )
-        self.interpreter = HybridVoiceInterpreter()
+        self.telemetry = VoiceTelemetryLogger()
+        self.interpreter = HybridVoiceInterpreter(telemetry=self.telemetry)
         self.require_wake_word = _env_bool("REQUIRE_WAKE_WORD", True)
         self.continuous_enabled = _env_bool("CONTINUOUS_LISTEN", True)
         self.vad_threshold = float(os.environ.get("VOICE_VAD_THRESHOLD", "40.0"))
@@ -350,7 +351,6 @@ class VoiceController:
         self._load_voice_prefs()
 
         self.events = EventHub()
-        self.telemetry = VoiceTelemetryLogger()
         self.quiz = EnglishQuizSession()
         self.quiz_en_voice = default_english_tts_voice()
         self.quiz_en_rate_pct = max(-30, min(10, int(os.environ.get("QUIZ_EN_RATE_PCT", "-8"))))
@@ -1172,7 +1172,10 @@ class VoiceController:
 
         t_stt = time.perf_counter()
         try:
-            intent = self.interpreter.interpret_audio(boosted)
+            intent = self.interpreter.interpret_audio(
+                boosted,
+                enforce_wake_word=(enforce_wake_word and self.require_wake_word),
+            )
         except Exception as exc:
             res = ExecutionResult(
                 ok=False,
@@ -1197,6 +1200,21 @@ class VoiceController:
                 transcript=intent.raw_text,
                 music_playing=bool(self.continuous_listener.music_playing) if self.continuous_listener else False,
             )
+            # Save command clip for ignored ambient speech if transcript contains words
+            if self.telemetry is not None and not dry_run and wav_bytes and len(intent.raw_text.strip()) >= 2:
+                cmd_meta = {
+                    "transcript": intent.raw_text,
+                    "action": "ignored_speech",
+                    "ok": False,
+                    "message": "호출어('포코야')가 없어 무시되었습니다.",
+                    "provider": intent.provider,
+                    "confidence": intent.confidence,
+                    "stt_ms": stt_ms,
+                    "vad": metrics.__dict__,
+                    "music_playing": bool(self.continuous_listener.music_playing) if self.continuous_listener else False,
+                    "ignored_no_wake": True,
+                }
+                self.telemetry.save_command_clip(wav_bytes, "ignored_speech", cmd_meta)
             log.info("Ignored ambient/music audio (rms=%.1f): '%s'", metrics.rms_mean, intent.raw_text)
             self.events.publish({
                 "type": "result",
@@ -1282,6 +1300,7 @@ class VoiceController:
                 "stt_ms": stt_ms,
                 "vad": metrics.__dict__,
                 "music_playing": bool(self.continuous_listener.music_playing) if self.continuous_listener else False,
+                "gemini_stats": self.interpreter.quota_tracker.stats() if self.interpreter else None,
             }
             cmd_clip = self.telemetry.save_command_clip(wav_bytes, res.action, cmd_meta)
             if cmd_clip:
@@ -1696,6 +1715,7 @@ class VoiceController:
             "provider": self.interpreter.provider,
             "local_stt": local_stt,
             "local_slm": self.interpreter.local_llm_health(),
+            "gemini": self.interpreter.quota_tracker.stats() if self.interpreter else {},
             "gemini_model": self.interpreter.gemini_model,
             "gemini_configured": bool(self.interpreter.gemini_api_key),
             "openai_configured": bool(self.interpreter.openai_api_key),
@@ -1855,14 +1875,39 @@ def make_handler(controller: VoiceController) -> type[BaseHTTPRequestHandler]:
                         limit = 50
                 self._send_json(200, {"ok": True, "events": controller.telemetry.read_recent(limit=limit)})
                 return
+            if path == "/telemetry/gemini_stats":
+                self._send_json(200, {
+                    "ok": True,
+                    "gemini": controller.interpreter.quota_tracker.stats() if controller.interpreter else {},
+                    "cache_entries": len(controller.interpreter.intent_cache._cache) if controller.interpreter else 0,
+                    "model": controller.interpreter.gemini_model if controller.interpreter else "",
+                })
+                return
             if path == "/telemetry/command_clips":
                 limit = 50
-                if "limit=" in self.path:
-                    try:
-                        limit = max(1, min(200, int(self.path.split("limit=", 1)[1].split("&", 1)[0])))
-                    except ValueError:
-                        limit = 50
-                clips = controller.telemetry.list_command_clips(limit=limit) if controller.telemetry else []
+                action_filter = None
+                provider_filter = None
+                if "?" in self.path:
+                    import urllib.parse
+                    qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                    if "limit" in qs:
+                        try:
+                            limit = max(1, min(200, int(qs["limit"][0])))
+                        except ValueError:
+                            limit = 50
+                    if "action" in qs:
+                        action_filter = qs["action"][0]
+                    if "provider" in qs:
+                        provider_filter = qs["provider"][0]
+                clips = (
+                    controller.telemetry.list_command_clips(
+                        limit=limit,
+                        action_filter=action_filter,
+                        provider_filter=provider_filter,
+                    )
+                    if controller.telemetry
+                    else []
+                )
                 self._send_json(200, {"ok": True, "clips": clips})
                 return
             if path == "/telemetry/command_clip":

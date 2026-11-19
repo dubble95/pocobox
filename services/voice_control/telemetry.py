@@ -192,16 +192,27 @@ class VoiceTelemetryLogger:
                     self._disabled_warned = True
                 return None
 
-    def list_command_clips(self, limit: int = 50) -> list[dict[str, Any]]:
+    def list_command_clips(
+        self,
+        limit: int = 50,
+        action_filter: str | None = None,
+        provider_filter: str | None = None,
+    ) -> list[dict[str, Any]]:
         """List recently captured command clips with metadata, newest first."""
         if not self.command_clips_dir.exists():
             return []
         clips = []
         try:
             json_files = sorted(self.command_clips_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-            for jf in json_files[:limit]:
+            for jf in json_files:
+                if len(clips) >= limit:
+                    break
                 try:
                     meta = json.loads(jf.read_text(encoding="utf-8"))
+                    if action_filter and meta.get("action", "").lower() != action_filter.lower():
+                        continue
+                    if provider_filter and provider_filter.lower() not in str(meta.get("provider", "")).lower():
+                        continue
                     wav_file = jf.with_suffix(".wav")
                     meta["wav_exists"] = wav_file.exists()
                     meta["wav_size"] = wav_file.stat().st_size if meta["wav_exists"] else 0
@@ -375,6 +386,12 @@ def summarize_events(
         "wake_precision": precision,
         "by_mode": mode_stats,
         "by_phrase": per_phrase_out,
+        "gemini": {
+            "calls": counts.get("gemini_api_call", 0) + counts.get("gemini_audio_call", 0),
+            "cache_hits": counts.get("gemini_cache_hit", 0),
+            "skipped_ambient": counts.get("gemini_skipped_ambient", 0),
+            "quota_blocked": counts.get("gemini_quota_blocked", 0),
+        },
         "event_counts": dict(counts),
         "distributions": {
             "tp_snr_p10": tp_snr_p10,
