@@ -76,6 +76,13 @@ ln -sf /srv/pocobox/bin/voice_control/cli.py /usr/local/bin/pocobox-voice
 [ -f /etc/pocobox/dac-autoplay.env ] || install -m 0644 \$SRC/dac-autoplay.env /etc/pocobox/dac-autoplay.env
 [ -f /etc/pocobox/display.env ] || install -m 0644 \$SRC/display.env /etc/pocobox/display.env
 [ -f /etc/pocobox/voice.env ] || install -m 0600 -o user -g user \$SRC/voice.env.example /etc/pocobox/voice.env
+grep -q "ENABLE_LOCAL_LLM" /etc/pocobox/voice.env 2>/dev/null || cat << "ENV_EOF" >> /etc/pocobox/voice.env
+
+# Tier 3: Local SLM (Qwen2.5-0.5B via llama-server on Kryo CPU)
+ENABLE_LOCAL_LLM=1
+LOCAL_LLM_URL=http://127.0.0.1:8767
+LOCAL_LLM_TIMEOUT=3.5
+ENV_EOF
 install -m 0644 \$SRC/greetd-kiosk.toml /etc/pocobox/greetd-kiosk.toml
 
 install -m 0644 \$SRC/pocobox-pulseaudio.service /etc/systemd/system/pocobox-pulseaudio.service
