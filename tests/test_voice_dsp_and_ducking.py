@@ -276,11 +276,22 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
         spotter._rec = _FakeRec([
             (False, {"partial": "poco ya"}),
             (False, {"partial": "[unk]"}),
-            (False, {"partial": "hey poco"}),
-            (False, {"partial": "hey poco"}),
+            (False, {"partial": "poco ya"}),
+            (False, {"partial": "poco ya"}),
         ])
         chunk = b"\x00\x01" * 160
         self.assertIsNone(spotter.accept_pcm16k(chunk, music_playing=True))
+        self.assertIsNone(spotter.accept_pcm16k(chunk, music_playing=True))
+        self.assertIsNone(spotter.accept_pcm16k(chunk, music_playing=True))
+        self.assertEqual(spotter.accept_pcm16k(chunk, music_playing=True), "poco ya")
+
+        # Stricter 3-chunk requirement for vocal-prone 'hey poco' during music playback
+        spotter.reset()
+        spotter._rec = _FakeRec([
+            (False, {"partial": "hey poco"}),
+            (False, {"partial": "hey poco"}),
+            (False, {"partial": "hey poco"}),
+        ])
         self.assertIsNone(spotter.accept_pcm16k(chunk, music_playing=True))
         self.assertIsNone(spotter.accept_pcm16k(chunk, music_playing=True))
         self.assertEqual(spotter.accept_pcm16k(chunk, music_playing=True), "hey poco")
@@ -292,6 +303,23 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
         ])
         self.assertIsNone(spotter.accept_pcm16k(chunk, music_playing=True))
         self.assertEqual(spotter.accept_pcm16k(chunk, music_playing=True), "poco ya")
+
+    def test_wake_rms_window_preserves_speech_peak_across_kaldi_is_final_delay(self) -> None:
+        with mock.patch.dict(os.environ, {"VOICE_WAKE_ENGINE": "off", "VOICE_USE_AEC3": "0", "VOICE_USE_RNNOISE": "0"}):
+            listener = ContinuousVoiceListener(on_utterance=lambda b: None)
+        listener.music_playing = True
+        listener.wake_ambient_rms = 468.1
+
+        # Simulate user shouting '포코야' 1.0s (10 chunks) ago, followed by 9 chunks of trailing silence
+        # True speech peak: 2395.7 RMS. Trailing silence: ~35.0 RMS.
+        chunks_rms = [35.0] * 5 + [2395.7, 1051.5, 186.8] + [35.0] * 12
+        for r in chunks_rms:
+            listener._wake_rms_window.append(r)
+
+        # 20-chunk window covers the entire 2.0s buffer so speech peak is NOT lost
+        recent_peak = max(listener._wake_rms_window)
+        self.assertAlmostEqual(recent_peak, 2395.7)
+        self.assertTrue(listener.passes_wake_energy_gate(recent_peak))
 
     def test_rms_fallback_suppressed_during_music_when_wake_active(self) -> None:
         with mock.patch.dict(os.environ, {"VOICE_WAKE_ENGINE": "off", "VOICE_USE_AEC3": "0", "VOICE_USE_RNNOISE": "0"}):

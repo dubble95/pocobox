@@ -204,6 +204,11 @@ _CLASSICAL_WORK_TERMS: tuple[tuple[str, str], ...] = (
     ("비창", "Pathetique"),
     ("운명", "Symphony No. 5"),
     ("합창", "Symphony No. 9"),
+    ("겨울바람", "Winter Wind"),
+    ("겨울 바람", "Winter Wind"),
+    ("혁명", "Revolutionary"),
+    ("추격", "Torrent"),
+    ("흑건", "Black Keys"),
 )
 
 _CLASSICAL_WORK_GUARD_RE = re.compile(
@@ -249,6 +254,11 @@ TRACK_ALIASES: dict[str, list[str]] = {
     "아파트": ["APT."],
     "거리에서": ["On The Street", "거리에서"],
     "서른 즈음에": ["Around Thirty", "서른 즈음에"],
+    "겨울바람": ["Winter Wind", "Chopin Winter Wind", "겨울바람"],
+    "겨울 바람": ["Winter Wind", "Chopin Winter Wind", "겨울 바람"],
+    "혁명": ["Revolutionary", "Chopin Revolutionary", "혁명"],
+    "추격": ["Torrent", "Chopin Torrent", "추격"],
+    "흑건": ["Black Keys", "Chopin Black Keys", "흑건"],
 }
 
 # Korean mood/genre -> TIDAL friendly search keywords

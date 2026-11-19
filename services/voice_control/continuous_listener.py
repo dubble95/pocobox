@@ -121,7 +121,7 @@ class ContinuousVoiceListener:
         self.last_wake_meta: dict = {}
         self.false_wake_rejected_count: int = 0
         self._last_clip_log_at: float = 0.0
-        self._wake_rms_window: collections.deque[float] = collections.deque(maxlen=6)
+        self._wake_rms_window: collections.deque[float] = collections.deque(maxlen=20)  # 2.0s @ 100ms (covers full utterance before Kaldi is_final)
         self._wake_clip_ring: collections.deque[bytes] = collections.deque(maxlen=20)  # 2.0s @ 100ms
 
         self._stop_event = threading.Event()

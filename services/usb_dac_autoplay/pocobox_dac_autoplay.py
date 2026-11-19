@@ -254,11 +254,11 @@ def setup_pulse_aec(usb_card_id: str | None) -> bool:
         log.warning("Cannot configure WebRTC AEC (sink_master=%s source_master=%s)", sink_master, source_master)
         return False
 
-    # Ensure hardware sink is unmuted & full scale, and keep PulseAudio source at clean 100% (hardware preamp provides +24 dB)
+    # Ensure hardware sink is unmuted & full scale, and keep PulseAudio source at clean 83% (Base Volume / 0 dB unity gain avoids clipping)
     run_pactl(["set-sink-mute", sink_master, "0"])
     run_pactl(["set-sink-volume", sink_master, "100%"])
     run_pactl(["set-source-mute", source_master, "0"])
-    run_pactl(["set-source-volume", source_master, "100%"])
+    run_pactl(["set-source-volume", source_master, "83%"])
 
     # Pure Echo Cancellation + High-Pass Filter (avoid aggressive WebRTC noise_suppression that attenuates quiet speech)
     aec_args = '"analog_gain_control=0 digital_gain_control=0 noise_suppression=0 high_pass_filter=1 voice_detection=0"'

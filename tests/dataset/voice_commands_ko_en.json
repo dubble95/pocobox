@@ -23,6 +23,8 @@
   {"id": "trk_10", "category": "artist_track_play", "text": "콜드플레이 픽스 유 틀어줘", "expected_action": "play_search", "expected_query_contains": "Coldplay Fix You", "expected_search_type": "track"},
   {"id": "trk_11", "category": "artist_track_play", "text": "타이달에서 비틀즈 렛 잇 비 찾아서 틀어줘", "expected_action": "play_search", "expected_query_contains": "The Beatles Let It Be", "expected_search_type": "track"},
   {"id": "trk_12", "category": "artist_track_play", "text": "Play Fix You by Coldplay on Tidal", "expected_action": "play_search", "expected_query_contains": "Fix You"},
+  {"id": "trk_13", "category": "artist_track_play", "text": "겨울 바람 틀어 줘", "expected_action": "play_search", "expected_query_contains": "Winter Wind", "expected_search_type": "track"},
+  {"id": "trk_14", "category": "artist_track_play", "text": "쇼팽 겨울바람 틀어줘", "expected_action": "play_search", "expected_query_contains": "Winter Wind", "expected_search_type": "track"},
 
   {"id": "gen_01", "category": "album_playlist_genre", "text": "재즈 틀어줘", "expected_action": "play_search", "expected_query_contains": "Jazz", "expected_search_type": "playlist"},
   {"id": "gen_02", "category": "album_playlist_genre", "text": "잔잔한 피아노 음악 틀어줘", "expected_action": "play_search", "expected_query_contains": "Peaceful Piano", "expected_search_type": "playlist"},

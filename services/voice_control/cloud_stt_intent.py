@@ -105,6 +105,15 @@ def _intent_from_llm_payload(payload: dict[str, Any], provider: str, raw_fallbac
     display_query = str(payload.get("display_query") or "").strip()
     fallbacks = [str(x).strip() for x in (payload.get("fallback_queries") or []) if str(x).strip()]
 
+    # Guard against LLM now_playing hallucinations on random chatter or statements
+    if action_str == IntentAction.NOW_PLAYING.value:
+        now_playing_cues = (
+            "뭐", "무슨", "누구", "제목", "현재", "지금", "이 곡", "이 노래", "어떤 곡", "어떤 노래",
+            "what", "playing", "song", "title", "track",
+        )
+        if not any(cue in transcript.lower() for cue in now_playing_cues):
+            action_str = IntentAction.UNKNOWN.value
+
     # Enrich with local alias expansion if query is Korean
     if query and action_str == "play_search":
         for extra in expand_tidal_queries(query):
@@ -279,9 +288,14 @@ class HybridVoiceInterpreter:
             return None
         url = f"{self.local_llm_url}/v1/chat/completions"
         system_content = (
-            "You are the voice intent parser for PocoBox. "
-            "Output JSON only: {\"action\": \"now_playing\"|\"pause\"|\"resume\"|\"next\"|\"previous\"|\"volume_up\"|\"volume_down\"|\"play_search\"|\"play_mix\"|\"answer_qa\"|\"unknown\", "
-            "\"query\": \"...\", \"answer\": \"...\"}."
+            "You are the voice intent parser for PocoBox music player. "
+            "Output JSON only: {\"action\": \"play_search\"|\"play_mix\"|\"now_playing\"|\"pause\"|\"resume\"|\"next\"|\"previous\"|\"volume_up\"|\"volume_down\"|\"answer_qa\"|\"unknown\", "
+            "\"query\": \"...\", \"answer\": \"...\"}.\n"
+            "Rules:\n"
+            "- play_search: user asks to play music/song (~틀어줘, ~재생해, play ~).\n"
+            "- now_playing: user asks what song is playing (지금 무슨 노래야, 이 곡 뭐야).\n"
+            "- answer_qa: user asks a factual question (수도가 어디야, 날씨 어때).\n"
+            "- unknown: non-command statements, chat, or irrelevant speech."
         )
         payload = {
             "messages": [
@@ -380,7 +394,7 @@ class HybridVoiceInterpreter:
                     )
 
                 fast = parse_command(transcript)
-                if fast.action != IntentAction.UNKNOWN and fast.confidence >= 0.9:
+                if fast.action != IntentAction.UNKNOWN and fast.confidence >= 0.85:
                     fast.provider = "sensevoice+rule"
                     return fast
 

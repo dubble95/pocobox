@@ -94,6 +94,10 @@ DEFAULT_WAKE_GRAMMAR: tuple[str, ...] = DEFAULT_TRIGGER_PHRASES + DEFAULT_DECOY_
 # Too short to trust alone during music playback (2-syllable singing lyrics false-trigger easily)
 QUIET_ONLY_PHRASES: frozenset[str] = frozenset({"poco"})
 
+# Phrases requiring stricter confirmation during active music playback
+# Singing vocals in music frequently false-trigger English vocal phrases like 'hey poco' (0 TP, 5 FP)
+MUSIC_STRICT_PHRASES: frozenset[str] = frozenset({"hey poco"})
+
 
 class VoskWakeWordSpotter:
     """Streaming 16kHz PCM keyword spotter for hands-free wake-word detection."""
@@ -276,6 +280,9 @@ class VoskWakeWordSpotter:
         hit = self._match_text(text, music_playing=music_playing)
         min_conf = self.music_min_confidence if music_playing else self.quiet_min_confidence
         confirm_needed = self.music_confirm_chunks if music_playing else self.quiet_confirm_chunks
+        if music_playing and hit in MUSIC_STRICT_PHRASES:
+            confirm_needed = max(3, confirm_needed + 1)
+            min_conf = max(0.75, min_conf + 0.10)
 
         if is_final:
             self._partial_hit = None

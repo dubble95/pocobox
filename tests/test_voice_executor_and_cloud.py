@@ -277,6 +277,40 @@ class TestVoiceExecutorAndCloud(unittest.TestCase):
         mock_gem_audio.assert_not_called()
         mock_gem_text.assert_not_called()
 
+    def test_local_sensevoice_classical_winter_wind_fast_path(self) -> None:
+        interp = HybridVoiceInterpreter(
+            provider="gemini",
+            gemini_api_key="test-key",
+            local_stt_url="http://127.0.0.1:8766",
+        )
+        wav = synthesize_tone_wav([(440.0, 0.3)])
+        with patch.object(
+            interp,
+            "transcribe_local_audio",
+            return_value={"ok": True, "text": "겨울 바람 틀어 줘.", "lang": "ko", "event": "Speech", "is_music_only": False},
+        ), patch.object(interp, "_gemini_text_intent") as mock_gem_text, patch.object(
+            interp, "_local_llm_text_intent"
+        ) as mock_slm:
+            intent = interp.interpret_audio(wav)
+        self.assertEqual(intent.action, IntentAction.PLAY_SEARCH)
+        self.assertEqual(intent.query, "Winter Wind")
+        self.assertEqual(intent.provider, "sensevoice+rule")
+        mock_gem_text.assert_not_called()
+        mock_slm.assert_not_called()
+
+    def test_llm_payload_guards_against_now_playing_hallucination_on_chitchat(self) -> None:
+        from voice_control.cloud_stt_intent import _intent_from_llm_payload
+
+        # Random conversational statement: LLM hallucinating now_playing MUST be downgraded to unknown
+        fake_slm_payload = {"action": "now_playing", "query": "인생이 달라지는 거야."}
+        intent = _intent_from_llm_payload(fake_slm_payload, provider="local-slm-qwen0.5b", raw_fallback="인생이 달라지는 거야.")
+        self.assertEqual(intent.action, IntentAction.UNKNOWN)
+
+        # Genuine inquiry: preserved as now_playing
+        genuine_payload = {"action": "now_playing", "query": "지금 나오는 노래 뭐야"}
+        genuine_intent = _intent_from_llm_payload(genuine_payload, provider="local-slm-qwen0.5b", raw_fallback="지금 나오는 노래 뭐야")
+        self.assertEqual(genuine_intent.action, IntentAction.NOW_PLAYING)
+
     def test_local_sensevoice_music_only_skips_cloud(self) -> None:
         interp = HybridVoiceInterpreter(
             provider="gemini",
