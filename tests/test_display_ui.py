@@ -68,14 +68,16 @@ class DisplayUITests(unittest.TestCase):
         _check_js_syntax(js)
 
     def test_display_is_fullscreen_without_persistent_bars(self) -> None:
-        self.assertEqual(UI_VERSION, "7")
+        self.assertEqual(UI_VERSION, "8")
         self.assertIn('viewport-fit=cover', DISPLAY_HTML)
         self.assertIn('apple-mobile-web-app-capable', DISPLAY_HTML)
         self.assertIn('apple-mobile-web-app-status-bar-style', DISPLAY_HTML)
         self.assertIn('/display/manifest.webmanifest', DISPLAY_HTML)
         self.assertIn('requestFullscreen', DISPLAY_HTML)
-        # Cover art tap toggles play/pause with visual feedback
-        self.assertIn("togglePlaybackFromCover", DISPLAY_HTML)
+        # Cover art tap zones and swipe gestures for next/prev/toggle with visual feedback
+        self.assertIn("handleCoverClick", DISPLAY_HTML)
+        self.assertIn("handleTouchStart", DISPLAY_HTML)
+        self.assertIn("handleTouchEnd", DISPLAY_HTML)
         self.assertIn("artTapBadge", DISPLAY_HTML)
         # No persistent topbar or footer status bars
         self.assertNotIn('class="topbar"', DISPLAY_HTML)

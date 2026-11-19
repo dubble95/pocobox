@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-UI_VERSION = "7"
+UI_VERSION = "8"
 
 DISPLAY_MANIFEST = json.dumps(
     {
@@ -102,7 +102,7 @@ DISPLAY_HTML = r"""<!doctype html>
     display: flex; align-items: center; justify-content: center;
     position: relative;
     cursor: pointer;
-    touch-action: manipulation;
+    touch-action: none;
     user-select: none;
     -webkit-user-select: none;
     transition: transform 0.12s ease;
@@ -113,14 +113,14 @@ DISPLAY_HTML = r"""<!doctype html>
   .art-tap-badge {
     position: absolute; inset: 0;
     display: flex; align-items: center; justify-content: center;
-    font-size: clamp(48px, 11vmin, 76px);
+    font-size: clamp(52px, 12vmin, 82px);
     color: #ffffff;
-    background: rgba(11, 13, 18, 0.45);
+    background: rgba(11, 13, 18, 0.52);
     border-radius: inherit;
     opacity: 0; pointer-events: none;
-    transform: scale(0.72);
+    transform: scale(0.68);
     transition: opacity 0.22s cubic-bezier(0.16, 1, 0.3, 1), transform 0.22s cubic-bezier(0.16, 1, 0.3, 1);
-    backdrop-filter: blur(6px);
+    backdrop-filter: blur(8px);
     z-index: 5;
   }
   .art-tap-badge.show { opacity: 1; transform: scale(1); }
@@ -185,17 +185,25 @@ DISPLAY_HTML = r"""<!doctype html>
   .btn {
     border: 1px solid var(--border); background: var(--glass); color: var(--fg);
     border-radius: 50%;
-    width: clamp(44px, 11.5vw, 56px); height: clamp(44px, 11.5vw, 56px);
-    font-size: clamp(17px, 4.2vw, 20px); font-weight: 700; cursor: pointer;
+    width: clamp(48px, 12vw, 58px); height: clamp(48px, 12vw, 58px);
+    font-size: clamp(18px, 4.4vw, 22px); font-weight: 700; cursor: pointer;
     display: inline-flex; align-items: center; justify-content: center;
     backdrop-filter: blur(12px);
     transition: transform 0.12s ease, background 0.15s ease;
     flex-shrink: 0;
+    touch-action: manipulation;
+    position: relative;
+  }
+  .btn::after {
+    content: "";
+    position: absolute;
+    inset: -12px;
+    border-radius: 50%;
   }
   .btn:active { transform: scale(0.92); background: rgba(255, 255, 255, 0.22); }
   .btn.primary {
-    width: clamp(58px, 15vw, 72px); height: clamp(58px, 15vw, 72px);
-    font-size: clamp(22px, 5.8vw, 28px);
+    width: clamp(60px, 15vw, 76px); height: clamp(60px, 15vw, 76px);
+    font-size: clamp(23px, 5.8vw, 28px);
     background: #ffffff; color: #0b0d12; border-color: #ffffff;
   }
   .btn.mic {
@@ -249,14 +257,14 @@ DISPLAY_HTML = r"""<!doctype html>
       gap: clamp(10px, 1.8vw, 18px);
     }
     body:not(.layout-portrait) .btn {
-      width: clamp(42px, 10.5dvh, 56px);
-      height: clamp(42px, 10.5dvh, 56px);
-      font-size: clamp(16px, 3.8dvh, 21px);
+      width: clamp(46px, 11dvh, 58px);
+      height: clamp(46px, 11dvh, 58px);
+      font-size: clamp(17px, 4.2dvh, 22px);
     }
     body:not(.layout-portrait) .btn.primary {
-      width: clamp(54px, 13.5dvh, 72px);
-      height: clamp(54px, 13.5dvh, 72px);
-      font-size: clamp(21px, 5dvh, 28px);
+      width: clamp(56px, 14dvh, 74px);
+      height: clamp(56px, 14dvh, 74px);
+      font-size: clamp(22px, 5.4dvh, 29px);
     }
   }
 
@@ -489,7 +497,7 @@ DISPLAY_HTML = r"""<!doctype html>
 
   <div class="app" id="appRoot">
     <div class="stage">
-      <div class="art-wrap" id="artWrap" onclick="togglePlaybackFromCover(event)" title="재생 / 일시정지">
+      <div class="art-wrap" id="artWrap" onclick="handleCoverClick(event)" title="재생 / 일시정지 (좌우 탭 또는 스와이프: 이전곡/다음곡)">
         <img id="coverImg" alt="" style="display:none" />
         <div id="artPlaceholder" class="art-placeholder">🎵</div>
         <div id="artTapBadge" class="art-tap-badge">▶</div>
@@ -814,10 +822,32 @@ DISPLAY_HTML = r"""<!doctype html>
     }
   }
 
+  function showArtFeedback(icon) {
+    const badge = document.getElementById("artTapBadge");
+    if (!badge) return;
+    badge.textContent = icon;
+    badge.classList.remove("show");
+    void badge.offsetWidth;
+    badge.classList.add("show");
+    setTimeout(() => badge.classList.remove("show"), 480);
+  }
+
   async function ctrl(action) {
     if (isDacVolumeFixed && (action === "vol_up" || action === "vol_down")) {
       showSubtitle("ok", "🎧 DAC 볼륨 고정", "DAC 모드에서는 고음질 출력을 위해 볼륨이 100%로 고정되어 있습니다.", "앰프나 스피커에서 볼륨을 조절해 주세요", 4500);
       return;
+    }
+    if (action === "next") {
+      showArtFeedback("⏭");
+      const titleEl = document.getElementById("trackTitle");
+      if (titleEl) titleEl.style.opacity = "0.5";
+    } else if (action === "prev") {
+      showArtFeedback("⏮");
+      const titleEl = document.getElementById("trackTitle");
+      if (titleEl) titleEl.style.opacity = "0.5";
+    } else if (action === "toggle") {
+      const willPlay = (playbackState.mode !== "play");
+      showArtFeedback(willPlay ? "▶" : "⏸");
     }
     try {
       await fetch("/display/control", {
@@ -826,22 +856,73 @@ DISPLAY_HTML = r"""<!doctype html>
         body: JSON.stringify({action})
       });
       setTimeout(refresh, 200);
+      if (action === "next" || action === "prev") {
+        setTimeout(refresh, 600);
+        setTimeout(refresh, 1200);
+        setTimeout(refresh, 2200);
+      }
     } catch (_) {}
   }
 
-  function togglePlaybackFromCover(ev) {
+  let touchStartX = 0;
+  let touchStartY = 0;
+  let touchStartTime = 0;
+  let touchMoved = false;
+
+  function handleTouchStart(e) {
+    if (!e.touches || e.touches.length !== 1) return;
+    touchStartX = e.touches[0].clientX;
+    touchStartY = e.touches[0].clientY;
+    touchStartTime = Date.now();
+    touchMoved = false;
+  }
+
+  function handleTouchMove(e) {
+    if (!e.touches || e.touches.length !== 1) return;
+    const dx = e.touches[0].clientX - touchStartX;
+    const dy = e.touches[0].clientY - touchStartY;
+    if (Math.abs(dx) > 12 || Math.abs(dy) > 12) {
+      touchMoved = true;
+    }
+  }
+
+  function handleTouchEnd(e) {
+    if (!e.changedTouches || e.changedTouches.length === 0) return;
+    const dx = e.changedTouches[0].clientX - touchStartX;
+    const dy = e.changedTouches[0].clientY - touchStartY;
+    const dt = Date.now() - touchStartTime;
+    const absDx = Math.abs(dx);
+    const absDy = Math.abs(dy);
+
+    if (absDx >= 40 && absDx > absDy * 1.2 && dt < 700) {
+      if (e.cancelable) e.preventDefault();
+      e.stopPropagation();
+      if (dx < 0) {
+        ctrl("next");
+      } else {
+        ctrl("prev");
+      }
+    }
+  }
+
+  function handleCoverClick(ev) {
+    if (touchMoved) return;
     if (ev) {
       ev.stopPropagation();
       ev.preventDefault();
     }
-    const willPlay = (playbackState.mode !== "play");
-    const badge = document.getElementById("artTapBadge");
-    if (badge) {
-      badge.textContent = willPlay ? "▶" : "⏸";
-      badge.classList.add("show");
-      setTimeout(() => badge.classList.remove("show"), 450);
+    const rect = document.getElementById("artWrap").getBoundingClientRect();
+    const clickX = (ev && typeof ev.clientX === "number") ? (ev.clientX - rect.left) : (rect.width / 2);
+    const width = rect.width;
+    const ratio = width > 0 ? (clickX / width) : 0.5;
+
+    if (ratio > 0.72) {
+      ctrl("next");
+    } else if (ratio < 0.28) {
+      ctrl("prev");
+    } else {
+      ctrl("toggle");
     }
-    ctrl("toggle");
   }
 
   async function triggerMic() {
@@ -889,7 +970,11 @@ DISPLAY_HTML = r"""<!doctype html>
       const np = s.now_playing || {};
       const hasTrack = Boolean(np.title) || np.mode === "play";
       document.getElementById("idleClock").style.display = hasTrack ? "none" : "block";
-      document.getElementById("trackTitle").textContent = hasTrack ? (np.title || "재생 중") : "재생 중인 곡 없음";
+      const trackTitleEl = document.getElementById("trackTitle");
+      if (trackTitleEl) {
+        trackTitleEl.style.opacity = "";
+        trackTitleEl.textContent = hasTrack ? (np.title || "재생 중") : "재생 중인 곡 없음";
+      }
       document.getElementById("trackArtist").textContent = hasTrack ? (np.artist || "Unknown Artist") : '"포코야 ..." 라고 불러보세요';
       document.getElementById("trackAlbum").textContent = hasTrack ? (np.album || "TIDAL") : "USB DAC 연결 시 자동 이어재생";
 
@@ -960,8 +1045,14 @@ DISPLAY_HTML = r"""<!doctype html>
     }
   }
 
-  // Tap empty background to briefly toggle minimal HUD; tap cover art to play/pause
-  document.getElementById("appRoot").addEventListener("click", (e) => {
+  const appRootEl = document.getElementById("appRoot");
+  appRootEl.addEventListener("touchstart", handleTouchStart, {passive: true});
+  appRootEl.addEventListener("touchmove", handleTouchMove, {passive: true});
+  appRootEl.addEventListener("touchend", handleTouchEnd, {passive: false});
+
+  // Tap empty background to briefly toggle minimal HUD (ignored if swipe occurred)
+  appRootEl.addEventListener("click", (e) => {
+    if (touchMoved) return;
     if (e.target.closest("button, a, .art-wrap")) return;
     const hud = document.getElementById("hud");
     if (hud && hud.classList.contains("visible")) hideHud();
@@ -970,7 +1061,8 @@ DISPLAY_HTML = r"""<!doctype html>
 
   document.getElementById("artWrap").addEventListener("dblclick", (e) => {
     e.stopPropagation();
-    if (!IS_KIOSK) toggleFullscreen(e);
+    e.preventDefault();
+    ctrl("next");
   });
 
   document.addEventListener("fullscreenchange", updateFullscreenButton);

@@ -1486,6 +1486,7 @@ class VoiceController:
 
     def display_control(self, action: str) -> dict[str, Any]:
         player_id = self.lms.resolve_player_id(self.player_name)
+        log.info("Display control action='%s' (player=%s)", action, player_id)
         if action == "toggle":
             np = self.lms.now_playing(player_id)
             if (np.get("mode") or "").strip().lower() == "stop":
@@ -1494,9 +1495,11 @@ class VoiceController:
                 self.lms.toggle_pause(player_id)
         elif action == "next":
             self.executor._ensure_next_track_available(player_id)
-            self.lms.next_track(player_id)
+            res = self.lms.next_track(player_id)
+            log.info("Display control next_track result: %s", res)
         elif action == "prev":
-            self.lms.prev_track(player_id)
+            res = self.lms.prev_track(player_id)
+            log.info("Display control prev_track result: %s", res)
         elif action in ("vol_up", "vol_down"):
             if self.is_dac_mode():
                 return {"ok": False, "error": "DAC 모드에서는 볼륨이 100%로 고정되어 있습니다.", "fixed": True}
