@@ -115,6 +115,21 @@ def _intent_from_llm_payload(payload: dict[str, Any], provider: str, raw_fallbac
         if not any(cue in transcript.lower() for cue in now_playing_cues):
             action_str = IntentAction.UNKNOWN.value
 
+    # Guard against SLM / LLM play_search hallucinations on random chatter
+    if action_str == IntentAction.PLAY_SEARCH.value:
+        play_cues = (
+            "틀어", "재생", "들려", "노래", "음악", "곡", "앨범", "아티스트", "가수", "플레이", "찾아", "선곡",
+            "play", "music", "song", "track", "album", "artist", "listen",
+        )
+        has_play_cue = any(c in transcript.lower() for c in play_cues)
+        alias_matches = False
+        if not has_play_cue and query:
+            expanded = expand_tidal_queries(query)
+            if expanded and expanded[0].lower() != query.lower():
+                alias_matches = True
+        if not has_play_cue and not alias_matches:
+            action_str = IntentAction.UNKNOWN.value
+
     # Enrich with local alias expansion if query is Korean
     if query and action_str == "play_search":
         for extra in expand_tidal_queries(query):

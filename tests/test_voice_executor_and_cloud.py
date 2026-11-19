@@ -311,6 +311,24 @@ class TestVoiceExecutorAndCloud(unittest.TestCase):
         genuine_intent = _intent_from_llm_payload(genuine_payload, provider="local-slm-qwen0.5b", raw_fallback="지금 나오는 노래 뭐야")
         self.assertEqual(genuine_intent.action, IntentAction.NOW_PLAYING)
 
+    def test_llm_payload_guards_against_play_search_hallucination_on_chitchat(self) -> None:
+        from voice_control.cloud_stt_intent import _intent_from_llm_payload
+
+        # Random conversational statement: SLM hallucinating play_search MUST be downgraded to unknown
+        fake_slm_payload = {"action": "play_search", "query": "저 어렵긴 해요."}
+        intent = _intent_from_llm_payload(fake_slm_payload, provider="local-slm-qwen0.5b", raw_fallback="저 어렵긴 해요.")
+        self.assertEqual(intent.action, IntentAction.UNKNOWN)
+
+        # Genuine request with play verb: preserved
+        genuine_payload = {"action": "play_search", "query": "아이유 밤편지 틀어줘"}
+        genuine_intent = _intent_from_llm_payload(genuine_payload, provider="local-slm-qwen0.5b", raw_fallback="아이유 밤편지 틀어줘")
+        self.assertEqual(genuine_intent.action, IntentAction.PLAY_SEARCH)
+
+        # Genuine request with matched alias: preserved
+        alias_payload = {"action": "play_search", "query": "아이유 밤편지"}
+        alias_intent = _intent_from_llm_payload(alias_payload, provider="local-slm-qwen0.5b", raw_fallback="아이유 밤편지")
+        self.assertEqual(alias_intent.action, IntentAction.PLAY_SEARCH)
+
     def test_local_sensevoice_music_only_skips_cloud(self) -> None:
         interp = HybridVoiceInterpreter(
             provider="gemini",
