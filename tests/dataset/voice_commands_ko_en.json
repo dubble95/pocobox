@@ -122,5 +122,49 @@
   {"id": "neg_03", "category": "negative_non_commands", "text": "그냥 지나가는 말이에요", "expected_action": "unknown"},
   {"id": "neg_04", "category": "negative_non_commands", "text": "포코야", "expected_action": "unknown", "expected_wake": true},
   {"id": "neg_05", "category": "negative_non_commands", "text": "", "expected_action": "unknown"},
-  {"id": "neg_06", "category": "negative_non_commands", "text": "   ", "expected_action": "unknown"}
+  {"id": "neg_06", "category": "negative_non_commands", "text": "   ", "expected_action": "unknown"},
+
+  {"id": "wak_asr_01", "category": "wake_word_asr_variants", "text": "포쿠야 아이유 밤편지 틀어줘", "expected_action": "play_search", "expected_query_contains": "Through the Night", "expected_wake": true},
+  {"id": "wak_asr_02", "category": "wake_word_asr_variants", "text": "헤이 포쿠 다음 곡", "expected_action": "next", "expected_wake": true},
+  {"id": "wak_asr_03", "category": "wake_word_asr_variants", "text": "포코약 멈춰줘", "expected_action": "pause", "expected_wake": true},
+  {"id": "wak_asr_04", "category": "wake_word_asr_variants", "text": "오케이 포쿠 볼륨 올려줘", "expected_action": "volume_up", "expected_wake": true},
+
+  {"id": "artist_spacing_01", "category": "artist_asr_spacing", "text": "뉴 진느 음악 틀어줘", "expected_action": "play_search", "expected_query_contains": "NewJeans", "expected_search_type": "artist"},
+  {"id": "artist_spacing_02", "category": "artist_asr_spacing", "text": "블랙 핑느 노래 틀어줘", "expected_action": "play_search", "expected_query_contains": "BLACKPINK", "expected_search_type": "artist"},
+  {"id": "artist_spacing_03", "category": "artist_asr_spacing", "text": "콜드 플레이느 옐로우 재생해 줘", "expected_action": "play_search", "expected_query_contains": "Coldplay Yellow", "expected_search_type": "track"},
+  {"id": "artist_spacing_04", "category": "artist_asr_spacing", "text": "에드 시런느 셰이프 오브 유 틀어줘", "expected_action": "play_search", "expected_query_contains": "Ed Sheeran Shape of You", "expected_search_type": "track"},
+
+  {"id": "play_verb_01", "category": "play_command_variants", "text": "아이유 밤편지 틀어줄래요", "expected_action": "play_search", "expected_query_contains": "Through the Night", "expected_search_type": "track"},
+  {"id": "play_verb_02", "category": "play_command_variants", "text": "콜드플레이 픽스 유 재생해줄래", "expected_action": "play_search", "expected_query_contains": "Coldplay Fix You", "expected_search_type": "track"},
+  {"id": "play_verb_03", "category": "play_command_variants", "text": "잔나비 주저하는 연인들을 위해 틀어봐요", "expected_action": "play_search", "expected_query_contains": "for lovers who hesitate", "expected_search_type": "track"},
+  {"id": "play_verb_04", "category": "play_command_variants", "text": "뉴진스 하입보이 들려줄래", "expected_action": "play_search", "expected_query_contains": "NewJeans Hype Boy", "expected_search_type": "track"},
+
+  {"id": "vol_implicit_01", "category": "implicit_volume", "text": "소리 크게", "expected_action": "volume_up", "expected_delta": 20},
+  {"id": "vol_implicit_02", "category": "implicit_volume", "text": "소리 작게", "expected_action": "volume_down", "expected_delta": -10},
+  {"id": "vol_implicit_03", "category": "implicit_volume", "text": "볼륨 크게", "expected_action": "volume_up", "expected_delta": 20},
+  {"id": "vol_implicit_04", "category": "implicit_volume", "text": "볼륨 작게", "expected_action": "volume_down", "expected_delta": -10},
+
+  {"id": "wx_dust_01", "category": "weather_dust", "text": "미세먼지 어때", "expected_action": "weather"},
+  {"id": "wx_dust_02", "category": "weather_dust", "text": "초미세먼지 나쁨?", "expected_action": "weather"},
+  {"id": "wx_dust_03", "category": "weather_dust", "text": "대기질 어때", "expected_action": "weather"},
+  {"id": "wx_dust_04", "category": "weather_dust", "text": "포코야 미세먼지 알려줘", "expected_action": "weather", "expected_wake": true},
+
+  {"id": "artist_new_01", "category": "new_artists", "text": "(여자)아이들 노래 틀어줘", "expected_action": "play_search", "expected_query_contains": "G)I-DLE", "expected_search_type": "artist"},
+  {"id": "artist_new_02", "category": "new_artists", "text": "스테이씨 음악 틀어줘", "expected_action": "play_search", "expected_query_contains": "STAYC", "expected_search_type": "artist"},
+  {"id": "artist_new_03", "category": "new_artists", "text": "지코 노래 틀어줘", "expected_action": "play_search", "expected_query_contains": "ZICO", "expected_search_type": "artist"},
+  {"id": "artist_new_04", "category": "new_artists", "text": "크러쉬 음악 들려줘", "expected_action": "play_search", "expected_query_contains": "Crush", "expected_search_type": "artist"},
+
+  {"id": "track_new_01", "category": "new_tracks", "text": "롤린 틀어줘", "expected_action": "play_search", "expected_query_contains": "Rollin'", "expected_search_type": "track"},
+  {"id": "track_new_02", "category": "new_tracks", "text": "벚꽃 엔딩 틀어줘", "expected_action": "play_search", "expected_query_contains": "Cherry Blossom Ending", "expected_search_type": "track"},
+  {"id": "track_new_03", "category": "new_tracks", "text": "블라인딩 라이트 틀어줘", "expected_action": "play_search", "expected_query_contains": "Blinding Lights", "expected_search_type": "track"},
+  {"id": "track_new_04", "category": "new_tracks", "text": "퍼펙트 틀어줘", "expected_action": "play_search", "expected_query_contains": "Perfect", "expected_search_type": "track"},
+
+  {"id": "genre_new_01", "category": "new_genres", "text": "트로트 틀어줘", "expected_action": "play_search", "expected_search_type": "playlist"},
+  {"id": "genre_new_02", "category": "new_genres", "text": "국악 틀어줘", "expected_action": "play_search", "expected_search_type": "playlist"},
+  {"id": "genre_new_03", "category": "new_genres", "text": "OST 틀어줘", "expected_action": "play_search", "expected_search_type": "playlist"},
+  {"id": "genre_new_04", "category": "new_genres", "text": "캐롤 틀어줘", "expected_action": "play_search", "expected_search_type": "playlist"},
+
+  {"id": "en_play_01", "category": "english_play_variants", "text": "can you play Coldplay", "expected_action": "play_search", "expected_query_contains": "Coldplay"},
+  {"id": "en_play_02", "category": "english_play_variants", "text": "let me hear IU", "expected_action": "play_search", "expected_query_contains": "IU"},
+  {"id": "en_play_03", "category": "english_play_variants", "text": "queue up Jazz", "expected_action": "play_search", "expected_query_contains": "Jazz"}
 ]

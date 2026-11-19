@@ -97,6 +97,15 @@ _SEMANTIC_INTENT_PATTERNS: list[tuple[IntentAction, list[tuple[str, str]]]] = [
             (r"(?:surprise\s+me|play\s+something|play\s+my\s+mix)", r""),
         ],
     ),
+    (
+        IntentAction.WEATHER,
+        [
+            (r"(?:날씨|일기\s*예보|기상\s*예보|기온|온도|미세먼지|초미세먼지|대기\s*질|대기질)", r"(?:어때|몇|알려|와|내려|추|더|좋|나쁨)"),
+            (r"(?:오늘|내일|모레|지금|현재|밖에)", r"(?:비|눈|비와|눈와|비 와|눈 와)"),
+            (r"(?:우산)", r"(?:챙겨|필요|가져|들고)"),
+            (r"(?:weather|forecast)", r"(?:today|tomorrow|rain|snow|cold|hot)"),
+        ],
+    ),
 ]
 
 _INTENT_EXEMPLARS: dict[IntentAction, list[str]] = {
@@ -142,6 +151,13 @@ _INTENT_EXEMPLARS: dict[IntentAction, list[str]] = {
         "타이달 마이믹스 틀어줘", "마이 믹스 틀어줘", "아무 노래나 틀어줘",
         "추천곡 틀어줘", "신나는 거 아무거나 틀어줘", "랜덤으로 틀어줘",
         "surprise me", "play something", "play my mix",
+    ],
+    IntentAction.WEATHER: [
+        "오늘 날씨 어때", "내일 날씨 어때", "지금 날씨 어때", "날씨 알려줘",
+        "지금 몇 도야", "오늘 기온 어때", "내일 비 와?", "오늘 눈 와?",
+        "우산 챙겨야 해?", "미세먼지 어때", "대기질 어때", "초미세먼지 나쁨?",
+        "부산 날씨 알려줘", "서울 날씨 어때", "판교 내일 날씨 어때",
+        "what's the weather", "will it rain today", "weather forecast",
     ],
 }
 

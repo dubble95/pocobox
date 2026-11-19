@@ -51,6 +51,7 @@ _WEATHER_QUERY_RE = re.compile(
     r"|(?:오늘|내일|모레|지금|현재|밖에)\s*(?:비|눈)(?:가|이)?\s*(?:와|오나|오니|올까|내려|내릴)"
     r"|(?:^|\s)(?:비|눈)\s*(?:와요?|오나요?|오니|올까요?)(?:\s|$)"
     r"|(?:오늘|내일|모레|지금|밖에)\s*(?:많이\s*)?(?:추워|춥니|추울까|더워|덥니|더울까|쌀쌀해)"
+    r"|미세먼지|초미세먼지|대기\s*질|대기질|미세\s*먼지|초미세\s*먼지"
     r"|\bweather\b|\bforecast\b|\bis\s+it\s+(?:raining|snowing|cold|hot)\b|\bwill\s+it\s+(?:rain|snow)\b|\bwhat(?:'s|\s+is)\s+the\s+temperature\b"
     r")",
     re.IGNORECASE,
@@ -62,13 +63,13 @@ _KO_PLAY_SUFFIX_RE = re.compile(
     r"\s+(?:좀|한번|한 번|바로|지금|빨리|계속)?"
     r"(?:\s*(?:노래|음악|곡|트랙|앨범|플레이리스트|믹스|메들리))?"
     r"(?:\s*(?:좀|한번|한 번))?"
-    r"\s*(?:틀어\s*줘|틀어\s*주세요|틀어\s*줄래|틀어|틀줘|재생해\s*줘|재생해\s*주세요|재생해|재생|들려\s*줘|들려\s*주세요|들려|켜\s*줘|켜줘|플레이\s*해\s*줘|플레이해줘|플레이|검색해서\s*틀어\s*줘|검색해\s*줘|찾아\s*줘|찾아서\s*틀어\s*줘)"
+    r"\s*(?:틀어\s*줘|틀어\s*주세요|틀어\s*줄래|틀어\s*줄래요|틀어|틀줘|틀어봐|틀어봐요|재생해\s*줘|재생해\s*주세요|재생해|재생해줄래|재생|들려\s*줘|들려\s*주세요|들려|들려줄래|켜\s*줘|켜줘|켜줄래|플레이\s*해\s*줘|플레이해줘|플레이|검색해서\s*틀어\s*줘|검색해\s*줘|찾아\s*줘|찾아서\s*틀어\s*줘|틀어\s*줄\s*수\s*있어|틀어\s*줄\s*수\s*있어요)"
     r")$",
     re.IGNORECASE,
 )
 
 _EN_PLAY_PREFIX_RE = re.compile(
-    r"^(?:please\s+)?(?:play|put\s+on|search\s+(?:and\s+play\s+)?|find\s+(?:and\s+play\s+)?|listen\s+to)\s+",
+    r"^(?:please\s+)?(?:play|put\s+on|search\s+(?:and\s+play\s+)?|find\s+(?:and\s+play\s+)?|listen\s+to|can\s+you\s+play|could\s+you\s+play|i\s+want\s+to\s+hear|let\s+me\s+hear|queue\s+up)\s+",
     re.IGNORECASE,
 )
 
@@ -271,7 +272,7 @@ def parse_command(raw_text: str) -> VoiceIntent:
             )
 
     # Handle implicit volume commands without word "볼륨" (e.g. "조금만 줄여줘", "좀 키워줘", "더 크게", "더 작게")
-    if re.fullmatch(r"(?:좀|조금|조금만|살짝|많이|확|더)?\s*(?:키워\s*줘|키워|올려\s*줘|올려|크게(?:\s*해\s*줘)?)", low):
+    if re.fullmatch(r"(?:좀|조금|조금만|살짝|많이|확|더)?\s*(?:키워\s*줘|키워|올려\s*줘|올려|크게(?:\s*해\s*줘)?|소리\s*크게|음량\s*크게|볼륨\s*크게)", low):
         delta = 5 if re.search(r"(조금|살짝)", low) else (20 if re.search(r"(많이|확)", low) else 10)
         return VoiceIntent(
             action=IntentAction.VOLUME_UP,
@@ -281,7 +282,7 @@ def parse_command(raw_text: str) -> VoiceIntent:
             wake_word_detected=wake_detected,
             language=lang,
         )
-    if re.fullmatch(r"(?:좀|조금|조금만|살짝|많이|확|더)?\s*(?:줄여\s*줘|줄여|내려\s*줘|내려|작게(?:\s*해\s*줘)?)", low):
+    if re.fullmatch(r"(?:좀|조금|조금만|살짝|많이|확|더)?\s*(?:줄여\s*줘|줄여|내려\s*줘|내려|작게(?:\s*해\s*줘)?|소리\s*작게|음량\s*작게|볼륨\s*작게)", low):
         delta = 5 if re.search(r"(조금|살짝)", low) else (20 if re.search(r"(많이|확)", low) else 10)
         return VoiceIntent(
             action=IntentAction.VOLUME_DOWN,
