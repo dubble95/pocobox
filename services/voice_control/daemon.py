@@ -1371,10 +1371,10 @@ class VoiceController:
                 start_quiz_voice_loop=not dry_run,
             )
             if self._is_volume_or_mute_action(res.action):
-                skip_restore = True
+                skip_restore = not res.details.get("volume_disabled")
             if self._is_quiz_action(res.action):
                 pass
-            elif not dry_run and res.ok and self._is_spoken_action(res.action):
+            elif not dry_run and res.ok and (self._is_spoken_action(res.action) or res.details.get("spoken")):
                 self._speak_answer(res.message, keep_awake_after_sec=15.0)
             elif not dry_run and res.details.get("ack_spoken"):
                 pass  # spoken pre-execution ack (and failure TTS if failed) already played

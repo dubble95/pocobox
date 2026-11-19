@@ -82,7 +82,7 @@ class TestUsbDacAutoplay(unittest.TestCase):
             env_text = env_file.read_text()
             self.assertIn("SQUEEZELITE_OUTPUT=hw:CARD=D10s,DEV=0", env_text)
             self.assertIn("-R -u vLE", env_text)
-            fake_client.call.assert_any_call("02:70:6f:63:6f:01", ["playerpref", "digitalVolumeControl", 0])
+            fake_client.call.assert_any_call("02:70:6f:63:6f:01", ["playerpref", "digitalVolumeControl", 1])
             fake_client.set_volume.assert_called_once_with("02:70:6f:63:6f:01", 100)
             fake_client.play.assert_called_once_with("02:70:6f:63:6f:01")
 
@@ -199,6 +199,15 @@ class TestUsbDacAutoplay(unittest.TestCase):
             dac_mod.configure_dac_lms_volume(fake_client, "02:70:6f:63:6f:01")
         fake_client.call.assert_called_once_with(
             "02:70:6f:63:6f:01", ["playerpref", "digitalVolumeControl", 0]
+        )
+        fake_client.set_volume.assert_called_once_with("02:70:6f:63:6f:01", 100)
+
+    def test_configure_dac_lms_volume_ducking_mode_enables_digital_volume(self) -> None:
+        fake_client = MagicMock()
+        with patch.dict(os.environ, {"DAC_LMS_FIXED_VOLUME": "0"}):
+            dac_mod.configure_dac_lms_volume(fake_client, "02:70:6f:63:6f:01")
+        fake_client.call.assert_called_once_with(
+            "02:70:6f:63:6f:01", ["playerpref", "digitalVolumeControl", 1]
         )
         fake_client.set_volume.assert_called_once_with("02:70:6f:63:6f:01", 100)
 

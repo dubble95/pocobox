@@ -213,7 +213,7 @@ def set_usb_dac_hw_full_volume(card_num: int) -> list[str]:
 
 def configure_dac_lms_volume(client: LMSClient, player_id: str) -> None:
     """Apply bit-perfect LMS volume settings when USB DAC is active."""
-    fixed_vol = cfg_bool("DAC_LMS_FIXED_VOLUME", True)
+    fixed_vol = cfg_bool("DAC_LMS_FIXED_VOLUME", False)
     if fixed_vol:
         try:
             client.call(player_id, ["playerpref", "digitalVolumeControl", 0])
@@ -228,8 +228,9 @@ def configure_dac_lms_volume(client: LMSClient, player_id: str) -> None:
         return
     try:
         target_vol = max(0, min(100, int(raw_vol)))
+        client.call(player_id, ["playerpref", "digitalVolumeControl", 1])
         client.set_volume(player_id, target_vol)
-        log.info("Set LMS player=%s volume to %d%% on USB DAC attach", player_id, target_vol)
+        log.info("Set LMS player=%s volume to %d%% (digitalVolumeControl=1 for voice ducking) on USB DAC attach", player_id, target_vol)
     except Exception as exc:
         log.warning("Failed to set LMS volume on USB DAC attach: %s", exc)
 

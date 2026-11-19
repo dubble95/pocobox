@@ -181,6 +181,32 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
             self.assertFalse(ctrl._begin_duck())
             self.assertEqual(fake_lms.volume, 100)
 
+    def test_dac_mode_volume_command_rejected_and_duck_restored_to_100(self) -> None:
+        with mock.patch.dict(os.environ, {"CONTINUOUS_LISTEN": "0", "VOICE_DUCK_ENABLED": "1", "VOICE_DUCK_VOLUME": "18", "ENABLE_CHIME": "0"}):
+            ctrl = VoiceController()
+        fake_lms = _FakeLMS(mode="play", volume=100)
+        ctrl.lms = fake_lms  # type: ignore[assignment]
+        ctrl.executor.lms = fake_lms  # type: ignore[assignment]
+        ctrl.interpreter.provider = "gemini"
+
+        with mock.patch.object(ctrl, "is_dac_mode", return_value=True), \
+             mock.patch.object(ctrl.executor, "is_dac_mode_fn", return_value=True):
+            ctrl.handle_wake_detected("poco")
+            self.assertEqual(fake_lms.volume, 18)
+
+            wav = pcm_to_wav_bytes(_make_sine_pcm(1000.0, dur_sec=0.5, amp=4000))
+            with mock.patch.object(
+                ctrl.interpreter,
+                "interpret_audio",
+                return_value=VoiceIntent(action=IntentAction.VOLUME_SET, volume=55, raw_text="볼륨 55", wake_word_detected=False),
+            ), mock.patch("voice_control.daemon.speak_text", return_value=True) as mock_speak:
+                ctrl.handle_wake_utterance(wav, "poco")
+
+            mock_speak.assert_called_once()
+            self.assertIn("100%로 고정되어 있습니다", mock_speak.call_args[0][0])
+            self.assertEqual(fake_lms.volume, 100)
+            self.assertEqual(fake_lms.volume_history, [18, 100])
+
     def test_bare_wake_word_triggers_followup_listen_once(self) -> None:
         with mock.patch.dict(os.environ, {"CONTINUOUS_LISTEN": "0", "VOICE_DUCK_ENABLED": "1", "ENABLE_CHIME": "0"}):
             ctrl = VoiceController()
