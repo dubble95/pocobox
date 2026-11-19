@@ -156,6 +156,9 @@ class HybridVoiceInterpreter:
         local_stt_url: str | None = None,
         local_stt_language: str | None = None,
         local_stt_timeout: float | None = None,
+        local_llm_url: str | None = None,
+        enable_local_llm: bool | None = None,
+        local_llm_timeout: float | None = None,
         cloud_fallback: bool | None = None,
     ) -> None:
         self.gemini_api_key = gemini_api_key if gemini_api_key is not None else os.environ.get("GEMINI_API_KEY", "").strip()
@@ -175,6 +178,17 @@ class HybridVoiceInterpreter:
             if local_stt_timeout is not None
             else float(os.environ.get("LOCAL_STT_TIMEOUT", "5.0"))
         )
+        raw_local_llm = local_llm_url if local_llm_url is not None else os.environ.get("LOCAL_LLM_URL", "http://127.0.0.1:8767")
+        self.local_llm_url = raw_local_llm.strip().rstrip("/")
+        if enable_local_llm is not None:
+            self.enable_local_llm = bool(enable_local_llm)
+        else:
+            self.enable_local_llm = os.environ.get("ENABLE_LOCAL_LLM", "1").strip().lower() not in ("0", "false", "no", "off")
+        self.local_llm_timeout = (
+            float(local_llm_timeout)
+            if local_llm_timeout is not None
+            else float(os.environ.get("LOCAL_LLM_TIMEOUT", "3.5"))
+        )
         if cloud_fallback is not None:
             self.cloud_fallback = bool(cloud_fallback)
         else:
@@ -182,6 +196,7 @@ class HybridVoiceInterpreter:
 
         self._session = _requests.Session() if _requests is not None else None
         self._local_health_cache: tuple[float, dict[str, Any]] | None = None
+        self._local_llm_health_cache: tuple[float, dict[str, Any]] | None = None
 
         requested = (provider or os.environ.get("VOICE_PROVIDER", "auto")).strip().lower()
         if requested == "auto":
@@ -232,6 +247,64 @@ class HybridVoiceInterpreter:
         self._local_health_cache = (now, info)
         return info
 
+    def local_llm_health(self, force_refresh: bool = False) -> dict[str, Any]:
+        """Check local llama-server SLM HTTP server health (cached for 10s)."""
+        if not self.enable_local_llm or not self.local_llm_url:
+            return {"configured": False, "available": False, "url": ""}
+        now = time.monotonic()
+        if not force_refresh and self._local_llm_health_cache is not None and (now - self._local_llm_health_cache[0]) < 10.0:
+            return self._local_llm_health_cache[1]
+        url = f"{self.local_llm_url}/health"
+        info: dict[str, Any] = {"configured": True, "available": False, "url": self.local_llm_url}
+        try:
+            if self._session is not None:
+                resp = self._session.get(url, timeout=1.2)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    info["available"] = (data.get("status") == "ok" or bool(data.get("ok", True)))
+                    info["model"] = "qwen2.5-0.5b-instruct"
+            else:
+                with urllib.request.urlopen(url, timeout=1.2) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    info["available"] = (data.get("status") == "ok" or bool(data.get("ok", True)))
+                    info["model"] = "qwen2.5-0.5b-instruct"
+        except Exception:
+            info["available"] = False
+        self._local_llm_health_cache = (now, info)
+        return info
+
+    def _local_llm_text_intent(self, text: str) -> VoiceIntent | None:
+        """Parse natural language command using local llama-server (Qwen2.5-0.5B-Instruct)."""
+        if not self.enable_local_llm or not self.local_llm_url:
+            return None
+        url = f"{self.local_llm_url}/v1/chat/completions"
+        system_content = (
+            "You are the voice intent parser for PocoBox. "
+            "Output JSON only: {\"action\": \"now_playing\"|\"pause\"|\"resume\"|\"next\"|\"previous\"|\"volume_up\"|\"volume_down\"|\"play_search\"|\"play_mix\"|\"answer_qa\"|\"unknown\", "
+            "\"query\": \"...\", \"answer\": \"...\"}."
+        )
+        payload = {
+            "messages": [
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": text},
+            ],
+            "temperature": 0.0,
+            "max_tokens": 40,
+        }
+        try:
+            data = self._http_json(url, payload, timeout=self.local_llm_timeout)
+            choices = data.get("choices")
+            if not choices:
+                return None
+            content = choices[0]["message"]["content"]
+            parsed = _parse_json_response(content)
+            intent = _intent_from_llm_payload(parsed, provider="local-slm-qwen0.5b", raw_fallback=text)
+            if intent.action != IntentAction.UNKNOWN:
+                return intent
+        except Exception as exc:
+            log.debug("Local SLM intent parsing failed (%s): %s", text, exc)
+        return None
+
     def transcribe_local_audio(self, wav_bytes: bytes, *, language: str | None = None) -> dict[str, Any]:
         """Transcribe WAV bytes via the local SenseVoice-Small INT8 HTTP server (~0.15-0.35s)."""
         if not self.local_stt_url:
@@ -259,6 +332,17 @@ class HybridVoiceInterpreter:
         stripped_content = stripped_content.strip()
         if not stripped_content or len(stripped_content) < 2 or stripped_content in ("어", "응", "야", "음", "아", "네"):
             return local_intent
+
+        # Tier 3: Local SLM (Qwen2.5-0.5B via llama-server on 127.0.0.1:8767, ~1.2s on-device)
+        if self.enable_local_llm and self.local_llm_url:
+            try:
+                slm_intent = self._local_llm_text_intent(text)
+                if slm_intent is not None and slm_intent.action != IntentAction.UNKNOWN:
+                    if local_intent.wake_word_detected and not slm_intent.wake_word_detected:
+                        slm_intent.wake_word_detected = True
+                    return slm_intent
+            except Exception as exc:
+                log.debug("Local SLM text fallback failed (%r): %s", text, exc)
 
         if not use_cloud_fallback or not self.cloud_fallback or not self.has_cloud_api():
             return local_intent
@@ -307,12 +391,24 @@ class HybridVoiceInterpreter:
                     fast.provider = "sensevoice+rule"
                     return fast
 
-                # Skip cloud fallback for empty punctuation or short ambient filler sounds (< 2 chars or simple filler)
+                # Skip cloud/SLM fallback for empty punctuation or short ambient filler sounds (< 2 chars or simple filler)
                 if not clean_stripped or len(clean_stripped) < 2 or clean_stripped in ("어", "응", "야", "음", "아", "네"):
                     fast.provider = "sensevoice-local"
                     return fast
 
-                # Unknown/complex command, unresolved Korean search, or Q&A: escalate text-only to cloud LLM if enabled
+                # Tier 3: Local SLM (Qwen2.5-0.5B via llama-server on 127.0.0.1:8767, ~1.2s on-device)
+                if self.enable_local_llm and self.local_llm_url:
+                    try:
+                        slm_intent = self._local_llm_text_intent(transcript)
+                        if slm_intent is not None and slm_intent.action != IntentAction.UNKNOWN:
+                            slm_intent.provider = "sensevoice+local-slm"
+                            if fast.wake_word_detected and not slm_intent.wake_word_detected:
+                                slm_intent.wake_word_detected = True
+                            return slm_intent
+                    except Exception as exc:
+                        log.debug("Local SLM audio fallback failed after STT (%r): %s", transcript, exc)
+
+                # Tier 4: Unknown/complex command or Q&A: escalate text-only to cloud LLM if enabled
                 if self.cloud_fallback and self.has_cloud_api():
                     try:
                         cloud_intent: VoiceIntent | None = None
@@ -632,16 +728,18 @@ class HybridVoiceInterpreter:
         url: str,
         payload: dict[str, Any],
         extra_headers: dict[str, str] | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         headers = {"Content-Type": "application/json"}
         if extra_headers:
             headers.update(extra_headers)
 
+        req_timeout = timeout if timeout is not None else self.timeout
         max_attempts = 2
         for attempt in range(max_attempts):
             if self._session is not None:
                 try:
-                    resp = self._session.post(url, json=payload, headers=headers, timeout=self.timeout)
+                    resp = self._session.post(url, json=payload, headers=headers, timeout=req_timeout)
                 except Exception as exc:
                     if attempt + 1 < max_attempts:
                         time.sleep(0.35)
@@ -662,7 +760,7 @@ class HybridVoiceInterpreter:
                 method="POST",
             )
             try:
-                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                with urllib.request.urlopen(req, timeout=req_timeout) as resp:
                     return json.loads(resp.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="replace")[:300]

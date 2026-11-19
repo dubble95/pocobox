@@ -674,6 +674,77 @@ class TestVoiceQAAndTTS(unittest.TestCase):
             self.assertEqual(res.action, IntentAction.UNKNOWN)
             mock_gem.assert_not_called()
 
+    def test_semantic_intent_matcher_coverage(self) -> None:
+        from voice_control.semantic_intent import parse_semantic_command
+
+        test_cases = [
+            ("소리가 너무 커서 안 들려 줄여줘", IntentAction.VOLUME_DOWN),
+            ("이거 노래 제목이 뭔지 알려줄래", IntentAction.NOW_PLAYING),
+            ("마이믹스 재생해줘", IntentAction.PLAY_MIX),
+            ("아무거나 신나는 거 틀어줘", IntentAction.PLAY_MIX),
+            ("음악 잠깐 멈춰", IntentAction.PAUSE),
+            ("소리 조금만 낮춰줘", IntentAction.VOLUME_DOWN),
+            ("더 크게 해줘", IntentAction.VOLUME_UP),
+            ("다음 곡 틀어줘", IntentAction.NEXT),
+            ("what song is this", IntentAction.NOW_PLAYING),
+            ("make it louder", IntentAction.VOLUME_UP),
+        ]
+        for phrase, expected_action in test_cases:
+            intent = parse_semantic_command(phrase)
+            self.assertIsNotNone(intent, f"Semantic matcher returned None for {phrase}")
+            self.assertEqual(
+                intent.action,
+                expected_action,
+                f"Semantic mismatch for {phrase}: expected {expected_action}, got {intent.action}",
+            )
+            self.assertGreaterEqual(intent.confidence, 0.85)
+
+    def test_local_slm_intent_parsing_and_fallback_to_cloud(self) -> None:
+        from voice_control.cloud_stt_intent import HybridVoiceInterpreter
+
+        interp = HybridVoiceInterpreter(
+            provider="gemini",
+            gemini_api_key="test-key",
+            local_stt_url="http://127.0.0.1:8766",
+            local_llm_url="http://127.0.0.1:8767",
+            enable_local_llm=True,
+        )
+
+        mock_slm_intent = VoiceIntent(
+            action=IntentAction.PLAY_SEARCH,
+            raw_text="비 올 때 듣는 재즈 골라줘",
+            query="비 올 때 듣는 재즈",
+            confidence=0.95,
+            provider="local-slm-qwen0.5b",
+        )
+
+        # 1. When local SLM succeeds, cloud Gemini is NEVER called!
+        with mock.patch.object(interp, "_local_llm_text_intent", return_value=mock_slm_intent) as mock_slm, mock.patch.object(
+            interp, "_gemini_text_intent"
+        ) as mock_gem:
+            res = interp.interpret_text("비 올 때 듣는 재즈 골라줘", use_cloud_fallback=True)
+            self.assertEqual(res.action, IntentAction.PLAY_SEARCH)
+            self.assertEqual(res.provider, "local-slm-qwen0.5b")
+            mock_slm.assert_called_once()
+            mock_gem.assert_not_called()
+
+        # 2. When local SLM fails or returns None, it falls back to cloud Gemini
+        mock_gem_intent = VoiceIntent(
+            action=IntentAction.ANSWER_QA,
+            raw_text="양자 컴퓨터 원리가 뭐야?",
+            answer="양자 컴퓨터는 큐비트를 사용합니다.",
+            confidence=0.98,
+            provider="gemini-text",
+        )
+        with mock.patch.object(interp, "_local_llm_text_intent", return_value=None) as mock_slm, mock.patch.object(
+            interp, "_gemini_text_intent", return_value=mock_gem_intent
+        ) as mock_gem:
+            res = interp.interpret_text("양자 컴퓨터 원리가 뭐야?", use_cloud_fallback=True)
+            self.assertEqual(res.action, IntentAction.ANSWER_QA)
+            self.assertEqual(res.provider, "gemini-text")
+            mock_slm.assert_called_once()
+            mock_gem.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

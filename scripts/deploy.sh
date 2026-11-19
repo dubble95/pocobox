@@ -22,6 +22,7 @@ scp "${REPO_DIR}/infra/usb-dac/patch-usb-host-dtb.sh" "${HOST}:/tmp/pocobox-depl
 scp "${REPO_DIR}/infra/usb-dac/restore-usb-peripheral-dtb.sh" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/voice/voice.env.example" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/voice/pocobox-voice.service" "${HOST}:/tmp/pocobox-deploy/"
+scp "${REPO_DIR}/infra/voice/pocobox-llama.service" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/voice/pocobox-daily-quiz.service" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/voice/pocobox-daily-quiz.timer" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/voice/pocobox-voice.desktop" "${HOST}:/tmp/pocobox-deploy/"
@@ -80,6 +81,7 @@ install -m 0644 \$SRC/greetd-kiosk.toml /etc/pocobox/greetd-kiosk.toml
 install -m 0644 \$SRC/pocobox-pulseaudio.service /etc/systemd/system/pocobox-pulseaudio.service
 install -m 0644 \$SRC/pocobox-squeezelite.service /etc/systemd/system/pocobox-squeezelite.service
 install -m 0644 \$SRC/pocobox-dac-autoplay.service /etc/systemd/system/pocobox-dac-autoplay.service
+install -m 0644 \$SRC/pocobox-llama.service /etc/systemd/system/pocobox-llama.service
 install -m 0644 \$SRC/pocobox-voice.service /etc/systemd/system/pocobox-voice.service
 install -m 0644 \$SRC/pocobox-daily-quiz.service /etc/systemd/system/pocobox-daily-quiz.service
 install -m 0644 \$SRC/pocobox-daily-quiz.timer /etc/systemd/system/pocobox-daily-quiz.timer
@@ -105,6 +107,11 @@ if [ ! -f /usr/local/lib/libpocobox_aec3.so ] || [ /srv/pocobox/bin/pocobox_aec3
 fi
 if [ -x /usr/local/bin/squeezelite ] && ! /usr/local/bin/squeezelite -? 2>&1 | grep -qi visexport; then
   /srv/pocobox/bin/build-squeezelite.sh || echo WARN_squeezelite_VISEXPORT_rebuild_skipped
+fi
+
+if [ -f /srv/pocobox/models/qwen2.5-0.5b-instruct-q4_k_m.gguf ] && command -v llama-server >/dev/null 2>&1; then
+  systemctl daemon-reload
+  systemctl enable --now pocobox-llama.service || echo WARN_pocobox_llama_start_skipped
 fi
 
 rm -rf \$SRC

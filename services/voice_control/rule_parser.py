@@ -34,6 +34,7 @@ from .aliases import (
 )
 from .english_quiz import parse_quiz_options
 from .intent_schema import IntentAction, VoiceIntent
+from .semantic_intent import parse_semantic_command
 from .weather import parse_weather_query
 
 # Weather query detection (strictly excluded when user asks to play music/songs)
@@ -443,6 +444,11 @@ def parse_command(raw_text: str) -> VoiceIntent:
             wake_word_detected=wake_detected,
             language=lang,
         )
+
+    # 10. Tier 2: Sub-millisecond semantic intent & dual-root matcher
+    semantic = parse_semantic_command(text or raw_text)
+    if semantic is not None:
+        return semantic
 
     # Not recognized as a music command (e.g. "오늘 날씨 어때", "배고파")
     return VoiceIntent(

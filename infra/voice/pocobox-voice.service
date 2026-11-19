@@ -1,7 +1,7 @@
 [Unit]
 Description=PocoBox Hybrid Voice Command Service
-After=network-online.target docker.service pocobox-pulseaudio.service pocobox-squeezelite.service
-Wants=pocobox-pulseaudio.service pocobox-squeezelite.service
+After=network-online.target docker.service pocobox-pulseaudio.service pocobox-squeezelite.service pocobox-llama.service
+Wants=pocobox-pulseaudio.service pocobox-squeezelite.service pocobox-llama.service
 
 [Service]
 Type=simple

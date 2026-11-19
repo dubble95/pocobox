@@ -1493,6 +1493,7 @@ class VoiceController:
         )
         voice_info["provider"] = self.interpreter.provider
         voice_info["local_stt"] = self.interpreter.local_stt_health()
+        voice_info["local_slm"] = self.interpreter.local_llm_health()
         voice_info["require_wake_word"] = self.require_wake_word
         voice_info["duck_enabled"] = self.duck_enabled
         voice_info["duck_volume"] = self.duck_volume
@@ -1652,6 +1653,7 @@ class VoiceController:
             "weather_zone": default_loc.kma_zone,
             "provider": self.interpreter.provider,
             "local_stt": local_stt,
+            "local_slm": self.interpreter.local_llm_health(),
             "gemini_model": self.interpreter.gemini_model,
             "gemini_configured": bool(self.interpreter.gemini_api_key),
             "openai_configured": bool(self.interpreter.openai_api_key),
