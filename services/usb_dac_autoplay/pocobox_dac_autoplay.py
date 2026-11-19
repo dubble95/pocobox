@@ -213,7 +213,7 @@ def set_usb_dac_hw_full_volume(card_num: int) -> list[str]:
 
 def configure_dac_lms_volume(client: LMSClient, player_id: str) -> None:
     """Apply bit-perfect LMS volume settings when USB DAC is active."""
-    fixed_vol = cfg_bool("DAC_LMS_FIXED_VOLUME", False)
+    fixed_vol = cfg_bool("DAC_LMS_FIXED_VOLUME", True)
     if fixed_vol:
         try:
             client.call(player_id, ["playerpref", "digitalVolumeControl", 0])
@@ -478,6 +478,12 @@ def apply_state(client: LMSClient, active_dac: str | None, is_startup: bool = Fa
     if active_dac is not None:
         log.info("USB DAC detached (was %s)", active_dac)
         trigger_pause(client)
+        try:
+            player_id = client.resolve_player_id(cfg("PLAYER_NAME", "pocobox"))
+            client.call(player_id, ["playerpref", "digitalVolumeControl", 1])
+            log.info("Restored LMS player=%s digitalVolumeControl=1 on DAC detach", player_id)
+        except Exception as exc:
+            log.debug("Could not restore digitalVolumeControl on detach: %s", exc)
 
     fallback_out = cfg("FALLBACK_OUTPUT", "pulse")
     fallback_args = cfg("FALLBACK_SQUEEZELITE_EXTRA_ARGS", "-m 02:70:6f:63:6f:01 -C 5 -W -R -u hLE")

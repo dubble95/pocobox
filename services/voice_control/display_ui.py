@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-UI_VERSION = "5"
+UI_VERSION = "6"
 
 DISPLAY_MANIFEST = json.dumps(
     {
@@ -492,11 +492,11 @@ DISPLAY_HTML = r"""<!doctype html>
         </div>
 
         <div class="controls">
-          <button class="btn" onclick="ctrl('vol_down')" aria-label="Volume Down">−</button>
+          <button class="btn" id="volDownBtn" onclick="ctrl('vol_down')" aria-label="Volume Down">−</button>
           <button class="btn" onclick="ctrl('prev')" aria-label="Previous">⏮</button>
           <button class="btn primary" id="playBtn" onclick="ctrl('toggle')" aria-label="Play/Pause">▶</button>
           <button class="btn" onclick="ctrl('next')" aria-label="Next">⏭</button>
-          <button class="btn" onclick="ctrl('vol_up')" aria-label="Volume Up">+</button>
+          <button class="btn" id="volUpBtn" onclick="ctrl('vol_up')" aria-label="Volume Up">+</button>
           <button class="btn mic" id="micBtn" onclick="triggerMic()" aria-label="Voice">🎙</button>
         </div>
       </div>
@@ -512,6 +512,7 @@ DISPLAY_HTML = r"""<!doctype html>
   let refreshBusy = false;
   let quizActive = false;
   let layoutMode = "auto";
+  let isDacVolumeFixed = false;
   let playbackState = { mode: "stop", elapsed: 0, duration: 0, updatedAt: Date.now() };
 
   function fmtTime(sec) {
@@ -793,6 +794,10 @@ DISPLAY_HTML = r"""<!doctype html>
   }
 
   async function ctrl(action) {
+    if (isDacVolumeFixed && (action === "vol_up" || action === "vol_down")) {
+      showSubtitle("ok", "🎧 DAC 볼륨 고정", "DAC 모드에서는 고음질 출력을 위해 볼륨이 100%로 고정되어 있습니다.", "앰프나 스피커에서 볼륨을 조절해 주세요", 4500);
+      return;
+    }
     try {
       await fetch("/display/control", {
         method: "POST",
@@ -853,8 +858,35 @@ DISPLAY_HTML = r"""<!doctype html>
       document.getElementById("trackAlbum").textContent = hasTrack ? (np.album || "TIDAL") : "USB DAC 연결 시 자동 이어재생";
 
       document.getElementById("playBtn").textContent = (np.mode === "play") ? "⏸" : "▶";
-      const vol = (np.volume !== undefined && np.volume !== null) ? Math.round(Number(np.volume)) : 0;
-      document.getElementById("volText").textContent = "VOL " + vol + "%";
+      isDacVolumeFixed = Boolean(s.dac_fixed_volume || s.audio_output_mode === "usb_dac" || np.digital_volume_control === 0 || np.use_volume_control === 0);
+      const volDownBtn = document.getElementById("volDownBtn");
+      const volUpBtn = document.getElementById("volUpBtn");
+      const volText = document.getElementById("volText");
+
+      if (isDacVolumeFixed) {
+        volText.textContent = "DAC 100% (고정)";
+        volText.style.color = "rgba(74, 222, 128, 0.95)";
+        if (volDownBtn) {
+          volDownBtn.style.opacity = "0.35";
+          volDownBtn.setAttribute("title", "DAC 모드에서는 볼륨이 100%로 고정됩니다");
+        }
+        if (volUpBtn) {
+          volUpBtn.style.opacity = "0.35";
+          volUpBtn.setAttribute("title", "DAC 모드에서는 볼륨이 100%로 고정됩니다");
+        }
+      } else {
+        const vol = (np.volume !== undefined && np.volume !== null) ? Math.round(Number(np.volume)) : 0;
+        volText.textContent = "VOL " + vol + "%";
+        volText.style.color = "";
+        if (volDownBtn) {
+          volDownBtn.style.opacity = "";
+          volDownBtn.removeAttribute("title");
+        }
+        if (volUpBtn) {
+          volUpBtn.style.opacity = "";
+          volUpBtn.removeAttribute("title");
+        }
+      }
 
       const elapsed = Number(np.time || 0);
       const duration = Number(np.duration || 0);

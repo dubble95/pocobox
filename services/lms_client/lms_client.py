@@ -134,6 +134,8 @@ class LMSClient:
             "mode": st.get("mode", "stop"),
             "power": st.get("power", 0),
             "volume": st.get("mixer volume", 0),
+            "digital_volume_control": int(st.get("digital_volume_control", 1) or 0),
+            "use_volume_control": int(st.get("use_volume_control", 1) or 0),
             "playlist_tracks": int(st.get("playlist_tracks", 0) or 0),
             "time": float(st.get("time", 0) or 0),
             "duration": duration,

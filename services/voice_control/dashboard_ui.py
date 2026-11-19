@@ -402,7 +402,9 @@ DASHBOARD_HTML = r"""<!doctype html>
 
       document.getElementById("npTitle").textContent = np.title || "재생 중인 곡 없음";
       document.getElementById("npArtist").textContent = [np.artist, np.album].filter(Boolean).join(" — ") || "-";
-      document.getElementById("npStatus").textContent = (np.mode || "stop") + " · VOL " + (np.volume ?? 0) + "%";
+      const isDacFixed = Boolean(j.dac_fixed_volume || j.audio_output_mode === "usb_dac" || np.digital_volume_control === 0 || np.use_volume_control === 0);
+      const volLabel = isDacFixed ? "DAC 100% (고정)" : ("VOL " + (np.volume ?? 0) + "%");
+      document.getElementById("npStatus").textContent = (np.mode || "stop") + " · " + volLabel;
       const artKey = (np.title || "") + "|" + (np.coverid || "");
       if (np.title && artKey !== lastArtKey) {
         lastArtKey = artKey;
@@ -524,7 +526,11 @@ DASHBOARD_HTML = r"""<!doctype html>
   }
 
   async function ctrl(action) {
-    await fetch("/display/control", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({action})});
+    const res = await fetch("/display/control", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({action})});
+    const j = await res.json().catch(() => ({}));
+    if (j.error) {
+      addLog("DAC", j.error, "b-rec");
+    }
     setTimeout(pollMetrics, 150);
   }
 

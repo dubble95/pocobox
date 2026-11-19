@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 log = logging.getLogger("pocobox-voice.executor")
@@ -74,12 +76,36 @@ def extract_spoken_play_target(intent: VoiceIntent) -> str:
     return (intent.query or "").strip()
 
 
-def format_command_ack(intent: VoiceIntent) -> str | None:
+AUDIO_STATE_FILE = Path("/etc/pocobox/audio-state.json")
+
+
+def is_dac_mode(state_file: Path | None = None) -> bool:
+    """Return True if USB DAC output mode is currently active."""
+    target = state_file or AUDIO_STATE_FILE
+    if target.exists():
+        try:
+            st = json.loads(target.read_text(encoding="utf-8"))
+            return st.get("mode") == "usb_dac"
+        except Exception:
+            pass
+    return False
+
+
+def format_command_ack(intent: VoiceIntent, is_dac_mode: bool = False) -> str | None:
     """Build a short, natural Korean spoken confirmation to announce BEFORE executing a command.
 
-    Returns None for non-action / already-spoken intents (Q&A, weather, now_playing, quiz, unknown).
+    Returns None for non-action / already-spoken intents (Q&A, weather, now_playing, quiz, unknown),
+    or for volume commands when in DAC mode (where volume is fixed at 100%).
     """
     act = intent.action
+    if is_dac_mode and act in (
+        IntentAction.VOLUME_SET,
+        IntentAction.VOLUME_UP,
+        IntentAction.VOLUME_DOWN,
+        IntentAction.MUTE,
+        IntentAction.UNMUTE,
+    ):
+        return None
     if act == IntentAction.PLAY_SEARCH:
         target = extract_spoken_play_target(intent)
         return f"네, {target} 틀어드릴게요." if target else "네, 음악 틀어드릴게요."
@@ -161,12 +187,14 @@ class VoiceExecutor:
         *,
         auto_queue_radio: bool = False,
         radio_settle_sec: float = 0.6,
+        is_dac_mode_fn: Callable[[], bool] | None = None,
     ) -> None:
         self.lms = lms
         self.player_name = player_name
         self._weather_fetcher = weather_fetcher or fetch_weather
         self.auto_queue_radio = bool(auto_queue_radio)
         self.radio_settle_sec = max(0.0, float(radio_settle_sec))
+        self.is_dac_mode_fn = is_dac_mode_fn or is_dac_mode
         self._radio_lock = threading.Lock()
         self._radio_gen = 0
 
@@ -342,28 +370,46 @@ class VoiceExecutor:
                     self.lms.prev_track(player_id)
                 return done(True, "이전 곡으로 돌아갑니다." if not dry_run else "이전 곡 확인(dry-run)")
 
-            if act == IntentAction.VOLUME_SET:
-                vol = intent.volume if intent.volume is not None else 50
-                if not dry_run:
-                    self.lms.set_volume(player_id, vol)
-                return done(True, f"볼륨을 {vol}으로 설정했습니다.", {"volume": vol})
+            if act in (
+                IntentAction.VOLUME_SET,
+                IntentAction.VOLUME_UP,
+                IntentAction.VOLUME_DOWN,
+                IntentAction.MUTE,
+                IntentAction.UNMUTE,
+            ):
+                if self.is_dac_mode_fn():
+                    msg = (
+                        "DAC 모드에서는 고음질 출력을 위해 볼륨이 100%로 고정되어 있습니다. "
+                        "앰프나 스피커에서 볼륨을 조절해 주세요."
+                    ) if not dry_run else "DAC 모드에서는 볼륨이 100%로 고정되어 있습니다 (dry-run)."
+                    return done(
+                        True,
+                        msg,
+                        {"fixed_volume": 100, "dac_mode": True, "volume_disabled": True, "spoken": True},
+                    )
 
-            if act in (IntentAction.VOLUME_UP, IntentAction.VOLUME_DOWN):
-                delta = intent.delta if intent.delta is not None else (10 if act == IntentAction.VOLUME_UP else -10)
-                if dry_run:
-                    return done(True, f"볼륨 {delta:+d} 조정 확인(dry-run)", {"delta": delta})
-                res = self.lms.adjust_volume(player_id, delta)
-                return done(True, f"볼륨을 {res['volume']}으로 조정했습니다.", res)
+                if act == IntentAction.VOLUME_SET:
+                    vol = intent.volume if intent.volume is not None else 50
+                    if not dry_run:
+                        self.lms.set_volume(player_id, vol)
+                    return done(True, f"볼륨을 {vol}으로 설정했습니다.", {"volume": vol})
 
-            if act == IntentAction.MUTE:
-                if not dry_run:
-                    self.lms.set_mute(player_id, True)
-                return done(True, "음소거했습니다.")
+                if act in (IntentAction.VOLUME_UP, IntentAction.VOLUME_DOWN):
+                    delta = intent.delta if intent.delta is not None else (10 if act == IntentAction.VOLUME_UP else -10)
+                    if dry_run:
+                        return done(True, f"볼륨 {delta:+d} 조정 확인(dry-run)", {"delta": delta})
+                    res = self.lms.adjust_volume(player_id, delta)
+                    return done(True, f"볼륨을 {res['volume']}으로 조정했습니다.", res)
 
-            if act == IntentAction.UNMUTE:
-                if not dry_run:
-                    self.lms.set_mute(player_id, False)
-                return done(True, "음소거를 해제했습니다.")
+                if act == IntentAction.MUTE:
+                    if not dry_run:
+                        self.lms.set_mute(player_id, True)
+                    return done(True, "음소거했습니다.")
+
+                if act == IntentAction.UNMUTE:
+                    if not dry_run:
+                        self.lms.set_mute(player_id, False)
+                    return done(True, "음소거를 해제했습니다.")
 
             if act == IntentAction.NOW_PLAYING:
                 info = self.lms.now_playing(player_id)

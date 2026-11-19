@@ -50,6 +50,7 @@ from voice_control.executor import (  # noqa: E402
     VoiceExecutor,
     format_command_ack,
     format_command_failure,
+    is_dac_mode,
 )
 from voice_control.feedback import (  # noqa: E402
     get_internal_speaker_volume,
@@ -315,6 +316,7 @@ class VoiceController:
             self.lms,
             player_name=self.player_name,
             auto_queue_radio=self.enable_tidal_autoplay,
+            is_dac_mode_fn=self.is_dac_mode,
         )
         self.interpreter = HybridVoiceInterpreter()
         self.require_wake_word = _env_bool("REQUIRE_WAKE_WORD", True)
@@ -450,9 +452,15 @@ class VoiceController:
         except Exception:
             return False
 
+    def is_dac_mode(self) -> bool:
+        return is_dac_mode(AUDIO_STATE_FILE)
+
     def _begin_duck(self) -> bool:
         """Immediately lower LMS music volume while listening so 2-3m voice is crystal clear."""
         if not self.duck_enabled:
+            return False
+        if self.is_dac_mode():
+            # In DAC bit-perfect mode, digital volume is strictly 100% fixed (AEC3 handles echo cancellation)
             return False
         with self._duck_lock:
             if self._duck_saved is not None:
@@ -598,7 +606,7 @@ class VoiceController:
         dry_run: bool = False,
     ) -> tuple[ExecutionResult, bool]:
         """Speak pre-execution confirmation before executing an actionable command."""
-        ack_text = format_command_ack(intent)
+        ack_text = format_command_ack(intent, is_dac_mode=self.is_dac_mode())
         ack_spoken = False
         already_ducked = self._duck_saved is not None
         did_duck = False
@@ -624,7 +632,8 @@ class VoiceController:
                 self._speak_answer(format_command_failure(res))
         finally:
             if did_duck:
-                self._restore_duck(skip_restore=self._is_volume_or_mute_action(intent.action.value))
+                skip_restore = self._is_volume_or_mute_action(intent.action.value) and not res.details.get("volume_disabled")
+                self._restore_duck(skip_restore=skip_restore)
 
         return res, ack_spoken
 
@@ -1016,10 +1025,10 @@ class VoiceController:
                     **wake_meta,
                 )
             if self._is_volume_or_mute_action(res.action):
-                skip_restore = True
+                skip_restore = not res.details.get("volume_disabled")
             if self._is_quiz_action(res.action):
                 pass  # quiz handler already speaks bilingual TTS + chime
-            elif res.ok and self._is_spoken_action(res.action):
+            elif res.ok and (self._is_spoken_action(res.action) or res.details.get("spoken")):
                 self._speak_answer(res.message, keep_awake_after_sec=15.0)
             elif res.ok and not res.details.get("ack_spoken"):
                 self._play_chime("ok")
@@ -1087,7 +1096,7 @@ class VoiceController:
             "ts": time.time(),
         })
         log.info("TEXT '%s' -> action=%s ok=%s msg=%s", text, res.action, res.ok, res.message)
-        if not dry_run and res.ok and self._is_spoken_action(res.action):
+        if not dry_run and res.ok and (self._is_spoken_action(res.action) or res.details.get("spoken")):
             threading.Thread(
                 target=self._speak_answer,
                 args=(res.message,),
@@ -1460,10 +1469,11 @@ class VoiceController:
             self.lms.next_track(player_id)
         elif action == "prev":
             self.lms.prev_track(player_id)
-        elif action == "vol_up":
-            self.lms.adjust_volume(player_id, 5)
-        elif action == "vol_down":
-            self.lms.adjust_volume(player_id, -5)
+        elif action in ("vol_up", "vol_down"):
+            if self.is_dac_mode():
+                return {"ok": False, "error": "DAC 모드에서는 볼륨이 100%로 고정되어 있습니다.", "fixed": True}
+            delta = 5 if action == "vol_up" else -5
+            self.lms.adjust_volume(player_id, delta)
         else:
             return {"ok": False, "error": f"Unknown control action: {action}"}
         if action != "toggle":
@@ -1526,6 +1536,8 @@ class VoiceController:
                 "keep_awake": keep_awake,
             },
             "audio_output_label": _read_audio_output_label(),
+            "audio_output_mode": "usb_dac" if self.is_dac_mode() else "speaker",
+            "dac_fixed_volume": self.is_dac_mode(),
             "voice": voice_info,
             "quiz": self.quiz.public_state(),
             "quiz_schedule": self.get_daily_quiz_schedule(force_refresh=False),

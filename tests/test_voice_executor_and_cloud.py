@@ -18,7 +18,7 @@ sys.path.insert(0, str(REPO_ROOT / "services" / "lms_client"))
 from lms_client import LMSClient, extract_tidal_track_id  # noqa: E402
 from voice_control.audio_capture import analyze_wav_bytes, pcm_to_wav_bytes, trim_silence_wav  # noqa: E402
 from voice_control.cloud_stt_intent import HybridVoiceInterpreter  # noqa: E402
-from voice_control.executor import VoiceExecutor  # noqa: E402
+from voice_control.executor import VoiceExecutor, format_command_ack  # noqa: E402
 from voice_control.feedback import synthesize_tone_wav  # noqa: E402
 from voice_control.intent_schema import IntentAction, VoiceIntent  # noqa: E402
 from voice_control.rule_parser import parse_command  # noqa: E402
@@ -162,6 +162,31 @@ class TestVoiceExecutorAndCloud(unittest.TestCase):
         neg = executor.execute(parse_command("오늘 점심 뭐 먹지?"))
         self.assertFalse(neg.ok)
         self.assertEqual(neg.action, IntentAction.UNKNOWN.value)
+
+    def test_dac_mode_volume_controls_disabled_and_explains(self) -> None:
+        lms = FakeLMSClient()
+        executor = VoiceExecutor(lms, is_dac_mode_fn=lambda: True)
+
+        res = executor.execute(parse_command("볼륨 70으로 맞춰줘"))
+        self.assertTrue(res.ok)
+        self.assertTrue(res.details.get("volume_disabled"))
+        self.assertEqual(res.details.get("fixed_volume"), 100)
+        self.assertIn("100%로 고정", res.message)
+        self.assertEqual(lms.volume, 50)  # LMS volume left untouched
+
+        res_down = executor.execute(parse_command("볼륨 줄여줘"))
+        self.assertTrue(res_down.ok)
+        self.assertTrue(res_down.details.get("volume_disabled"))
+        self.assertEqual(lms.volume, 50)
+
+        res_mute = executor.execute(parse_command("음소거 해줘"))
+        self.assertTrue(res_mute.ok)
+        self.assertTrue(res_mute.details.get("volume_disabled"))
+        self.assertFalse(lms.muted)
+
+        intent_vol = parse_command("볼륨 올려줘")
+        self.assertIsNone(format_command_ack(intent_vol, is_dac_mode=True))
+        self.assertIsNotNone(format_command_ack(intent_vol, is_dac_mode=False))
 
     def test_gemini_audio_single_shot_mock(self) -> None:
         interp = HybridVoiceInterpreter(provider="gemini", gemini_api_key="test-key")
