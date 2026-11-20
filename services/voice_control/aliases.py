@@ -115,6 +115,14 @@ ASR_NORMALIZATIONS: tuple[tuple[str, str], ...] = (
     ("포코아", "포코야"),
     ("포코얘요", "포코야"),
     ("포코야여", "포코야"),
+    # Classical piece & Russian dance ASR normalizations
+    ("트래팍", "트레팍"),
+    ("트래 팍", "트레팍"),
+    ("트레 팍", "트레팍"),
+    ("호두 까기", "호두까기"),
+    ("호두까기인형", "호두까기 인형"),
+    ("갈잎 피리", "갈잎피리"),
+    ("꽃의왈츠", "꽃의 왈츠"),
     # Common Korean command verb / particle ASR spacing & mis-hearings
     ("틀어 줄래", "틀어줄래"),
     ("틀어 줄래요", "틀어줄래요"),
@@ -405,8 +413,26 @@ _CLASSICAL_WORK_TERMS: tuple[tuple[str, str], ...] = (
     ("연습곡", "Etude"),
     ("왈츠", "Waltz"),
     ("백조의 호수", "Swan Lake"),
-    ("호두까기 인형", "Nutcracker"),
+    ("호두까기 인형", "The Nutcracker"),
+    ("호두까기인형", "The Nutcracker"),
+    ("호두까기", "The Nutcracker"),
+    ("트레팍", "Trepak"),
+    ("트래팍", "Trepak"),
+    ("러시아 춤", "Russian Dance"),
+    ("꽃의 왈츠", "Waltz of the Flowers"),
+    ("사탕요정의 춤", "Dance of the Sugar Plum Fairy"),
+    ("사탕 요정의 춤", "Dance of the Sugar Plum Fairy"),
+    ("갈잎피리의 춤", "Dance of the Reed Flutes"),
+    ("하바네라", "Habanera"),
+    ("투우사의 노래", "Toreador Song"),
     ("사계", "The Four Seasons"),
+    ("봄", "Spring"),
+    ("여름", "Summer"),
+    ("가을", "Autumn"),
+    ("겨울", "Winter"),
+    ("동물의 사육제", "The Carnival of the Animals"),
+    ("페르 귄트", "Peer Gynt"),
+    ("페르귄트", "Peer Gynt"),
     ("월광", "Moonlight Sonata"),
     ("비창", "Pathetique"),
     ("운명", "Symphony No. 5"),
@@ -419,14 +445,15 @@ _CLASSICAL_WORK_TERMS: tuple[tuple[str, str], ...] = (
 )
 
 _CLASSICAL_WORK_GUARD_RE = re.compile(
-    r"(?:협주곡?|콘체르토|교향곡|심포니|소나타|녹턴|전주곡|에튀드|연습곡|모음곡|[345]중주|[삼사오]중주|트리오|세레나데|디베르티멘토)"
+    r"(?:협주곡?|콘체르토|교향곡|심포니|소나타|녹턴|전주곡|에튀드|연습곡|모음곡|[345]중주|[삼사오]중주|트리오|세레나데|디베르티멘토|"
+    r"호두까기|트레팍|트래팍|백조의\s*호수|사계|꽃의\s*왈츠|사탕요정|하바네라|카르멘|페르\s*귄트|동물의\s*사육제)"
 )
 
 _CLASSICAL_MOVEMENT_WORK_RE = re.compile(
     r"(?:협주곡?|콘체르토|교향곡|심포니|소나타|모음곡|[345]중주|[삼사오]중주|트리오|세레나데|디베르티멘토|"
-    r"브란덴부르크|사계|골드베르크|"
+    r"브란덴부르크|사계|골드베르크|호두까기|페르\s*귄트|동물의\s*사육제|"
     r"\bconcerto\b|\bsymphon(?:y|ie)\b|\bsonat[ae]\b|\bsuite\b|\bquartet[te]?\b|\btrio\b|\bquintet[te]?\b|"
-    r"\bserenade\b|\bdivertimento\b|\bbrandenburg\b|\bfour\s+seasons\b|\bgoldberg\b)",
+    r"\bserenade\b|\bdivertimento\b|\bbrandenburg\b|\bfour\s+seasons\b|\bgoldberg\b|\bnutcracker\b)",
     re.IGNORECASE,
 )
 
@@ -434,6 +461,11 @@ _CLASSICAL_MOVEMENT_WORK_RE = re.compile(
 def is_classical_movement_work(text: str) -> bool:
     """Return True if text refers to a classical form composed of multiple movements."""
     return bool(_CLASSICAL_MOVEMENT_WORK_RE.search(text))
+
+
+def is_classical_work(text: str) -> bool:
+    """Return True if text refers to a classical form, ballet, or work title."""
+    return bool(_CLASSICAL_WORK_GUARD_RE.search(text))
 
 _SINO_WORK_NUM_RE = re.compile(r"(?:제\s*)?([일이삼사오육칠팔구]|십)\s*번")
 
@@ -548,6 +580,18 @@ TRACK_ALIASES: dict[str, list[str]] = {
     "슈퍼 레이디": ["Super Lady", "슈퍼 레이디"],
     "화약": ["Fireworks", "화약"],
     "퀴즈": ["Quiz", "퀴즈"],
+    # Classical / ballet favorites
+    "트레팍": ["Trepak", "Russian Dance", "Tchaikovsky Nutcracker Trepak", "트레팍"],
+    "트래팍": ["Trepak", "Russian Dance", "Tchaikovsky Nutcracker Trepak", "트래팍"],
+    "호두까기 인형": ["The Nutcracker", "Nutcracker", "Tchaikovsky Nutcracker"],
+    "호두까기인형": ["The Nutcracker", "Nutcracker", "Tchaikovsky Nutcracker"],
+    "꽃의 왈츠": ["Waltz of the Flowers", "Tchaikovsky Waltz of the Flowers", "꽃의 왈츠"],
+    "사탕요정의 춤": ["Dance of the Sugar Plum Fairy"],
+    "사탕 요정의 춤": ["Dance of the Sugar Plum Fairy"],
+    "갈잎피리의 춤": ["Dance of the Reed Flutes"],
+    "백조의 호수": ["Swan Lake", "Tchaikovsky Swan Lake"],
+    "하바네라": ["Habanera", "Bizet Carmen Habanera"],
+    "투우사의 노래": ["Toreador Song", "Bizet Carmen Toreador"],
 }
 
 # Korean mood/genre -> TIDAL friendly search keywords
@@ -646,6 +690,8 @@ def _translate_classical_terms(text: str) -> str:
         out,
     )
     out = re.sub(r"(?:제\s*)?(\d+)\s*악장", r" Movement \1 ", out)
+    # Strip partitive particles between translated terms (e.g. "The Nutcracker 중 Trepak" -> "The Nutcracker Trepak")
+    out = re.sub(r"\s+(?:중|중에|에서)\s+", " ", out)
     return re.sub(r"\s+", " ", out).strip()
 
 
@@ -667,6 +713,24 @@ def expand_tidal_queries(query: str) -> list[str]:
         if q in table:
             for alias in table[q]:
                 add(alias)
+
+    # Check classical partitive expressions (e.g. "호두까기 인형 중 트레팍", "사계 중 봄")
+    m_part = re.match(r"^(.+?)\s+(?:중|중에|에서)\s+(.+)$", q)
+    if m_part:
+        work_raw = m_part.group(1).strip()
+        part_raw = m_part.group(2).strip()
+        work_trans = _translate_classical_terms(work_raw)
+        part_trans = _translate_classical_terms(part_raw)
+        work_cand = TRACK_ALIASES.get(work_raw, [work_trans])[0]
+        part_cand = TRACK_ALIASES.get(part_raw, [part_trans])[0]
+        add(f"{work_cand} {part_cand}")
+        if "nutcracker" in work_cand.lower() or "호두까기" in work_raw:
+            add(f"Tchaikovsky Nutcracker {part_cand}")
+        elif "four seasons" in work_cand.lower() or "사계" in work_raw:
+            add(f"Vivaldi Four Seasons {part_cand}")
+        add(f"{work_trans} {part_trans}")
+        add(part_cand)
+        add(f"{work_raw} {part_raw}")
 
     # Check artist + track / combined phrase substitution
     matched_artists: list[tuple[str, list[str]]] = []

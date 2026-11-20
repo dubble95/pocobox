@@ -33,7 +33,7 @@ from voice_control.audio_capture import (  # noqa: E402
     trim_silence_wav,
 )
 from voice_control.audio_dsp import filter_wav_speech_band  # noqa: E402
-from voice_control.cloud_stt_intent import HybridVoiceInterpreter  # noqa: E402
+from voice_control.cloud_stt_intent import ConversationContext, HybridVoiceInterpreter  # noqa: E402
 from voice_control.continuous_listener import ContinuousVoiceListener  # noqa: E402
 from voice_control.dashboard_ui import DASHBOARD_HTML  # noqa: E402
 from voice_control.display_ui import DISPLAY_HTML, DISPLAY_MANIFEST, UI_VERSION  # noqa: E402
@@ -382,6 +382,7 @@ class VoiceController:
         self._display_wake_until = 0.0
         self._last_nokey_warn = 0.0
         self.last_result: dict[str, Any] | None = None
+        self.conversation_context = ConversationContext(expiry_sec=45.0)
         self._schedule_cache: dict[str, Any] | None = None
         self._schedule_cache_time: float = 0.0
 
@@ -1103,7 +1104,7 @@ class VoiceController:
                 return self.stop_quiz(dry_run=dry_run)
             return self.answer_quiz_text(text, dry_run=dry_run, use_cloud=use_cloud)
 
-        intent = self.interpreter.interpret_text(text, use_cloud_fallback=use_cloud)
+        intent = self.interpreter.interpret_text(text, use_cloud_fallback=use_cloud, context=self.conversation_context)
         if intent.action == IntentAction.START_QUIZ:
             return self.start_quiz(
                 topic=intent.quiz_topic or "all",
@@ -1118,6 +1119,19 @@ class VoiceController:
         res, _ = self._execute_intent_with_ack(intent, dry_run=dry_run)
         if not dry_run:
             self._update_display_wake_for_action(res.action)
+            if res.ok:
+                self.conversation_context.record_turn(
+                    "user",
+                    intent.raw_text or text,
+                    action=res.action,
+                    query=intent.query,
+                )
+                self.conversation_context.record_turn(
+                    "assistant",
+                    res.message,
+                    track_title=res.details.get("title") or res.details.get("track"),
+                    artist=res.details.get("artist"),
+                )
         self.last_result = res.to_dict()
         self.events.publish({
             "type": "result",
@@ -1201,6 +1215,7 @@ class VoiceController:
             intent = self.interpreter.interpret_audio(
                 boosted,
                 enforce_wake_word=(enforce_wake_word and self.require_wake_word),
+                context=self.conversation_context,
             )
         except Exception as exc:
             res = ExecutionResult(
@@ -1311,6 +1326,19 @@ class VoiceController:
         res, _ = self._execute_intent_with_ack(intent, dry_run=dry_run)
         if not dry_run:
             self._update_display_wake_for_action(res.action)
+            if res.ok:
+                self.conversation_context.record_turn(
+                    "user",
+                    intent.raw_text,
+                    action=res.action,
+                    query=intent.query,
+                )
+                self.conversation_context.record_turn(
+                    "assistant",
+                    res.message,
+                    track_title=res.details.get("title") or res.details.get("track"),
+                    artist=res.details.get("artist"),
+                )
         res.details["vad"] = metrics.__dict__
         res.details["stt_ms"] = stt_ms
         res.details["stt_provider"] = intent.provider
@@ -1903,6 +1931,13 @@ class VoiceController:
                 for p in players
             ],
             "quiz": self.quiz.public_state(),
+            "context": {
+                "active": self.conversation_context.is_active(),
+                "turns": len(self.conversation_context.turns),
+                "last_action": self.conversation_context.last_action,
+                "last_query": self.conversation_context.last_query,
+                "last_track": self.conversation_context.last_track_title,
+            },
             "last_result": self.last_result,
         }
 

@@ -7,6 +7,7 @@ import json
 import math
 import struct
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -22,7 +23,11 @@ from lms_client import (  # noqa: E402
     parse_movement_number,
 )
 from voice_control.audio_capture import analyze_wav_bytes, pcm_to_wav_bytes, trim_silence_wav  # noqa: E402
-from voice_control.cloud_stt_intent import HybridVoiceInterpreter  # noqa: E402
+from voice_control.cloud_stt_intent import (  # noqa: E402
+    ConversationContext,
+    HybridVoiceInterpreter,
+    _intent_from_llm_payload,
+)
 from voice_control.executor import VoiceExecutor, format_command_ack  # noqa: E402
 from voice_control.feedback import synthesize_tone_wav  # noqa: E402
 from voice_control.intent_schema import IntentAction, VoiceIntent  # noqa: E402
@@ -805,6 +810,123 @@ class TestGeminiOptimizationAndTelemetry(unittest.TestCase):
             res2 = interp._gemini_text_intent("질문 2")
             self.assertEqual(res2.provider, "gemini-quota-blocked")
             self.assertIn("한도에 도달", res2.answer)
+
+    def test_conversation_context_tracking(self) -> None:
+        ctx = ConversationContext(expiry_sec=10.0)
+        self.assertFalse(ctx.is_active())
+        self.assertFalse(ctx.is_recent_music_playback())
+
+        ctx.record_turn("user", "트래팍 틀어줘", action="play_search", query="Trepak")
+        ctx.record_turn("assistant", "TIDAL [songs] 'Big Moe' 재생 시작", track_title="Big Moe")
+
+        self.assertTrue(ctx.is_active())
+        self.assertTrue(ctx.is_recent_music_playback())
+        self.assertEqual(ctx.last_action, "play_search")
+        self.assertEqual(ctx.last_query, "Trepak")
+        self.assertEqual(ctx.last_track_title, "Big Moe")
+        self.assertEqual(len(ctx.turns), 2)
+
+        # Simulate expiry
+        ctx.last_timestamp = time.time() - 15.0
+        self.assertFalse(ctx.is_active())
+        self.assertFalse(ctx.is_recent_music_playback())
+
+    def test_partitive_and_correction_voice_commands(self) -> None:
+        # 1. "트래팍 틀어줘" -> Trepak
+        intent1 = parse_command("트래팍 틀어줘")
+        self.assertEqual(intent1.action, IntentAction.PLAY_SEARCH)
+        self.assertEqual(intent1.query, "Trepak")
+        self.assertIn("Russian Dance", intent1.fallback_queries)
+
+        # 2. "아니 호두까기 인형 중 트래팍" -> The Nutcracker Trepak
+        intent2 = parse_command("아니 호두까기 인형 중 트래팍")
+        self.assertEqual(intent2.action, IntentAction.PLAY_SEARCH)
+        self.assertEqual(intent2.query, "The Nutcracker Trepak")
+        self.assertEqual(intent2.display_query, "호두까기 인형 중 트레팍")
+        self.assertTrue(intent2.wake_word_detected)
+
+        # 3. "포코야 트래팍" -> Trepak (noun-only with wake word)
+        intent3 = parse_command("포코야 트래팍")
+        self.assertEqual(intent3.action, IntentAction.PLAY_SEARCH)
+        self.assertEqual(intent3.query, "Trepak")
+        self.assertTrue(intent3.wake_word_detected)
+
+        # 4. "호두까기 인형 중 트레팍" -> The Nutcracker Trepak
+        intent4 = parse_command("호두까기 인형 중 트레팍")
+        self.assertEqual(intent4.action, IntentAction.PLAY_SEARCH)
+        self.assertEqual(intent4.query, "The Nutcracker Trepak")
+
+        # 5. "사계 중 봄" -> The Four Seasons Spring
+        intent5 = parse_command("사계 중 봄")
+        self.assertEqual(intent5.action, IntentAction.PLAY_SEARCH)
+        self.assertEqual(intent5.query, "The Four Seasons Spring")
+
+        # 6. "호두까기 인형 중 꽃의 왈츠"
+        intent6 = parse_command("호두까기 인형 중 꽃의 왈츠")
+        self.assertEqual(intent6.action, IntentAction.PLAY_SEARCH)
+        self.assertIn("Waltz of the Flowers", intent6.query)
+
+        # 7. Correction with recent playback context: "아니 그거 말고 백조의 호수"
+        ctx = ConversationContext(expiry_sec=45.0)
+        ctx.record_turn("user", "트래팍 틀어줘", action="play_search", query="Trepak")
+        intent7 = parse_command("아니 그거 말고 백조의 호수", context=ctx)
+        self.assertEqual(intent7.action, IntentAction.PLAY_SEARCH)
+        self.assertEqual(intent7.query, "Swan Lake")
+
+    def test_llm_payload_preserves_classical_play_search_without_play_verb(self) -> None:
+        payload = {
+            "transcript": "아니 호두까기 인형 중 트래팍",
+            "action": "play_search",
+            "query": "Tchaikovsky The Nutcracker Trepak",
+            "display_query": "호두까기 인형 중 트레팍",
+            "fallback_queries": ["호두까기 인형 트레팍"],
+            "search_type": "track",
+            "confidence": 0.95,
+        }
+        intent = _intent_from_llm_payload(payload, provider="gemini-text", raw_fallback="아니 호두까기 인형 중 트래팍")
+        self.assertEqual(intent.action, IntentAction.PLAY_SEARCH)
+        self.assertEqual(intent.query, "Tchaikovsky The Nutcracker Trepak")
+
+    def test_hybrid_interpreter_passes_dialogue_context_to_gemini(self) -> None:
+        interp = HybridVoiceInterpreter(
+            provider="gemini",
+            gemini_api_key="test-key",
+        )
+        ctx = ConversationContext(expiry_sec=45.0)
+        ctx.record_turn("user", "트래팍 틀어줘", action="play_search", query="Trepak")
+        ctx.record_turn("assistant", "TIDAL [songs] 'Big Moe' 재생 시작", track_title="Big Moe")
+
+        fake_resp = {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {
+                                "text": json.dumps({
+                                    "transcript": "아니 호두까기 인형 중 트래팍",
+                                    "action": "play_search",
+                                    "query": "Tchaikovsky The Nutcracker Trepak",
+                                    "display_query": "호두까기 인형 중 트레팍",
+                                    "search_type": "track",
+                                    "confidence": 0.95,
+                                })
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+        with patch.object(interp, "_http_json", return_value=fake_resp) as mock_http:
+            intent = interp._gemini_text_intent("아니 호두까기 인형 중 트래팍", context=ctx)
+            self.assertEqual(intent.action, IntentAction.PLAY_SEARCH)
+            self.assertEqual(intent.query, "Tchaikovsky The Nutcracker Trepak")
+            # Verify context turns were passed in contents
+            body_arg = mock_http.call_args[0][1]
+            contents = body_arg["contents"]
+            self.assertGreaterEqual(len(contents), 3)  # user, model, user
+            self.assertEqual(contents[0]["parts"][0]["text"], "트래팍 틀어줘")
+            self.assertEqual(contents[1]["parts"][0]["text"], "TIDAL [songs] 'Big Moe' 재생 시작")
+            self.assertEqual(contents[2]["parts"][0]["text"], "아니 호두까기 인형 중 트래팍")
 
 
 if __name__ == "__main__":

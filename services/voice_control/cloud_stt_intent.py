@@ -21,7 +21,7 @@ try:
 except Exception:  # pragma: no cover
     _requests = None
 
-from .aliases import expand_tidal_queries, strip_wake_prefix
+from .aliases import expand_tidal_queries, is_classical_movement_work, is_classical_work, strip_wake_prefix
 from .english_quiz import QuizQuestion, classify_quiz_command, is_local_answer_match, parse_quiz_options
 from .intent_schema import IntentAction, VoiceIntent
 from .rule_parser import parse_command
@@ -31,6 +31,55 @@ log = logging.getLogger("pocobox-voice.stt")
 
 _KST = datetime.timezone(datetime.timedelta(hours=9))
 _KO_WEEKDAYS = ("월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일")
+
+
+class ConversationContext:
+    """Tracks short-term voice interaction dialogue turns for contextual intent resolution."""
+
+    def __init__(self, expiry_sec: float = 45.0) -> None:
+        self.expiry_sec = expiry_sec
+        self.last_action: str | None = None
+        self.last_query: str | None = None
+        self.last_display_query: str | None = None
+        self.last_track_title: str | None = None
+        self.last_artist: str | None = None
+        self.last_timestamp: float = 0.0
+        self.turns: list[dict[str, str]] = []
+
+    def record_turn(
+        self,
+        role: str,
+        text: str,
+        *,
+        action: str | None = None,
+        query: str | None = None,
+        track_title: str | None = None,
+        artist: str | None = None,
+    ) -> None:
+        now = time.time()
+        if self.last_timestamp and (now - self.last_timestamp > self.expiry_sec):
+            self.turns.clear()
+        self.last_timestamp = now
+        if action:
+            self.last_action = action
+        if query:
+            self.last_query = query
+        if track_title:
+            self.last_track_title = track_title
+        if artist:
+            self.last_artist = artist
+        self.turns.append({"role": role, "text": text})
+        if len(self.turns) > 6:
+            self.turns = self.turns[-6:]
+
+    def is_active(self) -> bool:
+        return bool(self.turns) and (time.time() - self.last_timestamp <= self.expiry_sec)
+
+    def is_recent_music_playback(self) -> bool:
+        if not self.is_active():
+            return False
+        return self.last_action in ("play_search", "play_mix", "play_favorite", "resume")
+
 
 SYSTEM_PROMPT = """You are the voice assistant and music controller for PocoBox, a Korean/English smart speaker backed by Lyrion Music Server (LMS) and TIDAL.
 
@@ -69,15 +118,28 @@ Rules:
 - Return pure JSON only, no markdown fences."""
 
 
-def _build_system_prompt() -> str:
+def _build_system_prompt(context: ConversationContext | None = None) -> str:
     now = datetime.datetime.now(tz=_KST)
     wd = _KO_WEEKDAYS[now.weekday()]
     loc = get_default_location()
-    return (
+    base = (
         SYSTEM_PROMPT
         + f"\n\nCurrent local time (Korea Standard Time, KST): {now.strftime('%Y-%m-%d %H:%M')} ({wd})."
         + f"\nDevice default location: {loc.name} ({loc.en_name}, South Korea). For any location-dependent question where the user did not specify another city, assume {loc.name} (never default to Seoul unless the user explicitly mentions Seoul)."
     )
+    if context and context.is_active():
+        ctx_lines = []
+        if context.last_query:
+            ctx_lines.append(f"Previous user query: '{context.last_query}'")
+        if context.last_track_title:
+            ctx_lines.append(f"Currently/recently playing track: '{context.last_track_title}'")
+        if ctx_lines:
+            base += (
+                f"\n\nConversational Context:\n{'; '.join(ctx_lines)}.\n"
+                "If the current user utterance is a correction or refinement (e.g. starting with '아니', '그거 말고', '말고', or naming a specific movement/track like '~ 중 ~'), "
+                "resolve it as a corrected play_search intent targeting the intended song or classical piece."
+            )
+    return base
 
 
 def _parse_json_response(raw: str) -> dict[str, Any]:
@@ -89,7 +151,12 @@ def _parse_json_response(raw: str) -> dict[str, Any]:
     return json.loads(cleaned.strip())
 
 
-def _intent_from_llm_payload(payload: dict[str, Any], provider: str, raw_fallback: str = "") -> VoiceIntent:
+def _intent_from_llm_payload(
+    payload: dict[str, Any],
+    provider: str,
+    raw_fallback: str = "",
+    context: ConversationContext | None = None,
+) -> VoiceIntent:
     transcript = str(payload.get("transcript") or raw_fallback or "").strip()
     is_music_only = bool(payload.get("is_music_only", False))
     if is_music_only:
@@ -120,6 +187,8 @@ def _intent_from_llm_payload(payload: dict[str, Any], provider: str, raw_fallbac
         play_cues = (
             "틀어", "재생", "들려", "노래", "음악", "곡", "앨범", "아티스트", "가수", "플레이", "찾아", "선곡",
             "play", "music", "song", "track", "album", "artist", "listen",
+            # Conversational correction and partitive phrasing cues
+            "아니", "말고", "그게 아니라", "다른", "다시", "중", "중에", "에서",
         )
         has_play_cue = any(c in transcript.lower() for c in play_cues)
         alias_matches = False
@@ -127,7 +196,16 @@ def _intent_from_llm_payload(payload: dict[str, Any], provider: str, raw_fallbac
             expanded = expand_tidal_queries(query)
             if expanded and expanded[0].lower() != query.lower():
                 alias_matches = True
-        if not has_play_cue and not alias_matches:
+            elif is_classical_movement_work(query) or is_classical_movement_work(transcript) or is_classical_work(query) or is_classical_work(transcript):
+                alias_matches = True
+            elif any(w in query.lower() for w in (
+                "concerto", "symphony", "sonata", "suite", "quartet", "tchaikovsky",
+                "nutcracker", "trepak", "waltz", "beethoven", "mozart", "chopin", "bach",
+                "vivaldi", "brahms", "swan lake", "four seasons",
+            )):
+                alias_matches = True
+        has_context = bool(context and context.is_recent_music_playback())
+        if not has_play_cue and not alias_matches and not has_context:
             action_str = IntentAction.UNKNOWN.value
 
     # Enrich with local alias expansion if query is Korean
@@ -330,9 +408,17 @@ _REQUEST_VERB_ENDINGS = (
     "해줘", "해 줘", "해봐", "해 봐", "줘요", "부탁해", "하자", "할래",
 )
 
+_CORRECTION_CUES = (
+    "아니", "말고", "그게 아니라", "아니고",
+)
 
-def is_meaningful_cloud_candidate(text: str) -> bool:
-    """Check if an utterance has clear intent markers (question, music, quiz, or request).
+_PARTITIVE_CUES = (
+    " 중 ", "중에", "에서",
+)
+
+
+def is_meaningful_cloud_candidate(text: str, context: ConversationContext | None = None) -> bool:
+    """Check if an utterance has clear intent markers (question, music, quiz, correction, or request).
 
     Prevents escalating household chatter, TV noise fragments, or random statements
     to Gemini/OpenAI cloud APIs.
@@ -349,6 +435,14 @@ def is_meaningful_cloud_candidate(text: str) -> bool:
     if any(qz in content for qz in _QUIZ_INTENT_INDICATORS):
         return True
     if any(content.endswith(req) for req in _REQUEST_VERB_ENDINGS):
+        return True
+    if any(c in content for c in _CORRECTION_CUES):
+        return True
+    if any(p in content for p in _PARTITIVE_CUES):
+        return True
+    if is_classical_work(content) or is_classical_movement_work(content):
+        return True
+    if context and context.is_recent_music_playback():
         return True
     expanded = expand_tidal_queries(content)
     if expanded and expanded[0].lower() != content.lower():
@@ -499,7 +593,7 @@ class HybridVoiceInterpreter:
         self._local_llm_health_cache = (now, info)
         return info
 
-    def _local_llm_text_intent(self, text: str) -> VoiceIntent | None:
+    def _local_llm_text_intent(self, text: str, context: ConversationContext | None = None) -> VoiceIntent | None:
         """Parse natural language command using local llama-server (Qwen2.5-0.5B-Instruct)."""
         if not self.enable_local_llm or not self.local_llm_url:
             return None
@@ -509,18 +603,21 @@ class HybridVoiceInterpreter:
             "Output JSON only: {\"action\": \"play_search\"|\"play_mix\"|\"now_playing\"|\"pause\"|\"resume\"|\"next\"|\"previous\"|\"volume_up\"|\"volume_down\"|\"answer_qa\"|\"unknown\", "
             "\"query\": \"...\", \"answer\": \"...\"}.\n"
             "Rules:\n"
-            "- play_search: user asks to play music/song (~틀어줘, ~재생해, play ~).\n"
+            "- play_search: user asks to play music/song (~틀어줘, ~재생해, play ~, or corrections like 아니 ~).\n"
             "- now_playing: user asks what song is playing (지금 무슨 노래야, 이 곡 뭐야).\n"
             "- answer_qa: user asks a factual question (수도가 어디야, 날씨 어때).\n"
             "- unknown: non-command statements, chat, or irrelevant speech."
         )
+        messages: list[dict[str, str]] = [{"role": "system", "content": system_content}]
+        if context and context.is_active() and context.turns:
+            for turn in context.turns[-4:]:
+                r = "user" if turn.get("role") == "user" else "assistant"
+                messages.append({"role": r, "content": turn.get("text", "")})
+        messages.append({"role": "user", "content": text})
         payload = {
-            "messages": [
-                {"role": "system", "content": system_content},
-                {"role": "user", "content": text},
-            ],
+            "messages": messages,
             "temperature": 0.0,
-            "max_tokens": 40,
+            "max_tokens": 50,
         }
         try:
             data = self._http_json(url, payload, timeout=self.local_llm_timeout)
@@ -529,7 +626,7 @@ class HybridVoiceInterpreter:
                 return None
             content = choices[0]["message"]["content"]
             parsed = _parse_json_response(content)
-            intent = _intent_from_llm_payload(parsed, provider="local-slm-qwen0.5b", raw_fallback=text)
+            intent = _intent_from_llm_payload(parsed, provider="local-slm-qwen0.5b", raw_fallback=text, context=context)
             if intent.action != IntentAction.UNKNOWN:
                 return intent
         except Exception as exc:
@@ -552,9 +649,14 @@ class HybridVoiceInterpreter:
         with urllib.request.urlopen(req, timeout=self.local_stt_timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
-    def interpret_text(self, text: str, use_cloud_fallback: bool = True) -> VoiceIntent:
+    def interpret_text(
+        self,
+        text: str,
+        use_cloud_fallback: bool = True,
+        context: ConversationContext | None = None,
+    ) -> VoiceIntent:
         """Fast-path local rule parsing first; optionally escalate complex/unknown text to cloud LLM."""
-        local_intent = parse_command(text)
+        local_intent = parse_command(text, context=context)
         if local_intent.action != IntentAction.UNKNOWN and local_intent.confidence >= 0.9:
             return local_intent
 
@@ -567,7 +669,7 @@ class HybridVoiceInterpreter:
         # Tier 3: Local SLM (Qwen2.5-0.5B via llama-server on 127.0.0.1:8767, ~1.2s on-device)
         if self.enable_local_llm and self.local_llm_url:
             try:
-                slm_intent = self._local_llm_text_intent(text)
+                slm_intent = self._local_llm_text_intent(text, context=context)
                 if slm_intent is not None and slm_intent.action != IntentAction.UNKNOWN:
                     if local_intent.wake_word_detected and not slm_intent.wake_word_detected:
                         slm_intent.wake_word_detected = True
@@ -579,7 +681,7 @@ class HybridVoiceInterpreter:
             return local_intent
 
         # Intent Gating: Do not escalate random statements or fragments to cloud LLM
-        if not is_meaningful_cloud_candidate(text):
+        if not is_meaningful_cloud_candidate(text, context=context):
             self.quota_tracker.record_skipped_ambient()
             if self.telemetry:
                 self.telemetry.record(
@@ -592,20 +694,26 @@ class HybridVoiceInterpreter:
         try:
             cloud_intent: VoiceIntent | None = None
             if self.provider == "gemini" and self.gemini_api_key:
-                cloud_intent = self._gemini_text_intent(text)
+                cloud_intent = self._gemini_text_intent(text, context=context) if context is not None else self._gemini_text_intent(text)
             elif self.provider == "openai" and self.openai_api_key:
-                cloud_intent = self._openai_text_intent(text)
+                cloud_intent = self._openai_text_intent(text, context=context) if context is not None else self._openai_text_intent(text)
             if cloud_intent is not None and (
                 cloud_intent.action != IntentAction.UNKNOWN or local_intent.action == IntentAction.UNKNOWN
             ):
                 if local_intent.wake_word_detected and not cloud_intent.wake_word_detected:
                     cloud_intent.wake_word_detected = True
                 return cloud_intent
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("Cloud text fallback failed (%r): %s", text, exc)
         return local_intent
 
-    def interpret_audio(self, wav_bytes: bytes, *, enforce_wake_word: bool = False) -> VoiceIntent:
+    def interpret_audio(
+        self,
+        wav_bytes: bytes,
+        *,
+        enforce_wake_word: bool = False,
+        context: ConversationContext | None = None,
+    ) -> VoiceIntent:
         """Local-first SenseVoice STT + offline rule parser (~0.3s); optional cloud fallback for Q&A/unknown."""
         if self.local_stt_url:
             try:
@@ -635,7 +743,7 @@ class HybridVoiceInterpreter:
                         wake_word_detected=False,
                     )
 
-                fast = parse_command(transcript)
+                fast = parse_command(transcript, context=context)
                 if fast.action != IntentAction.UNKNOWN and fast.confidence >= 0.85:
                     fast.provider = "sensevoice+rule"
                     return fast
@@ -652,7 +760,7 @@ class HybridVoiceInterpreter:
                     return fast
 
                 # Intent Gating: Do not escalate random noise/household chatter to SLM or Gemini unless it has intent cues!
-                if not is_meaningful_cloud_candidate(transcript):
+                if not is_meaningful_cloud_candidate(transcript, context=context):
                     self.quota_tracker.record_skipped_ambient()
                     if self.telemetry:
                         self.telemetry.record(
@@ -667,7 +775,7 @@ class HybridVoiceInterpreter:
                 # Tier 3: Local SLM (Qwen2.5-0.5B via llama-server on 127.0.0.1:8767, ~1.2s on-device)
                 if self.enable_local_llm and self.local_llm_url:
                     try:
-                        slm_intent = self._local_llm_text_intent(transcript)
+                        slm_intent = self._local_llm_text_intent(transcript, context=context)
                         if slm_intent is not None and slm_intent.action != IntentAction.UNKNOWN:
                             slm_intent.provider = "sensevoice+local-slm"
                             if fast.wake_word_detected and not slm_intent.wake_word_detected:
@@ -681,10 +789,10 @@ class HybridVoiceInterpreter:
                     try:
                         cloud_intent: VoiceIntent | None = None
                         if self.provider == "gemini" and self.gemini_api_key:
-                            cloud_intent = self._gemini_text_intent(transcript)
+                            cloud_intent = self._gemini_text_intent(transcript, context=context) if context is not None else self._gemini_text_intent(transcript)
                             cloud_intent.provider = "sensevoice+gemini-text"
                         elif self.provider == "openai" and self.openai_api_key:
-                            cloud_intent = self._openai_text_intent(transcript)
+                            cloud_intent = self._openai_text_intent(transcript, context=context) if context is not None else self._openai_text_intent(transcript)
                             cloud_intent.provider = "sensevoice+openai-text"
                         if cloud_intent is not None and (
                             cloud_intent.action != IntentAction.UNKNOWN or fast.action == IntentAction.UNKNOWN
@@ -776,9 +884,9 @@ class HybridVoiceInterpreter:
 
         return intent
 
-    def _gemini_text_intent(self, text: str) -> VoiceIntent:
+    def _gemini_text_intent(self, text: str, context: ConversationContext | None = None) -> VoiceIntent:
         cached = self.intent_cache.get(text)
-        if cached is not None:
+        if cached is not None and not (context and context.is_active()):
             self.quota_tracker.record_cache_hit()
             cached.provider = "gemini-cache"
             if self.telemetry:
@@ -816,10 +924,17 @@ class HybridVoiceInterpreter:
                 wake_word_detected=True,
             )
 
+        contents: list[dict[str, Any]] = []
+        if context and context.is_active() and context.turns:
+            for turn in context.turns[-4:]:
+                r = "user" if turn.get("role") == "user" else "model"
+                contents.append({"role": r, "parts": [{"text": turn.get("text", "")}]})
+        contents.append({"role": "user", "parts": [{"text": text}]})
+
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.gemini_model}:generateContent?key={self.gemini_api_key}"
         body = {
-            "system_instruction": {"parts": [{"text": _build_system_prompt()}]},
-            "contents": [{"role": "user", "parts": [{"text": text}]}],
+            "system_instruction": {"parts": [{"text": _build_system_prompt(context)}]},
+            "contents": contents,
             "generationConfig": {
                 "temperature": 0.2,
                 "responseMimeType": "application/json",
@@ -831,7 +946,7 @@ class HybridVoiceInterpreter:
         self.quota_tracker.record_call()
         stats = self.quota_tracker.stats()
         out = data["candidates"][0]["content"]["parts"][0]["text"]
-        intent = _intent_from_llm_payload(_parse_json_response(out), provider="gemini-text", raw_fallback=text)
+        intent = _intent_from_llm_payload(_parse_json_response(out), provider="gemini-text", raw_fallback=text, context=context)
 
         if self.telemetry:
             self.telemetry.record(
@@ -844,7 +959,7 @@ class HybridVoiceInterpreter:
                 current_rpm=stats["current_rpm"],
             )
 
-        if intent.action != IntentAction.UNKNOWN:
+        if intent.action != IntentAction.UNKNOWN and not (context and context.is_active()):
             self.intent_cache.put(text, intent)
 
         return intent
@@ -877,15 +992,18 @@ class HybridVoiceInterpreter:
             res = json.loads(resp.read().decode("utf-8"))
         return str(res.get("text", "")).strip()
 
-    def _openai_text_intent(self, text: str) -> VoiceIntent:
+    def _openai_text_intent(self, text: str, context: ConversationContext | None = None) -> VoiceIntent:
+        messages: list[dict[str, str]] = [{"role": "system", "content": _build_system_prompt(context)}]
+        if context and context.is_active() and context.turns:
+            for turn in context.turns[-4:]:
+                r = "user" if turn.get("role") == "user" else "assistant"
+                messages.append({"role": r, "content": turn.get("text", "")})
+        messages.append({"role": "user", "content": text})
         body = {
             "model": self.openai_chat_model,
             "temperature": 0.1,
             "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": _build_system_prompt()},
-                {"role": "user", "content": text},
-            ],
+            "messages": messages,
         }
         data = self._http_json(
             "https://api.openai.com/v1/chat/completions",
@@ -893,7 +1011,7 @@ class HybridVoiceInterpreter:
             extra_headers={"Authorization": f"Bearer {self.openai_api_key}"},
         )
         out = data["choices"][0]["message"]["content"]
-        return _intent_from_llm_payload(_parse_json_response(out), provider="openai", raw_fallback=text)
+        return _intent_from_llm_payload(_parse_json_response(out), provider="openai", raw_fallback=text, context=context)
 
     def transcribe_blind_audio(self, wav_bytes: bytes) -> str:
         """Strictly literal Korean/English STT with ZERO quiz-answer context (local SenseVoice first)."""

@@ -29,6 +29,7 @@ from .aliases import (
     TRACK_ALIASES,
     expand_tidal_queries,
     is_classical_movement_work,
+    is_classical_work,
     normalize_asr_text,
     parse_korean_number,
     strip_wake_prefix,
@@ -41,6 +42,18 @@ from .weather import parse_weather_query
 # Weather query detection (strictly excluded when user asks to play music/songs)
 _WEATHER_MUSIC_GUARD_RE = re.compile(
     r"(?:노래|음악|곡|트랙|앨범|플레이리스트|믹스|틀어|재생|들려|song|music|track|album|playlist|\bplay\b)",
+    re.IGNORECASE,
+)
+
+# Correction prefixes (e.g. "아니", "그게 아니라", "그거 말고", "말고")
+_CORRECTION_PREFIX_RE = re.compile(
+    r"^(?:아니(?:고|\s*그게\s*아니라|\s*그거\s*말고)?|그거\s*말고|말고)\s+",
+    re.IGNORECASE,
+)
+
+# Partitive classical/album work structure (e.g. "호두까기 인형 중 트레팍", "사계 중 봄")
+_WORK_PARTITIVE_RE = re.compile(
+    r"^(.+?)\s+(?:중|중에|에서)\s+(.+?)(?:\s+(?:좀|한번|한 번|바로|지금|빨리)?)?(?:\s+(?:노래|음악|곡|트랙|앨범|틀어.*|재생.*|들려.*|켜.*))?$",
     re.IGNORECASE,
 )
 _WEATHER_QUERY_RE = re.compile(
@@ -90,7 +103,7 @@ def _detect_language(text: str) -> str:
     return "en"
 
 
-def parse_command(raw_text: str) -> VoiceIntent:
+def parse_command(raw_text: str, context: Any | None = None) -> VoiceIntent:
     """Parse Korean/English natural-language music command into a typed VoiceIntent."""
     if not raw_text or not raw_text.strip():
         return VoiceIntent(action=IntentAction.UNKNOWN, raw_text=raw_text or "", confidence=0.0)
@@ -98,6 +111,11 @@ def parse_command(raw_text: str) -> VoiceIntent:
     normalized = normalize_asr_text(raw_text)
     text, wake_detected = strip_wake_prefix(normalized)
     text = text.strip(" .!?,~")
+
+    is_correction = bool(_CORRECTION_PREFIX_RE.search(text))
+    if is_correction:
+        text = _CORRECTION_PREFIX_RE.sub("", text).strip(" .!?,~")
+
     lang = _detect_language(text or normalized)
 
     if not text:
@@ -105,7 +123,7 @@ def parse_command(raw_text: str) -> VoiceIntent:
             action=IntentAction.UNKNOWN,
             raw_text=raw_text,
             confidence=0.0,
-            wake_word_detected=wake_detected,
+            wake_word_detected=wake_detected or is_correction,
             language=lang,
         )
 
@@ -460,6 +478,82 @@ def parse_command(raw_text: str) -> VoiceIntent:
             )
 
     # 9. PLAY SEARCH (Korean or English music search command)
+    # 9.1 Partitive classical/album work structure (e.g. "호두까기 인형 중 트레팍", "사계 중 봄")
+    m_part = _WORK_PARTITIVE_RE.match(text)
+    if m_part:
+        work_cand = m_part.group(1).strip()
+        part_cand = m_part.group(2).strip()
+        if (
+            is_classical_work(work_cand)
+            or is_classical_work(part_cand)
+            or work_cand in TRACK_ALIASES
+            or part_cand in TRACK_ALIASES
+            or is_classical_movement_work(work_cand)
+        ):
+            expanded = expand_tidal_queries(f"{work_cand} 중 {part_cand}")
+            primary = expanded[0] if expanded else f"{work_cand} {part_cand}"
+            fallbacks = expanded[1:] if len(expanded) > 1 else []
+            return VoiceIntent(
+                action=IntentAction.PLAY_SEARCH,
+                raw_text=raw_text,
+                query=primary,
+                fallback_queries=fallbacks,
+                display_query=f"{work_cand} 중 {part_cand}",
+                search_type="track",
+                confidence=0.96,
+                wake_word_detected=wake_detected or is_correction,
+                language=lang,
+            )
+
+    has_recent_playback = False
+    if context is not None:
+        if callable(getattr(context, "is_recent_music_playback", None)):
+            has_recent_playback = context.is_recent_music_playback()
+        elif isinstance(context, dict) and context.get("last_action") in ("play_search", "play_mix", "play_favorite", "resume"):
+            has_recent_playback = True
+
+    is_music_context = wake_detected or is_correction or has_recent_playback
+
+    # 9.2 Direct track / artist / classical work mention when awake or correcting
+    if (
+        is_music_context
+        and not (has_ko_play_intent or has_en_play_intent)
+        and (
+            text in TRACK_ALIASES
+            or text in ARTIST_ALIASES
+            or text in GENRE_MOOD_ALIASES
+            or is_classical_movement_work(text)
+            or is_classical_work(text)
+        )
+    ):
+        search_type = "track"
+        if text in ARTIST_ALIASES and text not in TRACK_ALIASES:
+            search_type = "artist"
+        elif text in GENRE_MOOD_ALIASES and text not in TRACK_ALIASES:
+            search_type = "playlist"
+        elif is_classical_movement_work(text):
+            search_type = "classical"
+
+        expanded = expand_tidal_queries(text)
+        primary = expanded[0] if expanded else text
+        fallbacks = expanded[1:] if len(expanded) > 1 else []
+        disp_q = text
+        if text in TRACK_ALIASES and TRACK_ALIASES[text]:
+            disp_q = TRACK_ALIASES[text][-1]
+
+        resolved_to_tidal = not bool(re.search(r"[가-힣]", primary))
+
+        return VoiceIntent(
+            action=IntentAction.PLAY_SEARCH,
+            raw_text=raw_text,
+            query=primary,
+            fallback_queries=fallbacks,
+            display_query=disp_q,
+            search_type=search_type,
+            confidence=0.95 if resolved_to_tidal else 0.88,
+            wake_word_detected=wake_detected or is_correction,
+            language=lang,
+        )
 
     if has_ko_play_intent or has_en_play_intent:
         # Infer search_type from phrasing BEFORE stripping descriptors
@@ -526,7 +620,7 @@ def parse_command(raw_text: str) -> VoiceIntent:
             fallback_queries=fallbacks,
             search_type=search_type,
             confidence=0.94 if resolved_to_tidal else 0.85,
-            wake_word_detected=wake_detected,
+            wake_word_detected=wake_detected or is_correction,
             language=lang,
         )
 
