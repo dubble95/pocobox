@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-UI_VERSION = "9"
+UI_VERSION = "10"
 
 DISPLAY_MANIFEST = json.dumps(
     {
@@ -782,16 +782,6 @@ DISPLAY_HTML = r"""<!doctype html>
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "ensure_dac" })
       }).catch(() => {});
-      // Shorts guard: skip any short (<60s) video automatically
-      try {
-        const dur = event.target.getDuration ? event.target.getDuration() : 0;
-        if (dur > 0 && dur <= 60) {
-          console.warn("[YouTube] Short detected (" + dur + "s <= 60s), skipping...");
-          showSubtitle("info", "YouTube", "쇼츠 영상을 건너뛰고 다음 곡으로 이동합니다.", "Shorts 제외", 1800);
-          ytNext(null, true);
-          return;
-        }
-      } catch (_) {}
       if (playBtn) playBtn.textContent = "⏸";
       updateYtUi();
     } else if (event.data === (window.YT ? YT.PlayerState.PAUSED : 2)) {
@@ -897,7 +887,7 @@ DISPLAY_HTML = r"""<!doctype html>
     showYtTapBadge("⏭");
     updateYtUi();
     resetYtControlsTimer();
-    if (notify !== false) notifyYtControl("next");
+    if (notify !== false) notifyYtControl("sync", { index: ytIndex });
   }
 
   function ytPrev(e, notify) {
@@ -911,7 +901,7 @@ DISPLAY_HTML = r"""<!doctype html>
     showYtTapBadge("⏮");
     updateYtUi();
     resetYtControlsTimer();
-    if (notify !== false) notifyYtControl("prev");
+    if (notify !== false) notifyYtControl("sync", { index: ytIndex });
   }
 
   function ytToggle(e) {
@@ -980,11 +970,12 @@ DISPLAY_HTML = r"""<!doctype html>
     setTimeout(refresh, 200);
   }
 
-  function notifyYtControl(act) {
+  function notifyYtControl(act, extra) {
+    const payload = Object.assign({ action: act }, extra || {});
     fetch("/youtube/control", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: act })
+      body: JSON.stringify(payload)
     }).catch(() => {});
   }
 

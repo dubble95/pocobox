@@ -300,6 +300,16 @@ class TestYouTubeCatalogAndPlaybackManager(unittest.TestCase):
         mgr.prev_video()
         self.assertEqual(mgr.current_video()["title"], "Song 2")
 
+        # Explicit set_index (sync from frontend)
+        mgr.set_index(1)
+        self.assertEqual(mgr.current_video()["title"], "Song 1")
+        self.assertEqual(mgr.index, 1)
+
+        # to_dict includes videos
+        d = mgr.to_dict()
+        self.assertEqual(len(d["videos"]), 3)
+        self.assertEqual(d["index"], 1)
+
         # Pause & stop
         mgr.set_playing(False)
         self.assertFalse(mgr.playing)

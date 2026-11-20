@@ -1614,13 +1614,18 @@ class VoiceController:
                 intent=intent.to_dict(),
                 latency_ms=round((time.monotonic() - t0) * 1000.0, 1),
             )
-        sink = self.route_youtube_to_dac_if_available()
-        if sink:
-            msg = f"사운드를 USB DAC({sink})으로 출력합니다."
-            ok = True
+        if self.youtube.active:
+            sink = self.route_youtube_to_dac_if_available()
+            if sink:
+                msg = f"유튜브 사운드를 USB DAC({sink})으로 출력합니다."
+                ok = True
+            else:
+                msg = "연결된 USB DAC을 찾지 못했거나 활성화하지 못했습니다."
+                ok = False
         else:
-            msg = "연결된 USB DAC을 찾지 못했거나 활성화하지 못했습니다."
-            ok = False
+            self.release_youtube_from_dac()
+            msg = "사운드를 USB DAC으로 출력합니다."
+            ok = self.is_dac_mode()
         return ExecutionResult(
             ok=ok,
             action=intent.action,
@@ -2251,6 +2256,15 @@ def make_handler(controller: VoiceController) -> type[BaseHTTPRequestHandler]:
                 if act in ("ensure_dac", "route_dac"):
                     sink = controller.route_youtube_to_dac_if_available()
                     self._send_json(200, {"ok": True, "sink": sink})
+                    return
+                if act == "sync":
+                    idx = data.get("index")
+                    if idx is not None:
+                        try:
+                            controller.youtube.set_index(int(idx))
+                        except Exception:
+                            pass
+                    self._send_json(200, {"ok": True, "state": controller.youtube.to_dict()})
                     return
                 if act == "load":
                     controller.route_youtube_to_dac_if_available()

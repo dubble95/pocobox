@@ -183,15 +183,20 @@ class LMSClient:
         status = self.server_status()
         return status.get("players_loop", [])
 
-    def resolve_player_id(self, preferred_name: str = "pocobox") -> str:
-        players = self.list_players()
-        if not players:
-            raise RuntimeError("No LMS players connected.")
-        connected = [p for p in players if p.get("connected")] or players
-        for player in connected:
-            if player.get("name", "").lower() == preferred_name.lower():
-                return player["playerid"]
-        return connected[0]["playerid"]
+    def resolve_player_id(self, preferred_name: str = "pocobox", timeout: float = 2.5) -> str:
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            players = self.list_players()
+            if players:
+                connected = [p for p in players if p.get("connected")] or players
+                for player in connected:
+                    if player.get("name", "").lower() == preferred_name.lower():
+                        return player["playerid"]
+                return connected[0]["playerid"]
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.25)
+        raise RuntimeError(f"No LMS players connected (waited up to {timeout:.1f}s).")
 
     def player_status(self, player_id: str) -> dict[str, Any]:
         return self.call(player_id, ["status", "-", 1, "tags:aAlKdc"])

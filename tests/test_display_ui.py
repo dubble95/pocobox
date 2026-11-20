@@ -68,7 +68,7 @@ class DisplayUITests(unittest.TestCase):
         _check_js_syntax(js)
 
     def test_display_is_fullscreen_without_persistent_bars(self) -> None:
-        self.assertEqual(UI_VERSION, "9")
+        self.assertEqual(UI_VERSION, "10")
         self.assertIn('viewport-fit=cover', DISPLAY_HTML)
         self.assertIn('apple-mobile-web-app-capable', DISPLAY_HTML)
         self.assertIn('apple-mobile-web-app-status-bar-style', DISPLAY_HTML)

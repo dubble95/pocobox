@@ -739,6 +739,14 @@ class YouTubePlaybackManager:
     def set_playing(self, playing: bool) -> None:
         self.playing = bool(playing)
 
+    def set_index(self, index: int) -> dict[str, Any] | None:
+        """Explicitly set the current video index within queue bounds."""
+        if not self.queue:
+            self.index = 0
+            return None
+        self.index = max(0, min(len(self.queue) - 1, int(index)))
+        return self.current_video()
+
     def stop(self) -> None:
         self.active = False
         self.playing = False
@@ -753,4 +761,5 @@ class YouTubePlaybackManager:
             "total": len(self.queue),
             "volume": self.volume,
             "current": cur,
+            "videos": list(self.queue),
         }
