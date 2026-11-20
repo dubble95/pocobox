@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-UI_VERSION = "8"
+UI_VERSION = "9"
 
 DISPLAY_MANIFEST = json.dumps(
     {
@@ -193,18 +193,25 @@ DISPLAY_HTML = r"""<!doctype html>
     flex-shrink: 0;
     touch-action: manipulation;
     position: relative;
+    z-index: 1;
   }
+  /* Expand vertical touch area without overlapping neighboring buttons horizontally */
   .btn::after {
     content: "";
     position: absolute;
-    inset: -12px;
+    top: -12px; bottom: -12px; left: 0; right: 0;
     border-radius: 50%;
   }
   .btn:active { transform: scale(0.92); background: rgba(255, 255, 255, 0.22); }
   .btn.primary {
-    width: clamp(60px, 15vw, 76px); height: clamp(60px, 15vw, 76px);
-    font-size: clamp(23px, 5.8vw, 28px);
+    width: clamp(62px, 15.5vw, 78px); height: clamp(62px, 15.5vw, 78px);
+    font-size: clamp(24px, 5.8vw, 30px);
     background: #ffffff; color: #0b0d12; border-color: #ffffff;
+    margin: 0 clamp(8px, 1.8vw, 16px);
+    z-index: 5;
+  }
+  .btn.primary::after {
+    top: -10px; bottom: -10px; left: -6px; right: -6px;
   }
   .btn.mic {
     background: rgba(56, 189, 248, 0.22); border-color: rgba(56, 189, 248, 0.55);
@@ -262,9 +269,10 @@ DISPLAY_HTML = r"""<!doctype html>
       font-size: clamp(17px, 4.2dvh, 22px);
     }
     body:not(.layout-portrait) .btn.primary {
-      width: clamp(56px, 14dvh, 74px);
-      height: clamp(56px, 14dvh, 74px);
-      font-size: clamp(22px, 5.4dvh, 29px);
+      width: clamp(60px, 15dvh, 76px);
+      height: clamp(60px, 15dvh, 76px);
+      font-size: clamp(23px, 5.8dvh, 30px);
+      margin: 0 clamp(8px, 1.5vw, 16px);
     }
   }
 
@@ -868,9 +876,11 @@ DISPLAY_HTML = r"""<!doctype html>
   let touchStartY = 0;
   let touchStartTime = 0;
   let touchMoved = false;
+  let touchOnControls = false;
 
   function handleTouchStart(e) {
     if (!e.touches || e.touches.length !== 1) return;
+    touchOnControls = Boolean(e.target && e.target.closest(".controls, button, a, .hud"));
     touchStartX = e.touches[0].clientX;
     touchStartY = e.touches[0].clientY;
     touchStartTime = Date.now();
@@ -878,15 +888,16 @@ DISPLAY_HTML = r"""<!doctype html>
   }
 
   function handleTouchMove(e) {
-    if (!e.touches || e.touches.length !== 1) return;
+    if (touchOnControls || !e.touches || e.touches.length !== 1) return;
     const dx = e.touches[0].clientX - touchStartX;
     const dy = e.touches[0].clientY - touchStartY;
-    if (Math.abs(dx) > 12 || Math.abs(dy) > 12) {
+    if (Math.abs(dx) > 15 || Math.abs(dy) > 15) {
       touchMoved = true;
     }
   }
 
   function handleTouchEnd(e) {
+    if (touchOnControls) return;
     if (!e.changedTouches || e.changedTouches.length === 0) return;
     const dx = e.changedTouches[0].clientX - touchStartX;
     const dy = e.changedTouches[0].clientY - touchStartY;
@@ -894,7 +905,7 @@ DISPLAY_HTML = r"""<!doctype html>
     const absDx = Math.abs(dx);
     const absDy = Math.abs(dy);
 
-    if (absDx >= 40 && absDx > absDy * 1.2 && dt < 700) {
+    if (absDx >= 55 && absDx > absDy * 1.4 && dt < 650) {
       if (e.cancelable) e.preventDefault();
       e.stopPropagation();
       if (dx < 0) {
@@ -911,18 +922,7 @@ DISPLAY_HTML = r"""<!doctype html>
       ev.stopPropagation();
       ev.preventDefault();
     }
-    const rect = document.getElementById("artWrap").getBoundingClientRect();
-    const clickX = (ev && typeof ev.clientX === "number") ? (ev.clientX - rect.left) : (rect.width / 2);
-    const width = rect.width;
-    const ratio = width > 0 ? (clickX / width) : 0.5;
-
-    if (ratio > 0.72) {
-      ctrl("next");
-    } else if (ratio < 0.28) {
-      ctrl("prev");
-    } else {
-      ctrl("toggle");
-    }
+    ctrl("toggle");
   }
 
   async function triggerMic() {
