@@ -1,8 +1,9 @@
 [Unit]
-Description=Daily 07:45 KST English Listening Quiz Timer for PocoBox
+Description=Daily English Listening Quiz Timer for PocoBox (Weekdays 07:45, Weekends 09:00 KST)
 
 [Timer]
-OnCalendar=*-*-* 07:45:00 Asia/Seoul
+OnCalendar=Mon..Fri *-*-* 07:45:00 Asia/Seoul
+OnCalendar=Sat,Sun *-*-* 09:00:00 Asia/Seoul
 AccuracySec=5s
 Persistent=false
 Unit=pocobox-daily-quiz.service

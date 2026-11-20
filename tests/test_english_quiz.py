@@ -541,7 +541,8 @@ class TestEnglishQuizDaemonIntegration(unittest.TestCase):
     def test_daily_quiz_systemd_timer_config(self) -> None:
         timer_txt = (REPO_ROOT / "infra" / "voice" / "pocobox-daily-quiz.timer").read_text(encoding="utf-8")
         svc_txt = (REPO_ROOT / "infra" / "voice" / "pocobox-daily-quiz.service").read_text(encoding="utf-8")
-        self.assertIn("OnCalendar=*-*-* 07:45:00 Asia/Seoul", timer_txt)
+        self.assertIn("Mon..Fri *-*-* 07:45:00 Asia/Seoul", timer_txt)
+        self.assertIn("Sat,Sun *-*-* 09:00:00 Asia/Seoul", timer_txt)
         self.assertIn("Persistent=false", timer_txt)
         self.assertIn("pocobox-voice quiz daily", svc_txt)
 

@@ -182,8 +182,8 @@ def _read_daily_quiz_schedule_status() -> dict[str, Any]:
         "configured": False,
         "timer_active": False,
         "timer_substate": "unknown",
-        "schedule_label": "매일 오전 07:45 (KST)",
-        "schedule_expr": "*-*-* 07:45:00 Asia/Seoul",
+        "schedule_label": "평일 07:45 / 주말 09:00 (KST)",
+        "schedule_expr": "Mon..Fri *-*-* 07:45:00 Asia/Seoul / Sat,Sun *-*-* 09:00:00 Asia/Seoul",
         "next_run_kst": "-",
         "next_run_rel": "-",
         "last_run_kst": "-",
@@ -236,10 +236,25 @@ def _read_daily_quiz_schedule_status() -> dict[str, Any]:
             kst_last, rel_last, _ = _parse_systemd_timestamp_to_kst(last_raw)
             info["last_run_kst"] = kst_last
             info["last_run_rel"] = rel_last
-            tc = t_props.get("TimersCalendar", "")
-            if "OnCalendar=" in tc:
-                expr = tc.split("OnCalendar=", 1)[1].split(";", 1)[0].strip()
-                info["schedule_expr"] = expr
+
+            tc_entries: list[str] = []
+            for ln in t_proc.stdout.splitlines():
+                if ln.startswith("TimersCalendar=") and "OnCalendar=" in ln:
+                    expr = ln.split("OnCalendar=", 1)[1].split(";", 1)[0].strip()
+                    if expr not in tc_entries:
+                        tc_entries.append(expr)
+            if tc_entries:
+                info["schedule_expr"] = " / ".join(tc_entries)
+                has_weekday = any("Mon..Fri" in e for e in tc_entries)
+                has_weekend = any("Sat,Sun" in e or "Sat" in e for e in tc_entries)
+                if has_weekday and has_weekend:
+                    info["schedule_label"] = "평일 07:45 / 주말 09:00 (KST)"
+                elif has_weekend and not has_weekday:
+                    info["schedule_label"] = "주말 09:00 (KST)"
+                elif has_weekday:
+                    info["schedule_label"] = "평일 07:45 (KST)"
+                elif len(tc_entries) == 1 and "07:45" in tc_entries[0]:
+                    info["schedule_label"] = "매일 07:45 (KST)"
 
         if s_proc.returncode == 0 and s_proc.stdout.strip():
             s_props = _parse_kv_output(s_proc.stdout)
