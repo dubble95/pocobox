@@ -50,6 +50,7 @@ class ContinuousVoiceListener:
         is_music_playing_fn: Callable[[], bool] | None = None,
         on_wake_detected: Callable[[str], None] | None = None,
         on_wake_utterance: Callable[[bytes | None, str], None] | None = None,
+        is_chime_playing_fn: Callable[[], bool] | None = None,
         telemetry: VoiceTelemetryLogger | None = None,
     ) -> None:
         self.on_utterance = on_utterance
@@ -58,6 +59,7 @@ class ContinuousVoiceListener:
         self.is_music_playing_fn = is_music_playing_fn or (lambda: False)
         self.on_wake_detected = on_wake_detected
         self.on_wake_utterance = on_wake_utterance
+        self.is_chime_playing_fn = is_chime_playing_fn or (lambda: False)
         self.telemetry = telemetry
 
         # Quiet-room thresholds (on cleaned 16kHz audio)
@@ -574,6 +576,14 @@ class ContinuousVoiceListener:
                     else:
                         captured.append(stt_data)
                         if wake_mode:
+                            if self.is_chime_playing_fn():
+                                # Prompt chime is playing out of internal speaker adjacent to mic.
+                                # Discard chime chunks from command capture so STT and VAD are not corrupted.
+                                captured.clear()
+                                wake_speech_seen = False
+                                consecutive_silence = 0
+                                continue
+
                             # Dynamic post-duck command VAD: adapts to actual ducked room/speaker floor
                             # so utterances end cleanly ~0.7s after speech instead of hitting 4.8s max.
                             cmd_threshold = self.wake_cmd_threshold(wake_cmd_floor, wake_speech_seen)

@@ -124,6 +124,9 @@ def format_command_ack(intent: VoiceIntent, is_dac_mode: bool = False) -> str | 
         return f"네, 유튜브에서 {target} 틀어드릴게요."
     if act == IntentAction.STOP_YOUTUBE:
         return "네, 유튜브 재생을 종료할게요."
+    if act == IntentAction.SWITCH_OUTPUT:
+        target = "내장 스피커" if intent.query == "speaker" else "USB DAC"
+        return f"네, 사운드를 {target}으로 출력할게요."
     if act == IntentAction.PAUSE:
         return "네, 음악을 멈출게요."
     if act == IntentAction.RESUME:
@@ -197,6 +200,7 @@ class VoiceExecutor:
         is_dac_mode_fn: Callable[[], bool] | None = None,
         youtube_handler: Callable[[VoiceIntent, bool], ExecutionResult] | None = None,
         is_youtube_active_fn: Callable[[], bool] | None = None,
+        switch_output_handler: Callable[[VoiceIntent, bool], ExecutionResult] | None = None,
     ) -> None:
         self.lms = lms
         self.player_name = player_name
@@ -206,6 +210,7 @@ class VoiceExecutor:
         self.is_dac_mode_fn = is_dac_mode_fn or is_dac_mode
         self.youtube_handler = youtube_handler
         self.is_youtube_active_fn = is_youtube_active_fn or (lambda: False)
+        self.switch_output_handler = switch_output_handler
         self._radio_lock = threading.Lock()
         self._radio_gen = 0
 
@@ -330,6 +335,12 @@ class VoiceExecutor:
             if self.youtube_handler is not None:
                 return self.youtube_handler(intent, dry_run)
             return done(True, "유튜브 재생을 종료합니다.")
+
+        if intent.action == IntentAction.SWITCH_OUTPUT:
+            if self.switch_output_handler is not None:
+                return self.switch_output_handler(intent, dry_run)
+            target = "내장 스피커" if intent.query == "speaker" else "USB DAC"
+            return done(True, f"사운드를 {target}으로 전환했습니다.", {"target": intent.query})
 
         # If YouTube video is actively playing on screen, route pause/resume/next/prev to YouTube
         if self.is_youtube_active_fn() and intent.action in (

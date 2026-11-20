@@ -81,6 +81,35 @@ class TestYouTubeRuleParser(unittest.TestCase):
                 intent = parse_command(text)
                 self.assertEqual(intent.action, IntentAction.STOP_YOUTUBE, f"Failed for {text}")
 
+    def test_switch_output_phrasings(self) -> None:
+        dac_cases = [
+            "사운드는 dac 쪽으로 출력해줘",
+            "사운드 dac으로 출력해줘",
+            "소리 dac으로 바꿔줘",
+            "dac으로 출력해줘",
+            "사운드 dac으로 해줘",
+        ]
+        for text in dac_cases:
+            with self.subTest(text=text):
+                intent = parse_command(text)
+                self.assertEqual(intent.action, IntentAction.SWITCH_OUTPUT)
+                self.assertEqual(intent.query, "dac")
+
+        speaker_cases = [
+            "사운드 스피커로 출력해줘",
+            "소리 내장 스피커로 바꿔줘",
+        ]
+        for text in speaker_cases:
+            with self.subTest(text=text):
+                intent = parse_command(text)
+                self.assertEqual(intent.action, IntentAction.SWITCH_OUTPUT)
+                self.assertEqual(intent.query, "speaker")
+
+        # YouTube with DAC suffix strips DAC cleanly into query
+        intent_yt = parse_command("kpop 뮤직비디오 dac 쪽으로 틀어줘")
+        self.assertEqual(intent_yt.action, IntentAction.PLAY_YOUTUBE)
+        self.assertEqual(intent_yt.query, "kpop")
+
 
 class TestYouTubeCatalogAndPlaybackManager(unittest.TestCase):
     def test_catalog_integrity(self) -> None:
@@ -256,6 +285,54 @@ class TestDaemonYouTubeEndpointsAndState(unittest.TestCase):
         with mock.patch.object(client, "play_url", return_value={"ok": True}) as mock_play:
             client.youtube_play("pid1", "11cta61wi0g")
             mock_play.assert_called_with("pid1", "youtube://www.youtube.com/v/11cta61wi0g")
+
+    def test_youtube_dac_routing_lifecycle(self) -> None:
+        from voice_control.feedback import (
+            find_usb_dac_pulse_card,
+            find_usb_dac_pulse_sink,
+        )
+
+        sample_cards = "1\talsa_card.platform-sound\tmodule-alsa-card.c\n8\talsa_card.usb-Burr-Brown_from_TI_USB_Audio_DAC-00\tmodule-alsa-card.c\n"
+        self.assertEqual(
+            find_usb_dac_pulse_card(sample_cards),
+            "alsa_card.usb-Burr-Brown_from_TI_USB_Audio_DAC-00",
+        )
+        self.assertIsNone(find_usb_dac_pulse_card("1\talsa_card.platform-sound\tmodule-alsa-card.c\n"))
+
+        sample_sinks = "1\talsa_output.platform-sound.Voice_Call__Speaker__sink\tmodule-alsa-card.c\n3\talsa_output.usb-Burr-Brown_from_TI_USB_Audio_DAC-00.analog-stereo\tmodule-alsa-card.c\n"
+        self.assertEqual(
+            find_usb_dac_pulse_sink(sample_sinks),
+            "alsa_output.usb-Burr-Brown_from_TI_USB_Audio_DAC-00.analog-stereo",
+        )
+
+        with mock.patch.object(self.ctrl, "is_dac_mode", return_value=True), \
+             mock.patch("voice_control.daemon.enable_usb_dac_pulseaudio", return_value="alsa_output.usb-dac.analog-stereo") as mock_enable, \
+             mock.patch("voice_control.daemon.release_usb_dac_pulseaudio", return_value=True) as mock_release:
+
+            # Play YouTube -> routes to DAC!
+            intent = VoiceIntent(action=IntentAction.PLAY_YOUTUBE, query="kpop")
+            res_play = self.ctrl.handle_youtube_intent(intent)
+            self.assertTrue(res_play.ok)
+            mock_enable.assert_called_once()
+
+            # Switch to speaker
+            res_spk = self.ctrl.handle_switch_output(VoiceIntent(action=IntentAction.SWITCH_OUTPUT, query="speaker"))
+            self.assertTrue(res_spk.ok)
+            self.assertIn("내장 스피커", res_spk.message)
+            mock_release.assert_called_once()
+
+            # Switch to DAC
+            mock_enable.reset_mock()
+            res_dac = self.ctrl.handle_switch_output(VoiceIntent(action=IntentAction.SWITCH_OUTPUT, query="dac"))
+            self.assertTrue(res_dac.ok)
+            self.assertIn("USB DAC", res_dac.message)
+            mock_enable.assert_called_once()
+
+            # Stop YouTube -> releases DAC back to direct ALSA!
+            mock_release.reset_mock()
+            res_stop = self.ctrl.handle_youtube_intent(VoiceIntent(action=IntentAction.STOP_YOUTUBE))
+            self.assertTrue(res_stop.ok)
+            mock_release.assert_called_once()
 
 
 if __name__ == "__main__":

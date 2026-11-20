@@ -53,8 +53,11 @@ from voice_control.executor import (  # noqa: E402
     is_dac_mode,
 )
 from voice_control.feedback import (  # noqa: E402
+    enable_usb_dac_pulseaudio,
     get_internal_speaker_volume,
+    is_usb_dac_pulseaudio_active,
     play_chime,
+    release_usb_dac_pulseaudio,
     set_internal_speaker_volume,
 )
 from voice_control.intent_schema import ExecutionResult, IntentAction, VoiceIntent  # noqa: E402
@@ -325,6 +328,7 @@ class VoiceController:
             is_dac_mode_fn=self.is_dac_mode,
             youtube_handler=self.handle_youtube_intent,
             is_youtube_active_fn=lambda: self.youtube.active,
+            switch_output_handler=self.handle_switch_output,
         )
         self.telemetry = VoiceTelemetryLogger()
         self.interpreter = HybridVoiceInterpreter(telemetry=self.telemetry)
@@ -339,6 +343,7 @@ class VoiceController:
         # Built-in speaker volume, chime, and TTS voice settings (persisted across restarts)
         self._prefs_path = Path(os.environ.get("VOICE_PREFS_FILE", "/srv/pocobox/logs/voice_prefs.json"))
         self.enable_chime = _env_bool("ENABLE_CHIME", True)
+        self._chime_playing: bool = False
         self.chime_volume = max(0.05, min(1.0, float(os.environ.get("VOICE_CHIME_VOLUME", "0.25"))))
         self.enable_tts = _env_bool("ENABLE_TTS", True)
         self.enable_command_ack = _env_bool("ENABLE_COMMAND_ACK", True)
@@ -389,6 +394,7 @@ class VoiceController:
                 is_music_playing_fn=self._is_music_playing,
                 on_wake_detected=self.handle_wake_detected,
                 on_wake_utterance=self.handle_wake_utterance,
+                is_chime_playing_fn=lambda: self._chime_playing,
                 telemetry=self.telemetry,
             )
 
@@ -451,7 +457,13 @@ class VoiceController:
             pass
 
     def _play_chime(self, kind: str = "listen") -> None:
-        play_chime(kind, volume=self.chime_volume, enabled=self.enable_chime)
+        if not self.enable_chime:
+            return
+        self._chime_playing = True
+        try:
+            play_chime(kind, volume=self.chime_volume, enabled=self.enable_chime)
+        finally:
+            self._chime_playing = False
 
     def _is_music_playing(self) -> bool:
         try:
@@ -538,6 +550,8 @@ class VoiceController:
         """Fired immediately when local Vosk spots '포코야'/'헤이 포코'."""
         self._wake_display(12.0)
         self._begin_duck()
+        if self.enable_chime:
+            self._chime_playing = True
         threading.Thread(target=self._play_chime, args=("listen",), daemon=True).start()
         self.events.publish({
             "type": "transcript",
@@ -1541,6 +1555,52 @@ class VoiceController:
         self._wake_display(15.0)
         return {"ok": True, "action": action}
 
+    def route_youtube_to_dac_if_available(self) -> str | None:
+        """Route YouTube / browser audio to USB DAC if plugged in."""
+        if not self.is_dac_mode():
+            return None
+        sink = enable_usb_dac_pulseaudio()
+        if sink:
+            log.info("Routed YouTube audio to USB DAC sink '%s'", sink)
+        return sink
+
+    def release_youtube_from_dac(self) -> bool:
+        """Release USB DAC from PulseAudio back to direct ALSA for LMS/Squeezelite."""
+        ok = release_usb_dac_pulseaudio()
+        if ok:
+            log.info("Released USB DAC from PulseAudio back to direct ALSA for Squeezelite")
+        return ok
+
+    def handle_switch_output(self, intent: VoiceIntent, dry_run: bool = False) -> ExecutionResult:
+        """Handle switching current audio output between USB DAC and internal speaker."""
+        t0 = time.monotonic()
+        target = (intent.query or "dac").strip().lower()
+        if dry_run:
+            return ExecutionResult(ok=True, action=intent.action, message=f"사운드 {target} 전환 확인(dry-run)")
+        if target == "speaker":
+            self.release_youtube_from_dac()
+            return ExecutionResult(
+                ok=True,
+                action=intent.action,
+                message="사운드를 내장 스피커로 출력합니다.",
+                intent=intent.to_dict(),
+                latency_ms=round((time.monotonic() - t0) * 1000.0, 1),
+            )
+        sink = self.route_youtube_to_dac_if_available()
+        if sink:
+            msg = f"사운드를 USB DAC({sink})으로 출력합니다."
+            ok = True
+        else:
+            msg = "연결된 USB DAC을 찾지 못했거나 활성화하지 못했습니다."
+            ok = False
+        return ExecutionResult(
+            ok=ok,
+            action=intent.action,
+            message=msg,
+            intent=intent.to_dict(),
+            latency_ms=round((time.monotonic() - t0) * 1000.0, 1),
+        )
+
     def handle_youtube_intent(self, intent: VoiceIntent, dry_run: bool = False) -> ExecutionResult:
         """Handle YouTube and continuous K-Pop music video streaming commands."""
         t0 = time.monotonic()
@@ -1564,6 +1624,9 @@ class VoiceController:
                 self.lms.pause(pid, 1)
             except Exception:
                 pass
+
+            # Route YouTube/browser audio through external USB DAC if present
+            self.route_youtube_to_dac_if_available()
 
             # Search or retrieve playlist
             videos = search_youtube_videos(query, lms_client=self.lms, player_id=self.player_name)
@@ -1595,6 +1658,7 @@ class VoiceController:
             if dry_run:
                 return ExecutionResult(ok=True, action=act, message="유튜브 재생 종료 확인(dry-run)")
             self.youtube.stop()
+            self.release_youtube_from_dac()
             self.events.publish({"type": "youtube_cmd", "cmd": "stop", "ts": time.time()})
             return ExecutionResult(
                 ok=True,
@@ -2150,6 +2214,7 @@ def make_handler(controller: VoiceController) -> type[BaseHTTPRequestHandler]:
                     return
                 act = str(data.get("action", "")).lower()
                 if act == "load":
+                    controller.route_youtube_to_dac_if_available()
                     q = data.get("query", "kpop")
                     vids = data.get("videos")
                     if not vids or not isinstance(vids, list):
@@ -2332,6 +2397,8 @@ def main() -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        if controller.youtube.active:
+            controller.release_youtube_from_dac()
         if controller.continuous_listener:
             controller.continuous_listener.stop()
         server.server_close()

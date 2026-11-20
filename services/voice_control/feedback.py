@@ -51,6 +51,190 @@ def select_internal_speaker_sink(sinks_short_output: str) -> str | None:
     return None
 
 
+def find_usb_dac_pulse_card(cards_short_output: str) -> str | None:
+    """Find the USB DAC PulseAudio card name from `pactl list short cards`."""
+    for line in (cards_short_output or "").splitlines():
+        parts = line.strip().split("\t")
+        if len(parts) >= 2 and parts[1].startswith("alsa_card.usb-"):
+            return parts[1]
+    return None
+
+
+def find_usb_dac_pulse_sink(sinks_short_output: str) -> str | None:
+    """Find the USB DAC PulseAudio sink name from `pactl list short sinks`."""
+    for line in (sinks_short_output or "").splitlines():
+        parts = line.strip().split("\t")
+        if len(parts) >= 2 and parts[1].startswith("alsa_output.usb-"):
+            return parts[1]
+    return None
+
+
+def is_usb_dac_pulseaudio_active(env: dict[str, str] | None = None) -> bool:
+    """Return True if a USB DAC sink is currently active and available in PulseAudio."""
+    pa_env = env if env is not None else pulse_env()
+    try:
+        res = subprocess.run(
+            ["pactl", "list", "short", "sinks"],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            env=pa_env,
+            check=False,
+        )
+        if res.returncode == 0:
+            return bool(find_usb_dac_pulse_sink(res.stdout))
+    except Exception:
+        pass
+    return False
+
+
+def enable_usb_dac_pulseaudio(env: dict[str, str] | None = None) -> str | None:
+    """Enable USB Audio DAC profile in PulseAudio and route all browser/system audio to it."""
+    pa_env = env if env is not None else pulse_env()
+    try:
+        res_cards = subprocess.run(
+            ["pactl", "list", "short", "cards"],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            env=pa_env,
+            check=False,
+        )
+        if res_cards.returncode != 0:
+            return None
+        usb_card = find_usb_dac_pulse_card(res_cards.stdout)
+        if not usb_card:
+            return None
+
+        # Set USB card profile to analog-stereo (or iec958-stereo)
+        subprocess.run(
+            ["pactl", "set-card-profile", usb_card, "output:analog-stereo"],
+            capture_output=True,
+            timeout=2.0,
+            env=pa_env,
+            check=False,
+        )
+
+        # Locate the newly created USB sink
+        res_sinks = subprocess.run(
+            ["pactl", "list", "short", "sinks"],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            env=pa_env,
+            check=False,
+        )
+        usb_sink = find_usb_dac_pulse_sink(res_sinks.stdout)
+        if not usb_sink:
+            return None
+
+        # Set as default sink for browser and new streams
+        subprocess.run(
+            ["pactl", "set-default-sink", usb_sink],
+            capture_output=True,
+            timeout=2.0,
+            env=pa_env,
+            check=False,
+        )
+
+        # Move active sink-inputs (e.g. Firefox) to the USB DAC sink
+        res_inputs = subprocess.run(
+            ["pactl", "list", "short", "sink-inputs"],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            env=pa_env,
+            check=False,
+        )
+        for line in (res_inputs.stdout or "").splitlines():
+            parts = line.strip().split("\t")
+            if parts and parts[0].isdigit():
+                subprocess.run(
+                    ["pactl", "move-sink-input", parts[0], usb_sink],
+                    capture_output=True,
+                    timeout=2.0,
+                    env=pa_env,
+                    check=False,
+                )
+
+        # Unmute and lock DAC sink volume to 100% (0.00 dB unity gain)
+        subprocess.run(
+            ["pactl", "set-sink-volume", usb_sink, "100%"],
+            capture_output=True,
+            timeout=2.0,
+            env=pa_env,
+            check=False,
+        )
+        subprocess.run(
+            ["pactl", "set-sink-mute", usb_sink, "0"],
+            capture_output=True,
+            timeout=2.0,
+            env=pa_env,
+            check=False,
+        )
+        return usb_sink
+    except Exception:
+        return None
+
+
+def release_usb_dac_pulseaudio(env: dict[str, str] | None = None) -> bool:
+    """Release USB Audio DAC from PulseAudio back to 'off' so Squeezelite has exclusive direct ALSA access."""
+    pa_env = env if env is not None else pulse_env()
+    try:
+        speaker_sink = resolve_internal_speaker_sink(pa_env)
+        if speaker_sink:
+            subprocess.run(
+                ["pactl", "set-default-sink", speaker_sink],
+                capture_output=True,
+                timeout=2.0,
+                env=pa_env,
+                check=False,
+            )
+            # Move active sink-inputs back to speaker sink
+            res_inputs = subprocess.run(
+                ["pactl", "list", "short", "sink-inputs"],
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+                env=pa_env,
+                check=False,
+            )
+            for line in (res_inputs.stdout or "").splitlines():
+                parts = line.strip().split("\t")
+                if parts and parts[0].isdigit():
+                    subprocess.run(
+                        ["pactl", "move-sink-input", parts[0], speaker_sink],
+                        capture_output=True,
+                        timeout=2.0,
+                        env=pa_env,
+                        check=False,
+                    )
+
+        # Turn USB audio card profile(s) to 'off'
+        res_cards = subprocess.run(
+            ["pactl", "list", "short", "cards"],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            env=pa_env,
+            check=False,
+        )
+        if res_cards.returncode == 0:
+            for line in (res_cards.stdout or "").splitlines():
+                parts = line.strip().split("\t")
+                if len(parts) >= 2 and parts[1].startswith("alsa_card.usb-"):
+                    subprocess.run(
+                        ["pactl", "set-card-profile", parts[1], "off"],
+                        capture_output=True,
+                        timeout=2.0,
+                        env=pa_env,
+                        check=False,
+                    )
+        return True
+    except Exception:
+        return False
+
+
 def resolve_internal_speaker_sink(env: dict[str, str] | None = None, force_refresh: bool = False) -> str | None:
     """Resolve the PulseAudio sink name for the built-in speaker (honors VOICE_SPEAKER_SINK override)."""
     global _CACHED_SPEAKER_SINK

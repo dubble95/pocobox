@@ -388,6 +388,21 @@ def parse_command(raw_text: str) -> VoiceIntent:
             language=lang,
         )
 
+    # 8.3 AUDIO OUTPUT SWITCH ("사운드는 dac 쪽으로 출력해줘", "소리 dac으로 바꿔줘", "스피커로 출력해줘")
+    if (
+        re.search(r"(?:사운드|소리|오디오|출력).*(?:dac|덱|스피커|내장|외장)", low)
+        or re.search(r"(?:dac|덱|스피커|내장|외장).*(?:출력|바꿔|전환|해줘|틀어줘)", low)
+    ) and not re.search(r"(유튜브|유투브|youtube|뮤직\s*비디오|뮤비|노래|음악|곡)", low):
+        target = "speaker" if any(k in low for k in ("스피커", "내장", "phone")) else "dac"
+        return VoiceIntent(
+            action=IntentAction.SWITCH_OUTPUT,
+            raw_text=raw_text,
+            query=target,
+            confidence=0.98,
+            wake_word_detected=wake_detected,
+            language=lang,
+        )
+
     # 8.5 YOUTUBE / K-POP MUSIC VIDEO ("유튜브 틀어줘", "kpop 뮤직비디오 틀어줘", "뉴진스 뮤비 틀어줘")
     has_ko_play_intent = bool(_KO_PLAY_SUFFIX_RE.search(text))
     has_en_play_intent = bool(_EN_PLAY_PREFIX_RE.search(text))
@@ -408,6 +423,9 @@ def parse_command(raw_text: str) -> VoiceIntent:
             if has_ko_play_intent:
                 extracted = _KO_PLAY_SUFFIX_RE.sub("", extracted)
             extracted = re.sub(r"^(?:유튜브|유투브|youtube)(?:에서|로|의)?\s*", "", extracted, flags=re.IGNORECASE).strip()
+            extracted = re.sub(r"(?:사운드는|소리는|사운드|소리)?\s*(?:dac|덱|외장|스피커)\s*(?:으로|로|쪽으로)?\s*(?:출력해줘|틀어줘|재생해줘|해줘)?", "", extracted, flags=re.IGNORECASE).strip()
+            extracted = re.sub(r"(?:dac|덱|외장|스피커)\s*(?:으로|로|쪽으로)?", "", extracted, flags=re.IGNORECASE).strip()
+            extracted = re.sub(r"\s*(?:쪽으로|으로|로)$", "", extracted).strip()
             extracted = re.sub(r"(?:뮤직\s*비디오|뮤비|\bmv\b|music\s+video|동영상|영상)", "", extracted, flags=re.IGNORECASE).strip()
             extracted = re.sub(r"\s+(?:노래|음악|곡|영상|좀|한번|한 번)$", "", extracted).strip()
             extracted = re.sub(r"^(?:노래|음악)\s+", "", extracted).strip()
