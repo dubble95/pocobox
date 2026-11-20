@@ -15,7 +15,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "services"))
 sys.path.insert(0, str(REPO_ROOT / "services" / "lms_client"))
 
-from lms_client import LMSClient, extract_tidal_track_id  # noqa: E402
+from lms_client import (  # noqa: E402
+    LMSClient,
+    extract_tidal_track_id,
+    is_classical_movement_work,
+    parse_movement_number,
+)
 from voice_control.audio_capture import analyze_wav_bytes, pcm_to_wav_bytes, trim_silence_wav  # noqa: E402
 from voice_control.cloud_stt_intent import HybridVoiceInterpreter  # noqa: E402
 from voice_control.executor import VoiceExecutor, format_command_ack  # noqa: E402
@@ -91,6 +96,7 @@ class FakeLMSClient(LMSClient):
                 return {
                     "loop_loop": [
                         {"id": f"7_{search}.2", "name": "Artists"},
+                        {"id": f"7_{search}.3", "name": "Albums"},
                         {"id": f"7_{search}.4", "name": "Songs"},
                     ]
                 }
@@ -108,10 +114,56 @@ class FakeLMSClient(LMSClient):
                 return {"loop_loop": [{"id": "7_cp.2.0", "name": "Coldplay", "isaudio": 0, "hasitems": 1}]}
             if item_id == "7_cp.2.0":
                 return {"loop_loop": [{"id": "7_cp.2.0.top", "name": "Top Tracks", "isaudio": 1}]}
+            # Simulate Beethoven Symphony No. 5 album with 4 movements
+            if item_id == "7_Beethoven Symphony No. 5.3":
+                return {
+                    "loop_loop": [
+                        {
+                            "id": "7_beet5_alb",
+                            "name": "Beethoven: Symphony No. 5, Op. 67",
+                            "type": "playlist",
+                            "isaudio": 1,
+                            "hasitems": 1,
+                        }
+                    ]
+                }
+            if item_id == "7_beet5_alb":
+                return {
+                    "loop_loop": [
+                        {"id": "7_b5.0", "name": "Symphony No. 5 in C Minor, Op. 67: I. Allegro con brio", "isaudio": 1, "type": "audio"},
+                        {"id": "7_b5.1", "name": "Symphony No. 5 in C Minor, Op. 67: II. Andante con moto", "isaudio": 1, "type": "audio"},
+                        {"id": "7_b5.2", "name": "Symphony No. 5 in C Minor, Op. 67: III. Allegro", "isaudio": 1, "type": "audio"},
+                        {"id": "7_b5.3", "name": "Symphony No. 5 in C Minor, Op. 67: IV. Allegro", "isaudio": 1, "type": "audio"},
+                    ]
+                }
+            # Simulate Rachmaninoff Piano Concerto No. 2 album with 3 movements
+            if item_id == "7_Rachmaninoff Piano Concerto No. 2.3":
+                return {
+                    "loop_loop": [
+                        {
+                            "id": "7_rach2_alb",
+                            "name": "Rachmaninoff: Piano Concerto No. 2 in C Minor, Op. 18",
+                            "type": "playlist",
+                            "isaudio": 1,
+                            "hasitems": 1,
+                        }
+                    ]
+                }
+            if item_id == "7_rach2_alb":
+                return {
+                    "loop_loop": [
+                        {"id": "7_r2.0", "name": "Piano Concerto No. 2 in C Minor, Op. 18: I. Moderato", "isaudio": 1, "type": "audio"},
+                        {"id": "7_r2.1", "name": "Piano Concerto No. 2 in C Minor, Op. 18: II. Adagio sostenuto", "isaudio": 1, "type": "audio"},
+                        {"id": "7_r2.2", "name": "Piano Concerto No. 2 in C Minor, Op. 18: III. Allegro scherzando", "isaudio": 1, "type": "audio"},
+                    ]
+                }
             return {"loop_loop": []}
         if command[0] == "tidal" and command[1] == "playlist" and command[2] == "play":
             self.played_items.append(command[3])
             self.mode = "play"
+            return {}
+        if command[0] == "tidal" and command[1] == "playlist" and command[2] == "add":
+            self.played_items.append(f"add:{command[3]}")
             return {}
         return {}
 
@@ -135,6 +187,90 @@ class TestVoiceExecutorAndCloud(unittest.TestCase):
         self.assertTrue(res.ok, res.message)
         self.assertEqual(res.details["category"], "artists")
         self.assertEqual(lms.played_items[-1], "item_id:7_cp.2.0.top")
+
+    def test_classical_movement_parser_and_work_detector(self) -> None:
+        self.assertTrue(is_classical_movement_work("베토벤 교향곡 5번"))
+        self.assertTrue(is_classical_movement_work("차이코프스키 심포니 6번"))
+        self.assertTrue(is_classical_movement_work("라흐마니노프 피아노 협주곡 2번"))
+        self.assertTrue(is_classical_movement_work("모차르트 피아노 소나타 16번"))
+        self.assertTrue(is_classical_movement_work("바흐 첼로 모음곡 1번"))
+        self.assertTrue(is_classical_movement_work("현악 4중주 1번"))
+        self.assertTrue(is_classical_movement_work("Beethoven Symphony No. 5"))
+        self.assertTrue(is_classical_movement_work("Chopin Piano Sonata No. 2"))
+        self.assertFalse(is_classical_movement_work("아이유 밤편지"))
+        self.assertFalse(is_classical_movement_work("콜드플레이 픽스 유"))
+        self.assertFalse(is_classical_movement_work("쇼팽 겨울바람"))
+
+        # Movement number parser tests
+        self.assertEqual(parse_movement_number("Symphony No. 5: I. Allegro con brio"), 1)
+        self.assertEqual(parse_movement_number("Symphony No. 5: II. Andante con moto"), 2)
+        self.assertEqual(parse_movement_number("Piano Concerto No. 2: 2. Adagio sostenuto"), 2)
+        self.assertEqual(parse_movement_number("Piano Concerto No. 2: 3. Allegro scherzando"), 3)
+        self.assertEqual(parse_movement_number("Piano Sonata No. 2: III. Marche funèbre"), 3)
+        self.assertEqual(parse_movement_number("Piano Sonata No. 2: IV. Finale"), 4)
+        self.assertEqual(parse_movement_number("Piano Concerto No. 1: 1a. Allegro non troppo"), 1)
+        self.assertEqual(parse_movement_number("Cello Suite No. 1: I. Prélude"), 1)
+        self.assertEqual(parse_movement_number("베토벤 교향곡 5번 1악장"), 1)
+        self.assertEqual(parse_movement_number("라흐마니노프 협주곡 제2악장"), 2)
+        self.assertIsNone(parse_movement_number("Through the Night"))
+        self.assertIsNone(parse_movement_number("Fix You"))
+
+    def test_classical_multi_movement_sequential_playback(self) -> None:
+        lms = FakeLMSClient()
+        executor = VoiceExecutor(lms)
+        intent = parse_command("베토벤 교향곡 5번 틀어줘")
+        self.assertEqual(intent.search_type, "classical")
+
+        res = executor.execute(intent)
+        self.assertTrue(res.ok, res.message)
+        self.assertEqual(res.details["category"], "classical_work")
+        self.assertEqual(res.details["movements_count"], 4)
+        self.assertIn("전 4악장", res.details["title"])
+
+        # Movement 1 played first (playlist play), followed by movements 2, 3, 4 sequentially (playlist add)
+        expected_sequence = [
+            "item_id:7_b5.0",
+            "add:item_id:7_b5.1",
+            "add:item_id:7_b5.2",
+            "add:item_id:7_b5.3",
+        ]
+        self.assertEqual(lms.played_items, expected_sequence)
+
+    def test_classical_concerto_sequential_playback(self) -> None:
+        lms = FakeLMSClient()
+        executor = VoiceExecutor(lms)
+        intent = parse_command("라흐마니노프 피아노 협주곡 2번 틀어줘")
+        self.assertEqual(intent.search_type, "classical")
+
+        res = executor.execute(intent)
+        self.assertTrue(res.ok, res.message)
+        self.assertEqual(res.details["category"], "classical_work")
+        self.assertEqual(res.details["movements_count"], 3)
+        self.assertIn("전 3악장", res.details["title"])
+
+        expected_sequence = [
+            "item_id:7_r2.0",
+            "add:item_id:7_r2.1",
+            "add:item_id:7_r2.2",
+        ]
+        self.assertEqual(lms.played_items, expected_sequence)
+
+    def test_classical_explicit_movement_request(self) -> None:
+        lms = FakeLMSClient()
+        executor = VoiceExecutor(lms)
+        # Explicit request for Movement 2
+        intent = parse_command("베토벤 교향곡 5번 2악장 틀어줘")
+        res = executor.execute(intent)
+        self.assertTrue(res.ok, res.message)
+        self.assertEqual(res.details["category"], "classical_work")
+        self.assertEqual(res.details["start_movement"], 2)
+        # Should start from Movement 2 and queue subsequent movements 3 and 4
+        expected_sequence = [
+            "item_id:7_b5.1",
+            "add:item_id:7_b5.2",
+            "add:item_id:7_b5.3",
+        ]
+        self.assertEqual(lms.played_items, expected_sequence)
 
     def test_playback_volume_and_mix_controls(self) -> None:
         lms = FakeLMSClient()

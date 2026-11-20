@@ -378,9 +378,27 @@ _CLASSICAL_WORK_TERMS: tuple[tuple[str, str], ...] = (
     ("첼로 모음곡", "Cello Suite"),
     ("첼로모음곡", "Cello Suite"),
     ("교향곡", "Symphony"),
+    ("심포니", "Symphony"),
     ("협주곡", "Concerto"),
+    ("콘체르토", "Concerto"),
     ("협주", "Concerto"),
     ("소나타", "Sonata"),
+    ("현악 4중주", "String Quartet"),
+    ("현악4중주", "String Quartet"),
+    ("현악 사중주", "String Quartet"),
+    ("현악사중주", "String Quartet"),
+    ("4중주", "Quartet"),
+    ("사중주", "Quartet"),
+    ("피아노 3중주", "Piano Trio"),
+    ("피아노3중주", "Piano Trio"),
+    ("피아노 삼중주", "Piano Trio"),
+    ("피아노삼중주", "Piano Trio"),
+    ("3중주", "Trio"),
+    ("삼중주", "Trio"),
+    ("5중주", "Quintet"),
+    ("오중주", "Quintet"),
+    ("세레나데", "Serenade"),
+    ("디베르티멘토", "Divertimento"),
     ("녹턴", "Nocturne"),
     ("전주곡", "Prelude"),
     ("에튀드", "Etude"),
@@ -401,8 +419,21 @@ _CLASSICAL_WORK_TERMS: tuple[tuple[str, str], ...] = (
 )
 
 _CLASSICAL_WORK_GUARD_RE = re.compile(
-    r"(?:협주곡?|교향곡|소나타|녹턴|전주곡|에튀드|연습곡|모음곡|4중주|사중주|트리오)"
+    r"(?:협주곡?|콘체르토|교향곡|심포니|소나타|녹턴|전주곡|에튀드|연습곡|모음곡|[345]중주|[삼사오]중주|트리오|세레나데|디베르티멘토)"
 )
+
+_CLASSICAL_MOVEMENT_WORK_RE = re.compile(
+    r"(?:협주곡?|콘체르토|교향곡|심포니|소나타|모음곡|[345]중주|[삼사오]중주|트리오|세레나데|디베르티멘토|"
+    r"브란덴부르크|사계|골드베르크|"
+    r"\bconcerto\b|\bsymphon(?:y|ie)\b|\bsonat[ae]\b|\bsuite\b|\bquartet[te]?\b|\btrio\b|\bquintet[te]?\b|"
+    r"\bserenade\b|\bdivertimento\b|\bbrandenburg\b|\bfour\s+seasons\b|\bgoldberg\b)",
+    re.IGNORECASE,
+)
+
+
+def is_classical_movement_work(text: str) -> bool:
+    """Return True if text refers to a classical form composed of multiple movements."""
+    return bool(_CLASSICAL_MOVEMENT_WORK_RE.search(text))
 
 _SINO_WORK_NUM_RE = re.compile(r"(?:제\s*)?([일이삼사오육칠팔구]|십)\s*번")
 
@@ -609,6 +640,12 @@ def _translate_classical_terms(text: str) -> str:
     )
     out = re.sub(r"제\s*(\d+)\s*번", r" No. \1 ", out)
     out = re.sub(r"(\d+)\s*번", r" No. \1 ", out)
+    out = re.sub(
+        r"(?:제\s*)?([일이삼사오육칠팔구]|십)\s*악장",
+        lambda m: f" Movement {10 if m.group(1) == '십' else _SINO_DIGITS[m.group(1)]} ",
+        out,
+    )
+    out = re.sub(r"(?:제\s*)?(\d+)\s*악장", r" Movement \1 ", out)
     return re.sub(r"\s+", " ", out).strip()
 
 

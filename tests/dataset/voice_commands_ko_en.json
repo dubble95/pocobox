@@ -166,5 +166,11 @@
 
   {"id": "en_play_01", "category": "english_play_variants", "text": "can you play Coldplay", "expected_action": "play_search", "expected_query_contains": "Coldplay"},
   {"id": "en_play_02", "category": "english_play_variants", "text": "let me hear IU", "expected_action": "play_search", "expected_query_contains": "IU"},
-  {"id": "en_play_03", "category": "english_play_variants", "text": "queue up Jazz", "expected_action": "play_search", "expected_query_contains": "Jazz"}
+  {"id": "en_play_03", "category": "english_play_variants", "text": "queue up Jazz", "expected_action": "play_search", "expected_query_contains": "Jazz"},
+
+  {"id": "classic_01", "category": "classical_works", "text": "베토벤 교향곡 5번 틀어줘", "expected_action": "play_search", "expected_query_contains": "Symphony No. 5", "expected_search_type": "classical"},
+  {"id": "classic_02", "category": "classical_works", "text": "차이코프스키 바이올린 협주곡 틀어줘", "expected_action": "play_search", "expected_query_contains": "Violin Concerto", "expected_search_type": "classical"},
+  {"id": "classic_03", "category": "classical_works", "text": "라흐마니노프 피아노 협주곡 2번 틀어줘", "expected_action": "play_search", "expected_query_contains": "Piano Concerto No. 2", "expected_search_type": "classical"},
+  {"id": "classic_04", "category": "classical_works", "text": "쇼팽 피아노 소나타 2번 틀어줘", "expected_action": "play_search", "expected_query_contains": "Piano Sonata No. 2", "expected_search_type": "classical"},
+  {"id": "classic_05", "category": "classical_works", "text": "베토벤 교향곡 5번 1악장 틀어줘", "expected_action": "play_search", "expected_query_contains": "Symphony No. 5", "expected_search_type": "classical"}
 ]

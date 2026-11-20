@@ -380,7 +380,8 @@ class VoiceExecutor:
                 if not res.get("ok"):
                     return done(False, f"TIDAL에서 '{queries[0]}' 검색 결과를 찾지 못했습니다.", res)
                 if not dry_run:
-                    self._schedule_tidal_track_radio(player_id)
+                    if res.get("category") != "classical_work":
+                        self._schedule_tidal_track_radio(player_id)
                 verb = "검색 확인(dry-run)" if dry_run else "재생 시작"
                 return done(
                     True,

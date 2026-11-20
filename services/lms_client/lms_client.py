@@ -55,10 +55,99 @@ def _score_candidate(item: dict[str, Any], query: str) -> float:
         "karaoke", "instrumental", "tribute", "lullaby", "ringtone",
         "originally perf", "made famous", "in the style of",
         "orchestral", "music box", "piano version", "8-bit", "(cover)",
+        "transcribed", "transcription", "arranged", "arrangement",
     ):
         if noise in name_l and noise not in query_l:
             score -= 35.0
     return score
+
+
+_ROMAN_NUMERALS: dict[str, int] = {
+    "I": 1, "II": 2, "III": 3, "IV": 4, "V": 5,
+    "VI": 6, "VII": 7, "VIII": 8, "IX": 9, "X": 10,
+    "XI": 11, "XII": 12,
+}
+
+_SINO_MVT_MAP: dict[str, int] = {
+    "일": 1, "이": 2, "삼": 3, "사": 4, "오": 5, "육": 6, "칠": 7, "팔": 8, "구": 9, "십": 10,
+}
+
+_CLASSICAL_MOVEMENT_WORK_RE = re.compile(
+    r"(?:협주곡?|콘체르토|교향곡|심포니|소나타|모음곡|[345]중주|[삼사오]중주|트리오|세레나데|디베르티멘토|"
+    r"브란덴부르크|사계|골드베르크|"
+    r"\bconcerto\b|\bsymphon(?:y|ie)\b|\bsonat[ae]\b|\bsuite\b|\bquartet[te]?\b|\btrio\b|\bquintet[te]?\b|"
+    r"\bserenade\b|\bdivertimento\b|\bbrandenburg\b|\bfour\s+seasons\b|\bgoldberg\b)",
+    re.IGNORECASE,
+)
+
+
+def is_classical_movement_work(text: str) -> bool:
+    """Return True if text refers to a classical form composed of multiple movements."""
+    return bool(_CLASSICAL_MOVEMENT_WORK_RE.search(text))
+
+
+def parse_movement_number(text: str) -> int | None:
+    """Extract 1-based movement number from a track title or query."""
+    if not text:
+        return None
+
+    # Check Korean movement phrase: "1악장", "제1악장", "일악장"
+    m_ko = re.search(r"(?:제\s*)?([일이삼사오육칠팔구]|\d{1,2})\s*악장", text)
+    if m_ko:
+        val = m_ko.group(1)
+        if val.isdigit():
+            return int(val)
+        if val in _SINO_MVT_MAP:
+            return _SINO_MVT_MAP[val]
+
+    # Check English movement phrase: "Movement 2", "Mov. 2", "Mov 2", "Part 2", "Act 2"
+    m_en = re.search(r"\b(?:mov(?:ement)?|part|act)\.?\s*(\d{1,2}|[IVXLCDM]+)\b", text, re.IGNORECASE)
+    if m_en:
+        val = m_en.group(1)
+        if val.isdigit():
+            return int(val)
+        if val.upper() in _ROMAN_NUMERALS:
+            return _ROMAN_NUMERALS[val.upper()]
+
+    # Split on colon, dash, or pipe where movement descriptions usually follow
+    parts = re.split(r"[:\-–—|]", text)
+    for p in reversed(parts):
+        p_clean = p.strip()
+        if not p_clean:
+            continue
+        # Check Roman numerals: "I. Allegro", "II - Adagio", "IV: Presto", "Mov. I", "Part I", "Act I"
+        m_ro = re.match(
+            r"^(?:(?:mov(?:ement)?|part|act)\.?\s*)?([IVXLCDM]+)(?:[.\s:\-–—a-z0-9]|$)",
+            p_clean,
+            re.IGNORECASE,
+        )
+        if m_ro:
+            ro_key = m_ro.group(1).upper()
+            if ro_key in _ROMAN_NUMERALS:
+                return _ROMAN_NUMERALS[ro_key]
+
+        # Check Arabic numerals: "1. Allegro", "1a. Allegro", "2. Andante", "Movement 1", "Mov 1"
+        m_num = re.match(
+            r"^(?:(?:mov(?:ement)?|part|act)\.?\s*)?(\d{1,2})(?:[a-z]?)(?:[.\s:\-–—]|$)",
+            p_clean,
+            re.IGNORECASE,
+        )
+        if m_num:
+            return int(m_num.group(1))
+
+    # Also check "1st Movement", "First Movement", "Prelude", "Overture"
+    if re.search(r"\b(?:1st|first)\s+mov(?:ement)?\b", text, re.IGNORECASE):
+        return 1
+    if re.search(r"\b(?:2nd|second)\s+mov(?:ement)?\b", text, re.IGNORECASE):
+        return 2
+    if re.search(r"\b(?:3rd|third)\s+mov(?:ement)?\b", text, re.IGNORECASE):
+        return 3
+    if re.search(r"\b(?:4th|fourth)\s+mov(?:ement)?\b", text, re.IGNORECASE):
+        return 4
+    if re.search(r"\b(?:miniature\s+overture|pr[eé]lude)\b", text, re.IGNORECASE):
+        return 1
+
+    return None
 
 
 class LMSClient:
@@ -260,6 +349,106 @@ class LMSClient:
             "title": chosen.get("name", "My Mix"),
         }
 
+    def _extract_classical_suite_from_album(
+        self,
+        album_tracks: list[dict[str, Any]],
+        query: str,
+        start_movement: int = 1,
+    ) -> list[dict[str, Any]]:
+        """Extract a contiguous list of movement tracks for the requested work from album tracks.
+
+        Starts from start_movement (default 1) and gathers consecutive movements (1, 2, 3, ...).
+        """
+        if not album_tracks:
+            return []
+
+        q_tokens = _tokenize(query)
+        work_tokens = {
+            t for t in q_tokens
+            if t not in {
+                "the", "in", "of", "and", "no", "op", "major", "minor",
+                "flat", "sharp", "dur", "moll", "movement", "mov", "act", "part",
+            } and not t.isdigit()
+        }
+
+        parsed: list[tuple[int, int | None, dict[str, Any], float, str]] = []
+        for i, t in enumerate(album_tracks):
+            name = str(t.get("name", "")).strip()
+            t_tokens = _tokenize(name)
+            overlap = len(work_tokens & t_tokens) / max(1, len(work_tokens))
+            mvt = parse_movement_number(name)
+            parsed.append((i, mvt, t, overlap, name))
+
+        best_seq: list[dict[str, Any]] = []
+
+        # Find starting movement matching the requested work
+        for idx, (i, mvt, t, overlap, name) in enumerate(parsed):
+            # Accept if movement matches start_movement and has good token overlap or album has few tracks
+            if mvt == start_movement and (overlap >= 0.25 or len(parsed) <= 6):
+                seq = [t]
+                expected = start_movement + 1
+                for next_i, next_mvt, next_t, next_overlap, next_name in parsed[idx + 1:]:
+                    if next_mvt == expected:
+                        seq.append(next_t)
+                        expected += 1
+                    elif next_mvt == 1 and expected > 1:
+                        # New work starting on same album
+                        break
+                    elif expected > start_movement + 1 and next_overlap < 0.15:
+                        break
+                if len(seq) > len(best_seq):
+                    best_seq = seq
+
+        # Fallback: if entire album is 2-6 tracks and all tracks have sequential movement numbers
+        if not best_seq and len(album_tracks) in (2, 3, 4, 5, 6):
+            mvts = [parse_movement_number(str(t.get("name", ""))) for t in album_tracks]
+            if mvts[0] == start_movement and all(m is not None for m in mvts):
+                if mvts == list(range(start_movement, start_movement + len(mvts))):
+                    best_seq = list(album_tracks)
+
+        return best_seq
+
+    def resolve_classical_work(
+        self,
+        player_id: str,
+        query: str,
+        search_root_id: str,
+        start_movement: int = 1,
+        limit: int = 10,
+    ) -> dict[str, Any] | None:
+        """Find and return all movements of a classical work starting from start_movement."""
+        cats_res = self.tidal_items(player_id, query=query, item_id=search_root_id, limit=10)
+        cat_by_name = {
+            str(c.get("name", "")).strip().lower(): str(c.get("id"))
+            for c in cats_res.get("loop_loop", [])
+            if c.get("id") is not None
+        }
+        album_cat_id = cat_by_name.get("albums")
+        if not album_cat_id:
+            return None
+
+        albums_res = self.tidal_items(player_id, item_id=album_cat_id, limit=limit)
+        albums = albums_res.get("loop_loop", [])
+        if not albums:
+            return None
+
+        scored = sorted(albums, key=lambda alb: _score_candidate(alb, query), reverse=True)
+
+        for alb in scored[:5]:
+            if _score_candidate(alb, query) <= 0:
+                continue
+            aid = str(alb.get("id"))
+            tracks_res = self.tidal_items(player_id, item_id=aid, limit=60)
+            tracks = tracks_res.get("loop_loop", [])
+            suite = self._extract_classical_suite_from_album(tracks, query, start_movement=start_movement)
+            if len(suite) >= 2 or (len(suite) >= 1 and start_movement > 1):
+                return {
+                    "album": alb,
+                    "tracks": suite,
+                    "matched_query": query,
+                }
+        return None
+
     def tidal_search_and_play(
         self,
         player_id: str,
@@ -279,9 +468,70 @@ class LMSClient:
             "artist": ["artists", "songs", "everything", "albums", "playlists"],
             "album": ["albums", "everything", "songs", "playlists", "artists"],
             "playlist": ["playlists", "everything", "songs", "albums", "artists"],
+            "classical": ["albums", "songs", "everything", "playlists", "artists"],
             "any": ["songs", "everything", "artists", "albums", "playlists"],
         }
         desired_cats = category_order_map.get(search_type.lower(), category_order_map["any"])
+
+        is_classical_req = (search_type.lower() == "classical") or any(
+            is_classical_movement_work(raw_q) for raw_q in queries
+        )
+
+        if is_classical_req:
+            for raw_q in queries:
+                q = raw_q.strip()
+                if not q:
+                    continue
+                start_mvt = parse_movement_number(q) or 1
+                # Clean query for album search by stripping movement tokens so album matches
+                clean_work_q = re.sub(
+                    r"(?:\b(?:mov(?:ement)?|part|act)\.?\s*\d+\b|\b(?:1st|2nd|3rd|4th)\s+mov(?:ement)?\b|(?:제\s*)?(?:[일이삼사오육칠팔구]|\d+)\s*악장)",
+                    "",
+                    q,
+                    flags=re.IGNORECASE,
+                )
+                clean_work_q = re.sub(r"\s+", " ", clean_work_q).strip(" :-–—")
+                target_q = clean_work_q if len(clean_work_q) >= 3 else q
+
+                work_res = self.resolve_classical_work(
+                    player_id,
+                    target_q,
+                    search_root_id=search_root_id,
+                    start_movement=start_mvt,
+                    limit=limit,
+                )
+                if work_res and work_res.get("tracks"):
+                    suite = work_res["tracks"]
+                    track_1 = suite[0]
+                    work_album = work_res.get("album") or {}
+                    alb_title = str(work_album.get("name") or "").strip()
+                    t1_title = str(track_1.get("name") or "").strip()
+                    display_title = alb_title or t1_title
+                    if len(suite) > 1:
+                        end_mvt = start_mvt + len(suite) - 1
+                        mvt_suffix = f" ({start_mvt}-{end_mvt}악장)" if start_mvt > 1 else f" (전 {len(suite)}악장)"
+                        display_title = f"{display_title}{mvt_suffix}"
+
+                    if not dry_run:
+                        self.tidal_play_item(player_id, str(track_1["id"]))
+                        for extra_t in suite[1:]:
+                            self.call(player_id, ["tidal", "playlist", "add", f"item_id:{extra_t['id']}"])
+
+                    return {
+                        "ok": True,
+                        "played": not dry_run,
+                        "matched_query": q,
+                        "category": "classical_work",
+                        "item_id": str(track_1.get("id")),
+                        "title": display_title,
+                        "album_name": alb_title,
+                        "movements_count": len(suite),
+                        "start_movement": start_mvt,
+                        "candidates": [
+                            {"id": it.get("id"), "name": it.get("name"), "type": it.get("type")}
+                            for it in suite
+                        ],
+                    }
 
         tried: list[str] = []
         for raw_q in queries:
@@ -309,6 +559,14 @@ class LMSClient:
                 # Prefer playable audio/playlist items when scoring
                 ranked = sorted(items, key=lambda it: _score_candidate(it, q), reverse=True)
                 best = ranked[0]
+                if is_classical_req and cat_name == "songs":
+                    target_mvt = parse_movement_number(q) or 1
+                    mvt_matches = [
+                        it for it in ranked
+                        if parse_movement_number(str(it.get("name", ""))) == target_mvt
+                    ]
+                    if mvt_matches:
+                        best = mvt_matches[0]
                 best_id = str(best.get("id"))
                 best_title = str(best.get("name", ""))
 

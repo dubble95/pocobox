@@ -31,7 +31,7 @@ class IntentAction(str, Enum):
     UNKNOWN = "unknown"
 
 
-VALID_SEARCH_TYPES = {"track", "artist", "album", "playlist", "any"}
+VALID_SEARCH_TYPES = {"track", "artist", "album", "playlist", "any", "classical"}
 
 
 @dataclass

@@ -28,6 +28,7 @@ from .aliases import (
     GENRE_MOOD_ALIASES,
     TRACK_ALIASES,
     expand_tidal_queries,
+    is_classical_movement_work,
     normalize_asr_text,
     parse_korean_number,
     strip_wake_prefix,
@@ -504,6 +505,8 @@ def parse_command(raw_text: str) -> VoiceIntent:
                 search_type = "artist"
             elif any(t in extracted for t in TRACK_ALIASES):
                 search_type = "track"
+            elif is_classical_movement_work(extracted):
+                search_type = "classical"
             elif re.search(r"(노래|음악)\s*(?:틀어|재생|들려)", text) and len(extracted.split()) == 1:
                 search_type = "artist"
             else:
