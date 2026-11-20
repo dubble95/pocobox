@@ -2248,6 +2248,10 @@ def make_handler(controller: VoiceController) -> type[BaseHTTPRequestHandler]:
                     self._send_json(400, {"ok": False, "error": "Invalid JSON"})
                     return
                 act = str(data.get("action", "")).lower()
+                if act in ("ensure_dac", "route_dac"):
+                    sink = controller.route_youtube_to_dac_if_available()
+                    self._send_json(200, {"ok": True, "sink": sink})
+                    return
                 if act == "load":
                     controller.route_youtube_to_dac_if_available()
                     q = data.get("query", "kpop")

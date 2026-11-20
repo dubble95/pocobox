@@ -440,6 +440,36 @@ class TestDaemonYouTubeEndpointsAndState(unittest.TestCase):
             self.assertTrue(res_stop.ok)
             mock_release.assert_called_once()
 
+    def test_enable_and_release_usb_dac_pulseaudio_helpers(self) -> None:
+        from voice_control.feedback import (
+            enable_usb_dac_pulseaudio,
+            release_usb_dac_pulseaudio,
+        )
+
+        sample_cards = "1\talsa_card.platform-sound\tmodule-alsa-card.c\n8\talsa_card.usb-Burr-Brown_from_TI_USB_Audio_DAC-00\tmodule-alsa-card.c\n"
+        sample_sinks = "1\talsa_output.platform-sound.Voice_Call__Speaker__sink\tmodule-alsa-card.c\n3\talsa_output.usb-Burr-Brown_from_TI_USB_Audio_DAC-00.analog-stereo\tmodule-alsa-card.c\n"
+        sample_inputs = "288\t3\tprotocol-native\tfirefox\n"
+
+        def mock_run(cmd, *args, **kwargs):
+            m = mock.MagicMock()
+            m.returncode = 0
+            if "cards" in cmd:
+                m.stdout = sample_cards
+            elif "sinks" in cmd:
+                m.stdout = sample_sinks
+            elif "sink-inputs" in cmd:
+                m.stdout = sample_inputs
+            else:
+                m.stdout = ""
+            return m
+
+        with mock.patch("subprocess.run", side_effect=mock_run):
+            sink = enable_usb_dac_pulseaudio()
+            self.assertEqual(sink, "alsa_output.usb-Burr-Brown_from_TI_USB_Audio_DAC-00.analog-stereo")
+
+            released = release_usb_dac_pulseaudio()
+            self.assertTrue(released)
+
 
 if __name__ == "__main__":
     unittest.main()

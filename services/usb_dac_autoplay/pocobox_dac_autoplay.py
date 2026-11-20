@@ -470,7 +470,7 @@ def apply_state(client: LMSClient, active_dac: str | None, is_startup: bool = Fa
 
         release_usb_cards_from_pulseaudio()
         output_dev = cfg("DAC_OUTPUT_TEMPLATE", "hw:CARD={card_id},DEV=0").format(card_id=new_dac)
-        extra_args = cfg("DAC_SQUEEZELITE_EXTRA_ARGS", "-m 02:70:6f:63:6f:01 -p 95 -a 80:4::1 -C 5 -W -R -u vLE")
+        extra_args = cfg("DAC_SQUEEZELITE_EXTRA_ARGS", "-m 02:70:6f:63:6f:01 -p 95 -a 80:4::1 -C 1 -W -R -u vLE")
         log.info("USB DAC attached: card_id=%s -> switching Squeezelite to %s", new_dac, output_dev)
         changed = write_squeezelite_env(output_dev, extra_args)
         write_audio_state(new_dac, aec_active=False)
@@ -497,7 +497,7 @@ def apply_state(client: LMSClient, active_dac: str | None, is_startup: bool = Fa
             log.debug("Could not restore digitalVolumeControl on detach: %s", exc)
 
     fallback_out = cfg("FALLBACK_OUTPUT", "pulse")
-    fallback_args = cfg("FALLBACK_SQUEEZELITE_EXTRA_ARGS", "-m 02:70:6f:63:6f:01 -C 5 -W -R -u hLE")
+    fallback_args = cfg("FALLBACK_SQUEEZELITE_EXTRA_ARGS", "-m 02:70:6f:63:6f:01 -C 1 -W -R -u hLE")
     aec_ok = False
     pulse_sink = None
     if enable_aec:

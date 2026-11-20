@@ -754,8 +754,17 @@ DISPLAY_HTML = r"""<!doctype html>
   }
 
   function onYtReady(event) {
-    try { event.target.playVideo(); } catch (_) {}
+    try {
+      if (event.target.unMute) event.target.unMute();
+      if (event.target.setVolume) event.target.setVolume(100);
+      event.target.playVideo();
+    } catch (_) {}
     updateYtUi();
+    fetch("/youtube/control", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "ensure_dac" })
+    }).catch(() => {});
   }
 
   function onYtStateChange(event) {
@@ -764,6 +773,15 @@ DISPLAY_HTML = r"""<!doctype html>
       // Continuous autoplay next video when current video ends!
       ytNext(null, true);
     } else if (event.data === (window.YT ? YT.PlayerState.PLAYING : 1)) {
+      try {
+        if (event.target.unMute) event.target.unMute();
+        if (event.target.setVolume) event.target.setVolume(100);
+      } catch (_) {}
+      fetch("/youtube/control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "ensure_dac" })
+      }).catch(() => {});
       // Shorts guard: skip any short (<60s) video automatically
       try {
         const dur = event.target.getDuration ? event.target.getDuration() : 0;

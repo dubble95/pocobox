@@ -89,9 +89,23 @@ def is_usb_dac_pulseaudio_active(env: dict[str, str] | None = None) -> bool:
 
 
 def enable_usb_dac_pulseaudio(env: dict[str, str] | None = None) -> str | None:
-    """Enable USB Audio DAC profile in PulseAudio and route all browser/system audio to it."""
+    """Enable USB Audio DAC profile in PulseAudio and route all browser/system audio to it.
+
+    Ensures any background player holding ALSA (e.g. Squeezelite) releases the hardware device,
+    forces PulseAudio to transition card profile from 'off' -> 'output:analog-stereo',
+    sets the DAC as default sink, and moves all active sink inputs to it at 100% volume.
+    """
     pa_env = env if env is not None else pulse_env()
     try:
+        # 1. Stop Squeezelite if running so ALSA device is instantly free
+        subprocess.run(
+            ["sudo", "-n", "systemctl", "stop", "pocobox-squeezelite.service"],
+            capture_output=True,
+            timeout=2.0,
+            check=False,
+        )
+
+        # 2. Find the USB DAC PulseAudio card
         res_cards = subprocess.run(
             ["pactl", "list", "short", "cards"],
             capture_output=True,
@@ -106,7 +120,17 @@ def enable_usb_dac_pulseaudio(env: dict[str, str] | None = None) -> str | None:
         if not usb_card:
             return None
 
-        # Set USB card profile to analog-stereo (or iec958-stereo)
+        # 3. Force profile transition: off -> output:analog-stereo
+        # PulseAudio ignores set-card-profile if it already considers the profile active
+        # even when the sink failed to initialize due to ALSA device busy.
+        subprocess.run(
+            ["pactl", "set-card-profile", usb_card, "off"],
+            capture_output=True,
+            timeout=2.0,
+            env=pa_env,
+            check=False,
+        )
+        time.sleep(0.08)
         subprocess.run(
             ["pactl", "set-card-profile", usb_card, "output:analog-stereo"],
             capture_output=True,
@@ -115,20 +139,27 @@ def enable_usb_dac_pulseaudio(env: dict[str, str] | None = None) -> str | None:
             check=False,
         )
 
-        # Locate the newly created USB sink
-        res_sinks = subprocess.run(
-            ["pactl", "list", "short", "sinks"],
-            capture_output=True,
-            text=True,
-            timeout=2.0,
-            env=pa_env,
-            check=False,
-        )
-        usb_sink = find_usb_dac_pulse_sink(res_sinks.stdout)
+        # 4. Wait for newly created USB sink (poll up to 1.5s)
+        usb_sink: str | None = None
+        t_deadline = time.monotonic() + 1.5
+        while time.monotonic() < t_deadline:
+            res_sinks = subprocess.run(
+                ["pactl", "list", "short", "sinks"],
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+                env=pa_env,
+                check=False,
+            )
+            usb_sink = find_usb_dac_pulse_sink(res_sinks.stdout)
+            if usb_sink:
+                break
+            time.sleep(0.08)
+
         if not usb_sink:
             return None
 
-        # Set as default sink for browser and new streams
+        # 5. Set as default sink for browser and new streams
         subprocess.run(
             ["pactl", "set-default-sink", usb_sink],
             capture_output=True,
@@ -137,27 +168,7 @@ def enable_usb_dac_pulseaudio(env: dict[str, str] | None = None) -> str | None:
             check=False,
         )
 
-        # Move active sink-inputs (e.g. Firefox) to the USB DAC sink
-        res_inputs = subprocess.run(
-            ["pactl", "list", "short", "sink-inputs"],
-            capture_output=True,
-            text=True,
-            timeout=2.0,
-            env=pa_env,
-            check=False,
-        )
-        for line in (res_inputs.stdout or "").splitlines():
-            parts = line.strip().split("\t")
-            if parts and parts[0].isdigit():
-                subprocess.run(
-                    ["pactl", "move-sink-input", parts[0], usb_sink],
-                    capture_output=True,
-                    timeout=2.0,
-                    env=pa_env,
-                    check=False,
-                )
-
-        # Unmute and lock DAC sink volume to 100% (0.00 dB unity gain)
+        # 6. Unmute and lock DAC sink volume to 100% (0.00 dB unity gain)
         subprocess.run(
             ["pactl", "set-sink-volume", usb_sink, "100%"],
             capture_output=True,
@@ -172,6 +183,42 @@ def enable_usb_dac_pulseaudio(env: dict[str, str] | None = None) -> str | None:
             env=pa_env,
             check=False,
         )
+
+        # 7. Move active sink-inputs (e.g. Firefox) to the USB DAC sink and ensure 100% volume
+        res_inputs = subprocess.run(
+            ["pactl", "list", "short", "sink-inputs"],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            env=pa_env,
+            check=False,
+        )
+        for line in (res_inputs.stdout or "").splitlines():
+            parts = line.strip().split("\t")
+            if parts and parts[0].isdigit():
+                inp_id = parts[0]
+                subprocess.run(
+                    ["pactl", "move-sink-input", inp_id, usb_sink],
+                    capture_output=True,
+                    timeout=2.0,
+                    env=pa_env,
+                    check=False,
+                )
+                subprocess.run(
+                    ["pactl", "set-sink-input-volume", inp_id, "100%"],
+                    capture_output=True,
+                    timeout=2.0,
+                    env=pa_env,
+                    check=False,
+                )
+                subprocess.run(
+                    ["pactl", "set-sink-input-mute", inp_id, "0"],
+                    capture_output=True,
+                    timeout=2.0,
+                    env=pa_env,
+                    check=False,
+                )
+
         return usb_sink
     except Exception:
         return None
@@ -230,6 +277,14 @@ def release_usb_dac_pulseaudio(env: dict[str, str] | None = None) -> bool:
                         env=pa_env,
                         check=False,
                     )
+
+        # Start Squeezelite so LMS playback works with direct ALSA access
+        subprocess.run(
+            ["sudo", "-n", "systemctl", "start", "pocobox-squeezelite.service"],
+            capture_output=True,
+            timeout=2.0,
+            check=False,
+        )
         return True
     except Exception:
         return False
