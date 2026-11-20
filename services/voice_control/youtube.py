@@ -387,6 +387,123 @@ KPOP_MV_CATALOG: list[dict[str, str]] = [
     },
 ]
 
+# Curated catalog of iconic, verified, embed-friendly Classical Music concert performances.
+# Features acclaimed masterworks from Cho Seong-Jin, Lim Yunchan, Karajan, Yo-Yo Ma, etc.
+CLASSIC_MV_CATALOG: list[dict[str, str]] = [
+    {
+        "id": "614zno31dqg",
+        "title": "Chopin: Piano Concerto No. 1 in E minor Op. 11",
+        "artist": "Seong-Jin Cho (조성진)",
+        "category": "classic",
+        "year": "2015",
+    },
+    {
+        "id": "GvKQKnIVy1I",
+        "title": "Rachmaninoff: Piano Concerto No. 3 in D minor Op. 30",
+        "artist": "Yunchan Lim (임윤찬)",
+        "category": "classic",
+        "year": "2022",
+    },
+    {
+        "id": "97_VJve7UVc",
+        "title": "Debussy: Suite bergamasque - III. Clair de lune (달빛)",
+        "artist": "Seong-Jin Cho (조성진)",
+        "category": "classic",
+        "year": "2018",
+    },
+    {
+        "id": "taY5oHleS4I",
+        "title": "Chopin: Ballade No. 1 in G minor Op. 23",
+        "artist": "Seong-Jin Cho (조성진)",
+        "category": "classic",
+        "year": "2016",
+    },
+    {
+        "id": "6YjpsM-Sfx0",
+        "title": "Chopin: 12 Études Op. 25",
+        "artist": "Yunchan Lim (임윤찬)",
+        "category": "classic",
+        "year": "2019",
+    },
+    {
+        "id": "pDHTJ-RXw78",
+        "title": "Bach: Six Cello Suites (The Odeon of Herodes Atticus)",
+        "artist": "Yo-Yo Ma (요요마)",
+        "category": "classic",
+        "year": "2018",
+    },
+    {
+        "id": "acmy-daxIZk",
+        "title": "Beethoven: Symphony No. 9 'Choral' 4th Mov (Ode to Joy)",
+        "artist": "Myung-Whun Chung & One Korea (정명훈)",
+        "category": "classic",
+        "year": "2020",
+    },
+    {
+        "id": "1F7c8zIhBGg",
+        "title": "Bach: Chaconne from Partita No. 2 in D minor BWV 1004",
+        "artist": "KyungWha Chung (정경화)",
+        "category": "classic",
+        "year": "2016",
+    },
+    {
+        "id": "2DmfJu3oNDM",
+        "title": "Tchaikovsky: Piano Concerto No. 1 in B-flat minor Op. 23",
+        "artist": "Martha Argerich & Charles Dutoit (마르타 아르헤리치)",
+        "category": "classic",
+        "year": "2014",
+    },
+    {
+        "id": "_ej61TDC5L8",
+        "title": "Ravel: Boléro",
+        "artist": "Markus Stenz & Seoul Philharmonic (라벨 볼레로)",
+        "category": "classic",
+        "year": "2025",
+    },
+    {
+        "id": "y0H0273o8Gw",
+        "title": "Vivaldi: The Four Seasons 'Spring' (사계 봄)",
+        "artist": "Classic Masterpieces (비발디)",
+        "category": "classic",
+        "year": "2021",
+    },
+]
+
+_SHORTS_RE = re.compile(
+    r"(?:"
+    r"#\s*shorts?\b|"
+    r"[/]shorts[/]|"
+    r"\bshorts\b|"
+    r"#\s*쇼츠\b|"
+    r"\[\s*쇼츠\s*\]|"
+    r"1분\s*(?:클래식|음악|요약|마스터|듣기)?|"
+    r"#\s*tiktok\b|"
+    r"#\s*reels\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def is_youtube_short(
+    title: str = "",
+    image_url: str = "",
+    url: str = "",
+) -> bool:
+    """Detect whether a YouTube video is a YouTube Short.
+
+    Shorts are identified by:
+    - Title containing #shorts, #쇼츠, shorts, 1분클래식, etc.
+    - URL path containing /shorts/
+    - Vertical thumbnail URL containing 'sardefault'
+    """
+    if _SHORTS_RE.search(title or ""):
+        return True
+    if "/shorts/" in (url or ""):
+        return True
+    if "sardefault" in (image_url or ""):
+        return True
+    return False
+
 
 def _format_item(item: dict[str, str]) -> dict[str, Any]:
     vid = item["id"]
@@ -406,7 +523,7 @@ def get_kpop_playlist(
     shuffle: bool = True,
     seed: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Return a curated K-Pop MV playlist, optionally filtered and shuffled."""
+    """Return a curated K-Pop or Classical MV playlist, optionally filtered and shuffled."""
     cat = (category or "all").strip().lower()
     if cat in ("all", "kpop", "popular", "mv"):
         items = list(KPOP_MV_CATALOG)
@@ -416,12 +533,15 @@ def get_kpop_playlist(
         items = [x for x in KPOP_MV_CATALOG if x.get("category") == "boygroup"]
     elif cat in ("solo", "솔로"):
         items = [x for x in KPOP_MV_CATALOG if x.get("category") in ("solo", "band")]
+    elif cat in ("classic", "classical", "클래식", "오케스트라", "교향곡"):
+        items = list(CLASSIC_MV_CATALOG)
     else:
-        # Match query substring against artist, title, or category
+        # Match query substring against artist, title, or category across catalogs
         q_norm = cat.replace(" ", "").lower()
+        combined = KPOP_MV_CATALOG + CLASSIC_MV_CATALOG
         items = [
             x
-            for x in KPOP_MV_CATALOG
+            for x in combined
             if q_norm in x.get("artist", "").replace(" ", "").lower()
             or q_norm in x.get("title", "").replace(" ", "").lower()
             or q_norm in x.get("category", "").lower()
@@ -464,19 +584,52 @@ def search_youtube_videos(
 ) -> list[dict[str, Any]]:
     """Search YouTube for music videos matching query.
 
-    Checks curated catalog first for known artists/songs; then queries LMS YouTube
+    Checks curated catalogs first for known artists/songs; then queries LMS YouTube
     Video Search (if available) to retrieve dynamic results.
+    Excludes YouTube Shorts (< 60s, #shorts, vertical thumbnails) from results.
     """
     q_clean = (query or "").strip()
     if not q_clean or q_clean.lower() in ("kpop", "케이팝", "뮤비", "뮤직비디오", "유튜브", "인기곡"):
         return get_kpop_playlist("all", shuffle=True)
+
+    if q_clean.lower() in ("classic", "classical", "클래식", "오케스트라", "교향곡"):
+        results = get_kpop_playlist("classic", shuffle=True)
+        seen_ids = {x["id"] for x in results}
+        if lms_client is not None:
+            try:
+                pid = player_id or lms_client.resolve_player_id("pocobox")
+                resp = lms_client.call(pid, ["youtube", "items", 0, limit, "item_id:1", "search:클래식 명곡 연주 -shorts"])
+                for it in resp.get("loop_loop") or []:
+                    name = it.get("name", "")
+                    img = it.get("image", "")
+                    it_url = it.get("url", "")
+                    if is_youtube_short(name, img, it_url):
+                        continue
+                    vid = extract_video_id_from_url_or_thumb(img)
+                    if not vid and it_url:
+                        vid = extract_video_id_from_url_or_thumb(it_url)
+                    if vid and vid not in seen_ids:
+                        seen_ids.add(vid)
+                        results.append({
+                            "id": vid,
+                            "title": name,
+                            "artist": "클래식 명곡",
+                            "category": "classic",
+                            "thumbnail": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+                            "url": f"https://www.youtube.com/watch?v={vid}",
+                        })
+                        if len(results) >= limit:
+                            break
+            except Exception as exc:
+                log.debug("LMS classical search failed: %s", exc)
+        return results
 
     results: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
 
     # 1. Check curated catalog matching artist or title
     q_norm = q_clean.replace(" ", "").lower()
-    for item in KPOP_MV_CATALOG:
+    for item in KPOP_MV_CATALOG + CLASSIC_MV_CATALOG:
         art_norm = item.get("artist", "").replace(" ", "").lower()
         tit_norm = item.get("title", "").replace(" ", "").lower()
         if q_norm in art_norm or q_norm in tit_norm or art_norm in q_norm:
@@ -492,14 +645,20 @@ def search_youtube_videos(
             pid = player_id or lms_client.resolve_player_id("pocobox")
             # Query Video Search (item_id:1)
             search_query = f"{q_clean} MV" if not re.search(r"(?:mv|뮤비|뮤직비디오|music video)", q_clean, re.IGNORECASE) else q_clean
+            if not re.search(r"-shorts\b", search_query):
+                search_query = f"{search_query} -shorts"
             resp = lms_client.call(pid, ["youtube", "items", 0, limit, "item_id:1", f"search:{search_query}"])
             raw_items = resp.get("loop_loop") or []
             for it in raw_items:
                 name = it.get("name", "")
                 img = it.get("image", "")
+                it_url = it.get("url", "")
+                if is_youtube_short(name, img, it_url):
+                    log.debug("Filtered out YouTube Short: %s", name)
+                    continue
                 vid = extract_video_id_from_url_or_thumb(img)
-                if not vid and "url" in it:
-                    vid = extract_video_id_from_url_or_thumb(it["url"])
+                if not vid and it_url:
+                    vid = extract_video_id_from_url_or_thumb(it_url)
                 if vid and vid not in seen_ids:
                     seen_ids.add(vid)
                     results.append({

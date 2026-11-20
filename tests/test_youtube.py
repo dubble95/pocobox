@@ -14,6 +14,7 @@ sys.path.insert(0, str(REPO_ROOT / "services"))
 sys.path.insert(0, str(REPO_ROOT / "services" / "lms_client"))
 
 from lms_client import LMSClient  # noqa: E402
+from voice_control.aliases import normalize_asr_text  # noqa: E402
 from voice_control.daemon import VoiceController  # noqa: E402
 from voice_control.executor import (  # noqa: E402
     VoiceExecutor,
@@ -22,10 +23,12 @@ from voice_control.executor import (  # noqa: E402
 from voice_control.intent_schema import ExecutionResult, IntentAction, VoiceIntent  # noqa: E402
 from voice_control.rule_parser import parse_command  # noqa: E402
 from voice_control.youtube import (  # noqa: E402
+    CLASSIC_MV_CATALOG,
     KPOP_MV_CATALOG,
     YouTubePlaybackManager,
     extract_video_id_from_url_or_thumb,
     get_kpop_playlist,
+    is_youtube_short,
     search_youtube_videos,
 )
 
@@ -53,6 +56,10 @@ class TestYouTubeRuleParser(unittest.TestCase):
             ("play kpop music video", "kpop", "K-POP 뮤직비디오"),
             ("play kpop mv", "kpop", "K-POP 뮤직비디오"),
             ("play youtube", "kpop", "K-POP 뮤직비디오"),
+            ("클래식 뮤직비디오 틀어줘", "classic", "클래식 명곡 연주"),
+            ("클래식 뮤비 틀어줘", "classic", "클래식 명곡 연주"),
+            ("오케스트라 뮤직비디오 틀어줘", "classic", "클래식 명곡 연주"),
+            ("유튜브 클래식 틀어줘", "classic", "클래식 명곡 연주"),
         ]
         for text, expected_q, expected_disp in cases:
             with self.subTest(text=text):
@@ -60,6 +67,40 @@ class TestYouTubeRuleParser(unittest.TestCase):
                 self.assertEqual(intent.action, IntentAction.PLAY_YOUTUBE, f"Failed for {text}")
                 self.assertEqual(intent.query, expected_q, f"Wrong query for {text}")
                 self.assertEqual(intent.display_query, expected_disp, f"Wrong display_query for {text}")
+
+    def test_classic_mv_asr_normalization(self) -> None:
+        raw_text = "플래식 뮤직비디오 타줘"
+        norm_text = normalize_asr_text(raw_text)
+        self.assertEqual(norm_text, "클래식 뮤직비디오 틀어줘")
+        intent = parse_command(norm_text)
+        self.assertEqual(intent.action, IntentAction.PLAY_YOUTUBE)
+        self.assertEqual(intent.query, "classic")
+        self.assertEqual(intent.display_query, "클래식 명곡 연주")
+
+    def test_is_youtube_short(self) -> None:
+        # Title hashtag or keyword matches
+        self.assertTrue(is_youtube_short(title="베토벤 운명 1악장 #shorts"))
+        self.assertTrue(is_youtube_short(title="임윤찬 라흐마니노프 #쇼츠"))
+        self.assertTrue(is_youtube_short(title="Chopin Nocturne #Short"))
+        self.assertTrue(is_youtube_short(title="Classical music Shorts"))
+        self.assertTrue(is_youtube_short(title="[1분클래식] 쇼팽 녹턴 9-2"))
+        self.assertTrue(is_youtube_short(title="바이올린 레슨 1분요약"))
+        self.assertTrue(is_youtube_short(title="Piano performance #tiktok"))
+        self.assertTrue(is_youtube_short(title="Cello melody #reels"))
+
+        # URL path matches
+        self.assertTrue(is_youtube_short(url="https://www.youtube.com/shorts/11cta61wi0g"))
+
+        # Thumbnail matches sardefault (vertical Shorts thumbnail)
+        self.assertTrue(is_youtube_short(image_url="https://i.ytimg.com/vi/11cta61wi0g/sardefault.jpg"))
+        self.assertTrue(is_youtube_short(image_url="/imageproxy/https%3A%2F%2Fi.ytimg.com%2Fvi%2F11cta61wi0g%2Fsardefault.jpg/image.jpg"))
+
+        # Standard videos must NOT match
+        self.assertFalse(is_youtube_short(title="Chopin: Piano Concerto No. 1 in E minor Op. 11"))
+        self.assertFalse(is_youtube_short(title="Seong-Jin Cho – Debussy: Suite bergamasque, L.75: III. Clair de lune"))
+        self.assertFalse(is_youtube_short(title="Short Ride in a Fast Machine"))
+        self.assertFalse(is_youtube_short(url="https://www.youtube.com/watch?v=614zno31dqg"))
+        self.assertFalse(is_youtube_short(image_url="https://i.ytimg.com/vi/614zno31dqg/hqdefault.jpg"))
 
     def test_youtube_stop_phrasings(self) -> None:
         cases = [
@@ -170,6 +211,71 @@ class TestYouTubeCatalogAndPlaybackManager(unittest.TestCase):
         res_iu = search_youtube_videos("아이유")
         self.assertGreaterEqual(len(res_iu), 2)
         self.assertTrue(any("IU" in r["artist"] or "아이유" in r["artist"] for r in res_iu))
+
+    def test_classic_catalog_integrity(self) -> None:
+        self.assertGreaterEqual(len(CLASSIC_MV_CATALOG), 10)
+        seen_ids = set()
+        for item in CLASSIC_MV_CATALOG:
+            self.assertEqual(len(item["id"]), 11)
+            self.assertEqual(item["category"], "classic")
+            self.assertNotIn(item["id"], seen_ids)
+            seen_ids.add(item["id"])
+
+        # Key artists present
+        artists = " ".join(x["artist"] for x in CLASSIC_MV_CATALOG)
+        self.assertIn("조성진", artists)
+        self.assertIn("임윤찬", artists)
+        self.assertIn("요요마", artists)
+
+    def test_get_kpop_playlist_classic(self) -> None:
+        classic_list = get_kpop_playlist("classic", shuffle=False)
+        self.assertEqual(len(classic_list), len(CLASSIC_MV_CATALOG))
+        for it in classic_list:
+            self.assertEqual(it["category"], "classic")
+            self.assertFalse(is_youtube_short(it["title"], it["thumbnail"], it["url"]))
+
+    def test_search_youtube_videos_classic(self) -> None:
+        vids = search_youtube_videos("classic")
+        self.assertGreaterEqual(len(vids), 10)
+        for v in vids:
+            self.assertEqual(v["category"], "classic")
+            self.assertFalse(is_youtube_short(v["title"], v["thumbnail"], v["url"]))
+
+        # Artist search matching classic catalog
+        res_cho = search_youtube_videos("조성진")
+        self.assertTrue(any("조성진" in r["artist"] or "Seong-Jin Cho" in r["artist"] for r in res_cho))
+
+    def test_search_youtube_videos_filters_shorts_from_lms(self) -> None:
+        mock_lms = mock.MagicMock()
+        mock_lms.resolve_player_id.return_value = "02:70:6f:63:6f:01"
+        # LMS returns 1 normal video and 2 shorts
+        mock_lms.call.return_value = {
+            "loop_loop": [
+                {
+                    "name": "Beethoven Symphony No. 5 Full Concert",
+                    "image": "https://i.ytimg.com/vi/abc12345678/hqdefault.jpg",
+                },
+                {
+                    "name": "1분클래식 베토벤 운명 #shorts",
+                    "image": "https://i.ytimg.com/vi/sht12345678/hqdefault.jpg",
+                },
+                {
+                    "name": "쇼팽 에튀드 연주",
+                    "image": "https://i.ytimg.com/vi/sar12345678/sardefault.jpg",
+                },
+            ]
+        }
+        res = search_youtube_videos("베토벤 운명", lms_client=mock_lms)
+        # Verify -shorts was passed in search query to LMS
+        call_args = mock_lms.call.call_args[0][1]
+        search_param = [x for x in call_args if str(x).startswith("search:")][0]
+        self.assertIn("-shorts", search_param)
+
+        # Verify only the full concert video is kept, shorts are filtered out
+        titles = [r["title"] for r in res]
+        self.assertIn("Beethoven Symphony No. 5 Full Concert", titles)
+        self.assertNotIn("1분클래식 베토벤 운명 #shorts", titles)
+        self.assertNotIn("쇼팽 에튀드 연주", titles)
 
     def test_playback_manager_queue_and_looping(self) -> None:
         mgr = YouTubePlaybackManager()

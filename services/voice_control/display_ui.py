@@ -615,7 +615,7 @@ DISPLAY_HTML = r"""<!doctype html>
   <div id="ytOverlay" class="yt-overlay" aria-hidden="true" style="display: none;">
     <div class="yt-header-bar" id="ytHeaderBar">
       <div class="yt-title-group">
-        <span class="yt-badge">📺 K-POP MV</span>
+        <span class="yt-badge" id="ytBadgeText">📺 K-POP MV</span>
         <div class="yt-meta-col">
           <div class="yt-main-title" id="ytMainTitle">K-POP 뮤직비디오</div>
           <div class="yt-sub-title" id="ytSubTitle">연속 재생 중</div>
@@ -627,6 +627,7 @@ DISPLAY_HTML = r"""<!doctype html>
           <button class="yt-tab-pill" id="ytTabGirl" onclick="loadMvCategory('girlgroup')">걸그룹</button>
           <button class="yt-tab-pill" id="ytTabBoy" onclick="loadMvCategory('boygroup')">보이그룹</button>
           <button class="yt-tab-pill" id="ytTabSolo" onclick="loadMvCategory('solo')">솔로</button>
+          <button class="yt-tab-pill" id="ytTabClassic" onclick="loadMvCategory('classic')">클래식</button>
         </div>
         <button class="yt-close-btn" onclick="closeYouTube(event)" aria-label="Close YouTube">✕ 닫기</button>
       </div>
@@ -763,6 +764,16 @@ DISPLAY_HTML = r"""<!doctype html>
       // Continuous autoplay next video when current video ends!
       ytNext(null, true);
     } else if (event.data === (window.YT ? YT.PlayerState.PLAYING : 1)) {
+      // Shorts guard: skip any short (<60s) video automatically
+      try {
+        const dur = event.target.getDuration ? event.target.getDuration() : 0;
+        if (dur > 0 && dur <= 60) {
+          console.warn("[YouTube] Short detected (" + dur + "s <= 60s), skipping...");
+          showSubtitle("info", "YouTube", "쇼츠 영상을 건너뛰고 다음 곡으로 이동합니다.", "Shorts 제외", 1800);
+          ytNext(null, true);
+          return;
+        }
+      } catch (_) {}
       if (playBtn) playBtn.textContent = "⏸";
       updateYtUi();
     } else if (event.data === (window.YT ? YT.PlayerState.PAUSED : 2)) {
@@ -772,7 +783,7 @@ DISPLAY_HTML = r"""<!doctype html>
 
   function onYtError() {
     // If embedding is disallowed or error occurs, skip to next video automatically
-    showSubtitle("info", "YouTube", "다음 K-POP 뮤직비디오로 이동합니다.", "자동 건너뛰기", 2200);
+    showSubtitle("info", "YouTube", "다음 음악 영상으로 이동합니다.", "자동 건너뛰기", 2200);
     setTimeout(() => ytNext(null, true), 800);
   }
 
@@ -797,8 +808,8 @@ DISPLAY_HTML = r"""<!doctype html>
   }
 
   function updateYtCategoryPills(cat) {
-    const tabs = ["all", "girlgroup", "boygroup", "solo"];
-    const idMap = { all: "ytTabAll", girlgroup: "ytTabGirl", boygroup: "ytTabBoy", solo: "ytTabSolo" };
+    const tabs = ["all", "girlgroup", "boygroup", "solo", "classic"];
+    const idMap = { all: "ytTabAll", girlgroup: "ytTabGirl", boygroup: "ytTabBoy", solo: "ytTabSolo", classic: "ytTabClassic" };
     tabs.forEach(t => {
       const el = document.getElementById(idMap[t]);
       if (el) {
@@ -814,6 +825,11 @@ DISPLAY_HTML = r"""<!doctype html>
     ytQueue = videos || [];
     ytIndex = Math.max(0, Math.min(ytQueue.length - 1, startIndex));
     ytActive = true;
+
+    if (query === "classic" || query === "classical" || query === "클래식") {
+      ytCategory = "classic";
+      updateYtCategoryPills("classic");
+    }
 
     const overlay = document.getElementById("ytOverlay");
     if (overlay) {
@@ -841,11 +857,14 @@ DISPLAY_HTML = r"""<!doctype html>
   function updateYtUi() {
     const cur = ytQueue[ytIndex];
     if (!cur) return;
+    const isClassic = ytCategory === "classic" || cur.category === "classic";
     const tEl = document.getElementById("ytMainTitle");
     const sEl = document.getElementById("ytSubTitle");
     const qEl = document.getElementById("ytQueueBadge");
-    if (tEl) tEl.textContent = cur.title || "K-POP 뮤직비디오";
-    if (sEl) sEl.textContent = cur.artist ? (cur.artist + " · K-POP 연속 재생") : "연속 재생 중";
+    const bEl = document.getElementById("ytBadgeText");
+    if (bEl) bEl.textContent = isClassic ? "🎻 CLASSIC" : "📺 K-POP MV";
+    if (tEl) tEl.textContent = cur.title || (isClassic ? "클래식 명곡 연주" : "K-POP 뮤직비디오");
+    if (sEl) sEl.textContent = cur.artist ? (cur.artist + (isClassic ? " · 명품 연주 연속 재생" : " · K-POP 연속 재생")) : "연속 재생 중";
     if (qEl) qEl.textContent = (ytIndex + 1) + " / " + ytQueue.length;
   }
 

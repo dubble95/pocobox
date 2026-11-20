@@ -119,7 +119,7 @@ def format_command_ack(intent: VoiceIntent, is_dac_mode: bool = False) -> str | 
         return f"네, {q} 즐겨찾기 틀어드릴게요." if q else "네, 즐겨찾기 틀어드릴게요."
     if act == IntentAction.PLAY_YOUTUBE:
         target = intent.display_query or intent.query or "K-POP 뮤직비디오"
-        if intent.query in ("kpop", "girlgroup", "boygroup"):
+        if intent.query in ("kpop", "girlgroup", "boygroup", "classic"):
             return f"네, {target} 연속 재생을 시작할게요."
         return f"네, 유튜브에서 {target} 틀어드릴게요."
     if act == IntentAction.STOP_YOUTUBE:
