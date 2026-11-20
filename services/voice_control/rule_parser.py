@@ -123,6 +123,19 @@ def parse_command(raw_text: str) -> VoiceIntent:
             language=lang,
         )
 
+    # 0.2 YOUTUBE / MV stop ("유튜브 꺼줘", "뮤비 꺼줘", "유튜브 그만", "stop youtube")
+    if re.search(
+        r"(?:(?:유튜브|유투브|youtube|뮤비|뮤직\s*비디오|mv)\s*(?:그만|종료|끝|끝내|중단|멈춰|꺼줘?|닫아줘?|닫기)|(?:stop|exit|close)\s+(?:the\s+)?(?:youtube|mv|music\s+video))",
+        low,
+    ):
+        return VoiceIntent(
+            action=IntentAction.STOP_YOUTUBE,
+            raw_text=raw_text,
+            confidence=0.98,
+            wake_word_detected=wake_detected,
+            language=lang,
+        )
+
     if re.search(
         r"(영어\s*(?:리스닝\s*|듣기\s*|단어\s*|문장\s*|회화\s*)?퀴즈|리스닝\s*퀴즈|영어\s*(?:문제|단어\s*문제)\s*(?:내\s*줘|내줘|풀|시작|해\s*줘|해줘)|(?:english|listening)\s+quiz|quiz\s+me\s+(?:in\s+)?english)",
         low,
@@ -375,9 +388,56 @@ def parse_command(raw_text: str) -> VoiceIntent:
             language=lang,
         )
 
-    # 9. PLAY SEARCH (Korean or English music search command)
+    # 8.5 YOUTUBE / K-POP MUSIC VIDEO ("유튜브 틀어줘", "kpop 뮤직비디오 틀어줘", "뉴진스 뮤비 틀어줘")
     has_ko_play_intent = bool(_KO_PLAY_SUFFIX_RE.search(text))
     has_en_play_intent = bool(_EN_PLAY_PREFIX_RE.search(text))
+    is_yt_explicit = bool(re.search(r"(유튜브|유투브|youtube)", low))
+    is_mv_explicit = bool(re.search(r"(뮤직\s*비디오|뮤비|\bmv\b|music\s+video)", low))
+
+    if is_yt_explicit or is_mv_explicit:
+        if (
+            has_ko_play_intent
+            or has_en_play_intent
+            or re.search(r"(틀어|재생|보여|들려|플레이|켜|play|watch|stream)", low)
+            or is_mv_explicit
+        ):
+            extracted = text
+            if has_en_play_intent:
+                extracted = _EN_PLAY_PREFIX_RE.sub("", extracted)
+                extracted = _EN_PLAY_SUFFIX_RE.sub("", extracted)
+            if has_ko_play_intent:
+                extracted = _KO_PLAY_SUFFIX_RE.sub("", extracted)
+            extracted = re.sub(r"^(?:유튜브|유투브|youtube)(?:에서|로|의)?\s*", "", extracted, flags=re.IGNORECASE).strip()
+            extracted = re.sub(r"(?:뮤직\s*비디오|뮤비|\bmv\b|music\s+video|동영상|영상)", "", extracted, flags=re.IGNORECASE).strip()
+            extracted = re.sub(r"\s+(?:노래|음악|곡|영상|좀|한번|한 번)$", "", extracted).strip()
+            extracted = re.sub(r"^(?:노래|음악)\s+", "", extracted).strip()
+            extracted = re.sub(r"([가-힣a-zA-Z0-9]+)의\s+", r"\1 ", extracted).strip()
+
+            q_low = extracted.lower()
+            if not extracted or q_low in ("kpop", "케이팝", "음악", "노래", "인기곡", "추천", "영상", "all"):
+                yt_query = "kpop"
+                disp_query = "K-POP 뮤직비디오"
+            elif q_low in ("걸그룹", "여돌", "girlgroup", "girls"):
+                yt_query = "girlgroup"
+                disp_query = "K-POP 걸그룹 뮤직비디오"
+            elif q_low in ("보이그룹", "남돌", "boygroup", "boys", "아이돌"):
+                yt_query = "boygroup"
+                disp_query = "K-POP 보이그룹 뮤직비디오"
+            else:
+                yt_query = extracted
+                disp_query = f"{extracted} 뮤직비디오"
+
+            return VoiceIntent(
+                action=IntentAction.PLAY_YOUTUBE,
+                raw_text=raw_text,
+                query=yt_query,
+                display_query=disp_query,
+                confidence=0.98,
+                wake_word_detected=wake_detected,
+                language=lang,
+            )
+
+    # 9. PLAY SEARCH (Korean or English music search command)
 
     if has_ko_play_intent or has_en_play_intent:
         # Infer search_type from phrasing BEFORE stripping descriptors

@@ -117,6 +117,13 @@ def format_command_ack(intent: VoiceIntent, is_dac_mode: bool = False) -> str | 
     if act == IntentAction.PLAY_FAVORITE:
         q = (intent.query or "").strip()
         return f"네, {q} 즐겨찾기 틀어드릴게요." if q else "네, 즐겨찾기 틀어드릴게요."
+    if act == IntentAction.PLAY_YOUTUBE:
+        target = intent.display_query or intent.query or "K-POP 뮤직비디오"
+        if intent.query in ("kpop", "girlgroup", "boygroup"):
+            return f"네, {target} 연속 재생을 시작할게요."
+        return f"네, 유튜브에서 {target} 틀어드릴게요."
+    if act == IntentAction.STOP_YOUTUBE:
+        return "네, 유튜브 재생을 종료할게요."
     if act == IntentAction.PAUSE:
         return "네, 음악을 멈출게요."
     if act == IntentAction.RESUME:
@@ -188,6 +195,8 @@ class VoiceExecutor:
         auto_queue_radio: bool = False,
         radio_settle_sec: float = 0.6,
         is_dac_mode_fn: Callable[[], bool] | None = None,
+        youtube_handler: Callable[[VoiceIntent, bool], ExecutionResult] | None = None,
+        is_youtube_active_fn: Callable[[], bool] | None = None,
     ) -> None:
         self.lms = lms
         self.player_name = player_name
@@ -195,6 +204,8 @@ class VoiceExecutor:
         self.auto_queue_radio = bool(auto_queue_radio)
         self.radio_settle_sec = max(0.0, float(radio_settle_sec))
         self.is_dac_mode_fn = is_dac_mode_fn or is_dac_mode
+        self.youtube_handler = youtube_handler
+        self.is_youtube_active_fn = is_youtube_active_fn or (lambda: False)
         self._radio_lock = threading.Lock()
         self._radio_gen = 0
 
@@ -306,6 +317,30 @@ class VoiceExecutor:
         if intent.action == IntentAction.STOP_QUIZ:
             return done(True, "영어 리스닝 퀴즈를 종료합니다.")
 
+        if intent.action == IntentAction.PLAY_YOUTUBE:
+            if self.youtube_handler is not None:
+                return self.youtube_handler(intent, dry_run)
+            return done(
+                True,
+                f"유튜브 '{intent.display_query or intent.query}' 재생을 시작합니다.",
+                {"query": intent.query, "display_query": intent.display_query},
+            )
+
+        if intent.action == IntentAction.STOP_YOUTUBE:
+            if self.youtube_handler is not None:
+                return self.youtube_handler(intent, dry_run)
+            return done(True, "유튜브 재생을 종료합니다.")
+
+        # If YouTube video is actively playing on screen, route pause/resume/next/prev to YouTube
+        if self.is_youtube_active_fn() and intent.action in (
+            IntentAction.PAUSE,
+            IntentAction.RESUME,
+            IntentAction.NEXT,
+            IntentAction.PREVIOUS,
+        ):
+            if self.youtube_handler is not None:
+                return self.youtube_handler(intent, dry_run)
+
         try:
             player_id = self.lms.resolve_player_id(self.player_name)
         except Exception as exc:
@@ -313,6 +348,13 @@ class VoiceExecutor:
 
         try:
             act = intent.action
+
+            if act in (IntentAction.PLAY_SEARCH, IntentAction.PLAY_MIX, IntentAction.PLAY_FAVORITE):
+                if not dry_run and self.is_youtube_active_fn() and self.youtube_handler is not None:
+                    try:
+                        self.youtube_handler(VoiceIntent(action=IntentAction.STOP_YOUTUBE), dry_run=False)
+                    except Exception:
+                        pass
 
             if act == IntentAction.PLAY_SEARCH:
                 queries = intent.all_queries()

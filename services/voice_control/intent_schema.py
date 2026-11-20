@@ -11,6 +11,8 @@ class IntentAction(str, Enum):
     PLAY_SEARCH = "play_search"
     PLAY_MIX = "play_mix"
     PLAY_FAVORITE = "play_favorite"
+    PLAY_YOUTUBE = "play_youtube"
+    STOP_YOUTUBE = "stop_youtube"
     PAUSE = "pause"
     RESUME = "resume"
     NEXT = "next"

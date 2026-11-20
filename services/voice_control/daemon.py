@@ -69,6 +69,11 @@ from voice_control.tts import (  # noqa: E402
     speak_text,
 )
 from voice_control.weather import get_default_location  # noqa: E402
+from voice_control.youtube import (  # noqa: E402
+    YouTubePlaybackManager,
+    get_kpop_playlist,
+    search_youtube_videos,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -312,11 +317,14 @@ class VoiceController:
         )
         self.player_name = os.environ.get("PLAYER_NAME", "pocobox")
         self.enable_tidal_autoplay = _env_bool("ENABLE_TIDAL_AUTOPLAY", True)
+        self.youtube = YouTubePlaybackManager()
         self.executor = VoiceExecutor(
             self.lms,
             player_name=self.player_name,
             auto_queue_radio=self.enable_tidal_autoplay,
             is_dac_mode_fn=self.is_dac_mode,
+            youtube_handler=self.handle_youtube_intent,
+            is_youtube_active_fn=lambda: self.youtube.active,
         )
         self.telemetry = VoiceTelemetryLogger()
         self.interpreter = HybridVoiceInterpreter(telemetry=self.telemetry)
@@ -457,7 +465,9 @@ class VoiceController:
         return is_dac_mode(AUDIO_STATE_FILE)
 
     def _begin_duck(self) -> bool:
-        """Immediately lower LMS music volume while listening so 2-3m voice is crystal clear."""
+        """Immediately lower LMS music or YouTube volume while listening so 2-3m voice is crystal clear."""
+        if self.youtube.active:
+            self.events.publish({"type": "youtube_duck", "duck": True})
         if not self.duck_enabled:
             return False
         if self.is_dac_mode() and not self.dac_duck_enabled:
@@ -484,6 +494,8 @@ class VoiceController:
 
     def _restore_duck(self, skip_restore: bool = False) -> None:
         """Restore pre-duck LMS volume unless the user explicitly changed volume."""
+        if self.youtube.active:
+            self.events.publish({"type": "youtube_duck", "duck": False})
         with self._duck_lock:
             saved = self._duck_saved
             self._duck_saved = None
@@ -1529,6 +1541,101 @@ class VoiceController:
         self._wake_display(15.0)
         return {"ok": True, "action": action}
 
+    def handle_youtube_intent(self, intent: VoiceIntent, dry_run: bool = False) -> ExecutionResult:
+        """Handle YouTube and continuous K-Pop music video streaming commands."""
+        t0 = time.monotonic()
+        act = intent.action
+
+        if act == IntentAction.PLAY_YOUTUBE:
+            query = (intent.query or "kpop").strip()
+            disp_query = intent.display_query or ("K-POP 뮤직비디오" if query == "kpop" else f"{query} 뮤직비디오")
+            if dry_run:
+                return ExecutionResult(
+                    ok=True,
+                    action=act,
+                    message=f"유튜브 '{disp_query}' 재생 확인(dry-run)",
+                    intent=intent.to_dict(),
+                    latency_ms=round((time.monotonic() - t0) * 1000.0, 1),
+                )
+
+            # Pause LMS playback so audio does not clash
+            try:
+                pid = self.lms.resolve_player_id(self.player_name)
+                self.lms.pause(pid, 1)
+            except Exception:
+                pass
+
+            # Search or retrieve playlist
+            videos = search_youtube_videos(query, lms_client=self.lms, player_id=self.player_name)
+            self.youtube.load_queue(videos, query=query, start_index=0)
+            self._wake_display(30.0)
+
+            # Broadcast to display kiosk via SSE
+            self.events.publish({
+                "type": "youtube_play",
+                "query": query,
+                "display_query": disp_query,
+                "videos": videos,
+                "index": 0,
+                "ts": time.time(),
+            })
+
+            cur = self.youtube.current_video()
+            cur_title = cur.get("title", "") if cur else disp_query
+            return ExecutionResult(
+                ok=True,
+                action=act,
+                message=f"유튜브 '{cur_title}' 재생 시작 (연속 재생 {len(videos)}곡)",
+                intent=intent.to_dict(),
+                details={"youtube": self.youtube.to_dict()},
+                latency_ms=round((time.monotonic() - t0) * 1000.0, 1),
+            )
+
+        if act == IntentAction.STOP_YOUTUBE:
+            if dry_run:
+                return ExecutionResult(ok=True, action=act, message="유튜브 재생 종료 확인(dry-run)")
+            self.youtube.stop()
+            self.events.publish({"type": "youtube_cmd", "cmd": "stop", "ts": time.time()})
+            return ExecutionResult(
+                ok=True,
+                action=act,
+                message="유튜브 재생을 종료합니다.",
+                intent=intent.to_dict(),
+                latency_ms=round((time.monotonic() - t0) * 1000.0, 1),
+            )
+
+        if act == IntentAction.PAUSE:
+            if dry_run:
+                return ExecutionResult(ok=True, action=act, message="유튜브 일시정지 확인(dry-run)")
+            self.youtube.set_playing(False)
+            self.events.publish({"type": "youtube_cmd", "cmd": "pause", "ts": time.time()})
+            return ExecutionResult(ok=True, action=act, message="유튜브 영상을 일시정지했습니다.")
+
+        if act == IntentAction.RESUME:
+            if dry_run:
+                return ExecutionResult(ok=True, action=act, message="유튜브 이어재생 확인(dry-run)")
+            self.youtube.set_playing(True)
+            self.events.publish({"type": "youtube_cmd", "cmd": "play", "ts": time.time()})
+            return ExecutionResult(ok=True, action=act, message="유튜브 영상을 다시 재생합니다.")
+
+        if act == IntentAction.NEXT:
+            if dry_run:
+                return ExecutionResult(ok=True, action=act, message="유튜브 다음 영상 확인(dry-run)")
+            nxt = self.youtube.next_video()
+            self.events.publish({"type": "youtube_cmd", "cmd": "next", "ts": time.time()})
+            title = nxt.get("title", "다음 영상") if nxt else "다음 영상"
+            return ExecutionResult(ok=True, action=act, message=f"다음 영상 '{title}'으로 넘어갑니다.")
+
+        if act == IntentAction.PREVIOUS:
+            if dry_run:
+                return ExecutionResult(ok=True, action=act, message="유튜브 이전 영상 확인(dry-run)")
+            prv = self.youtube.prev_video()
+            self.events.publish({"type": "youtube_cmd", "cmd": "prev", "ts": time.time()})
+            title = prv.get("title", "이전 영상") if prv else "이전 영상"
+            return ExecutionResult(ok=True, action=act, message=f"이전 영상 '{title}'으로 돌아갑니다.")
+
+        return ExecutionResult(ok=False, action=act, message="지원하지 않는 유튜브 명령입니다.")
+
     def get_daily_quiz_schedule(self, force_refresh: bool = False) -> dict[str, Any]:
         now = time.monotonic()
         if not force_refresh and self._schedule_cache is not None and (now - self._schedule_cache_time) < 10.0:
@@ -1571,8 +1678,9 @@ class VoiceController:
         music_playing = str(np.get("mode") or "").strip().lower() == "play"
         quiz_active = bool(self.quiz.active or self._quiz_loop_active)
         voice_active = bool(self._tts_speaking or self._manual_busy)
+        yt_active = bool(self.youtube.active)
         wake_rem = max(0.0, self._display_wake_until - time.monotonic())
-        keep_awake = bool(music_playing or quiz_active or voice_active or wake_rem > 0.0)
+        keep_awake = bool(music_playing or quiz_active or voice_active or yt_active or wake_rem > 0.0)
         return {
             "ok": True,
             "ui_version": UI_VERSION,
@@ -1581,6 +1689,7 @@ class VoiceController:
                 "music_playing": music_playing,
                 "quiz_active": quiz_active,
                 "voice_active": voice_active,
+                "youtube_active": yt_active,
                 "wake_remaining_sec": round(wake_rem, 2),
                 "keep_awake": keep_awake,
             },
@@ -1588,6 +1697,7 @@ class VoiceController:
             "audio_output_mode": "usb_dac" if self.is_dac_mode() else "speaker",
             "dac_fixed_volume": self.is_dac_mode(),
             "voice": voice_info,
+            "youtube": self.youtube.to_dict(),
             "quiz": self.quiz.public_state(),
             "quiz_schedule": self.get_daily_quiz_schedule(force_refresh=False),
         }
@@ -1857,6 +1967,25 @@ def make_handler(controller: VoiceController) -> type[BaseHTTPRequestHandler]:
             if path == "/quiz/schedule":
                 self._send_json(200, controller.get_daily_quiz_schedule(force_refresh=True))
                 return
+            if path == "/youtube/kpop":
+                cat = "all"
+                if "?" in self.path:
+                    import urllib.parse
+                    qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                    cat = qs.get("category", ["all"])[0]
+                self._send_json(200, {"ok": True, "videos": get_kpop_playlist(cat)})
+                return
+            if path == "/youtube/search":
+                q = ""
+                if "?" in self.path:
+                    import urllib.parse
+                    qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                    q = qs.get("q", [""])[0]
+                self._send_json(200, {"ok": True, "videos": search_youtube_videos(q, lms_client=controller.lms, player_id=controller.player_name)})
+                return
+            if path == "/youtube/state":
+                self._send_json(200, {"ok": True, "state": controller.youtube.to_dict()})
+                return
             if path == "/telemetry/stats":
                 hours = 24.0
                 if "hours=" in self.path:
@@ -2011,6 +2140,48 @@ def make_handler(controller: VoiceController) -> type[BaseHTTPRequestHandler]:
                     self._send_json(200 if res.get("ok") else 400, res)
                 except Exception as exc:
                     self._send_json(500, {"ok": False, "error": str(exc)})
+                return
+
+            if path == "/youtube/control":
+                try:
+                    data = json.loads(body.decode("utf-8")) if body else {}
+                except json.JSONDecodeError:
+                    self._send_json(400, {"ok": False, "error": "Invalid JSON"})
+                    return
+                act = str(data.get("action", "")).lower()
+                if act == "load":
+                    q = data.get("query", "kpop")
+                    vids = data.get("videos")
+                    if not vids or not isinstance(vids, list):
+                        vids = search_youtube_videos(q, lms_client=controller.lms, player_id=controller.player_name)
+                    st_idx = int(data.get("index", 0))
+                    controller.youtube.load_queue(vids, query=q, start_index=st_idx)
+                    controller._wake_display(30.0)
+                    controller.events.publish({
+                        "type": "youtube_play",
+                        "query": q,
+                        "display_query": data.get("display_query") or q,
+                        "videos": vids,
+                        "index": st_idx,
+                        "ts": time.time(),
+                    })
+                    self._send_json(200, {"ok": True, "state": controller.youtube.to_dict()})
+                    return
+
+                intent_map = {
+                    "play": IntentAction.RESUME,
+                    "pause": IntentAction.PAUSE,
+                    "toggle": IntentAction.PAUSE if controller.youtube.playing else IntentAction.RESUME,
+                    "next": IntentAction.NEXT,
+                    "prev": IntentAction.PREVIOUS,
+                    "stop": IntentAction.STOP_YOUTUBE,
+                }
+                mapped = intent_map.get(act)
+                if not mapped:
+                    self._send_json(400, {"ok": False, "error": f"Unknown youtube action: {act}"})
+                    return
+                res = controller.handle_youtube_intent(VoiceIntent(action=mapped))
+                self._send_json(200 if res.ok else 422, res.to_dict())
                 return
 
             if path == "/voice/text":

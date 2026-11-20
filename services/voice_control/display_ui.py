@@ -472,6 +472,114 @@ DISPLAY_HTML = r"""<!doctype html>
   .wave span:nth-child(3) { animation-delay: 0.3s; }
   .wave span:nth-child(4) { animation-delay: 0.45s; }
   @keyframes eq { 0%,100% { height: 4px; } 50% { height: 14px; } }
+
+  /* Fullscreen YouTube & K-Pop MV Overlay */
+  .yt-overlay {
+    position: fixed; inset: 0; z-index: 100;
+    background: #000000;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    overflow: hidden;
+    user-select: none; -webkit-user-select: none;
+  }
+  .yt-header-bar {
+    position: absolute; top: 0; left: 0; right: 0; z-index: 110;
+    display: flex; justify-content: space-between; align-items: center;
+    padding: max(12px, env(safe-area-inset-top)) max(18px, env(safe-area-inset-right)) 14px max(18px, env(safe-area-inset-left));
+    background: linear-gradient(180deg, rgba(0, 0, 0, 0.88) 0%, rgba(0, 0, 0, 0) 100%);
+    transition: opacity 0.3s cubic-bezier(0.16, 1, 0.3, 1), transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .yt-title-group {
+    display: flex; align-items: center; gap: 12px; min-width: 0;
+  }
+  .yt-badge {
+    font-size: 11px; font-weight: 800; padding: 4px 10px; border-radius: 999px;
+    background: #ef4444; color: #ffffff; letter-spacing: 0.05em; white-space: nowrap;
+    box-shadow: 0 2px 8px rgba(239, 68, 68, 0.5);
+  }
+  .yt-meta-col {
+    display: flex; flex-direction: column; min-width: 0;
+  }
+  .yt-main-title {
+    font-size: clamp(14px, 3.2vw, 19px); font-weight: 800; color: #ffffff;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: clamp(200px, 45vw, 480px);
+  }
+  .yt-sub-title {
+    font-size: clamp(11px, 2.2vw, 13px); font-weight: 600; color: rgba(255, 255, 255, 0.72);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: clamp(200px, 45vw, 480px);
+  }
+  .yt-actions {
+    display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+  }
+  .yt-category-tabs {
+    display: flex; align-items: center; gap: 6px;
+  }
+  .yt-tab-pill {
+    background: rgba(255, 255, 255, 0.12); color: rgba(255, 255, 255, 0.88);
+    border: 1px solid rgba(255, 255, 255, 0.16); padding: 5px 12px; border-radius: 999px;
+    font-size: 12px; font-weight: 700; cursor: pointer; transition: background 0.15s ease;
+  }
+  .yt-tab-pill.active {
+    background: var(--accent); color: #0b0d12; border-color: var(--accent);
+  }
+  .yt-close-btn {
+    background: rgba(255, 255, 255, 0.16); color: #ffffff;
+    border: 1px solid rgba(255, 255, 255, 0.22); padding: 6px 14px; border-radius: 999px;
+    font-size: 13px; font-weight: 800; cursor: pointer; display: flex; align-items: center; justify-content: center;
+    transition: background 0.15s ease, transform 0.12s ease; min-height: 34px;
+  }
+  .yt-close-btn:active { transform: scale(0.95); }
+  .yt-stage {
+    position: relative; width: 100%; height: 100%;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+  }
+  .yt-video-wrap {
+    width: 100%; height: 100%; max-width: 100vw; max-height: 100vh;
+    aspect-ratio: 16 / 9; display: flex; align-items: center; justify-content: center;
+    background: #000000;
+  }
+  .yt-video-wrap iframe, #ytPlayer {
+    width: 100% !important; height: 100% !important; border: 0 !important;
+  }
+  .yt-tap-badge {
+    position: absolute; inset: 0; margin: auto;
+    width: 72px; height: 72px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 32px; color: #ffffff; background: rgba(0, 0, 0, 0.65);
+    backdrop-filter: blur(8px); opacity: 0; pointer-events: none;
+    transform: scale(0.68);
+    transition: opacity 0.2s cubic-bezier(0.16, 1, 0.3, 1), transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    z-index: 105;
+  }
+  .yt-tap-badge.show { opacity: 1; transform: scale(1); }
+  .yt-bottom-bar {
+    position: absolute; bottom: 0; left: 0; right: 0; z-index: 110;
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 16px max(24px, env(safe-area-inset-right)) max(18px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left));
+    background: linear-gradient(0deg, rgba(0, 0, 0, 0.9) 0%, rgba(0, 0, 0, 0) 100%);
+    transition: opacity 0.3s cubic-bezier(0.16, 1, 0.3, 1), transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .yt-btn-group {
+    display: flex; align-items: center; gap: 14px;
+  }
+  .yt-btn {
+    width: 48px; height: 48px; border-radius: 50%;
+    background: rgba(255, 255, 255, 0.16); border: 1px solid rgba(255, 255, 255, 0.22);
+    color: #ffffff; font-size: 20px; display: flex; align-items: center; justify-content: center;
+    cursor: pointer; transition: transform 0.12s ease, background 0.15s ease;
+  }
+  .yt-btn:active { transform: scale(0.92); }
+  .yt-btn.primary {
+    width: 58px; height: 58px; font-size: 26px; background: #ffffff; color: #0b0d12;
+    border: none; box-shadow: 0 4px 16px rgba(255, 255, 255, 0.35);
+  }
+  .yt-queue-badge {
+    font-size: 13px; font-weight: 700; color: rgba(255, 255, 255, 0.85);
+    background: rgba(255, 255, 255, 0.12); border: 1px solid rgba(255, 255, 255, 0.16);
+    padding: 6px 14px; border-radius: 999px;
+  }
+  .yt-ui-hidden .yt-header-bar { opacity: 0; transform: translateY(-12px); pointer-events: none; }
+  .yt-ui-hidden .yt-bottom-bar { opacity: 0; transform: translateY(12px); pointer-events: none; }
 </style>
 </head>
 <body>
@@ -488,6 +596,7 @@ DISPLAY_HTML = r"""<!doctype html>
       <div class="hud-pill hud-output" id="outputBadge">🔊 오디오</div>
     </div>
     <div class="hud-group">
+      <button class="hud-btn" id="ytMvBtn" onclick="startKpopMv('all')" title="K-POP 뮤직비디오">📺 K-POP MV</button>
       <button class="hud-btn" id="rotateBtn" onclick="rotateDisplay(event)" title="화면 회전">↻ 회전</button>
       <button class="hud-btn" id="fsBtn" onclick="toggleFullscreen(event)" title="전체 화면">⛶ 전체화면</button>
       <a class="hud-btn" id="dashLink" href="/dashboard" target="_self">설정</a>
@@ -500,6 +609,43 @@ DISPLAY_HTML = r"""<!doctype html>
       <div id="subHeader" class="sub-header"></div>
       <div id="subText" class="sub-text"></div>
       <div id="subStatus" class="sub-status"></div>
+    </div>
+  </div>
+
+  <div id="ytOverlay" class="yt-overlay" aria-hidden="true" style="display: none;">
+    <div class="yt-header-bar" id="ytHeaderBar">
+      <div class="yt-title-group">
+        <span class="yt-badge">📺 K-POP MV</span>
+        <div class="yt-meta-col">
+          <div class="yt-main-title" id="ytMainTitle">K-POP 뮤직비디오</div>
+          <div class="yt-sub-title" id="ytSubTitle">연속 재생 중</div>
+        </div>
+      </div>
+      <div class="yt-actions">
+        <div class="yt-category-tabs" id="ytCategoryTabs">
+          <button class="yt-tab-pill active" id="ytTabAll" onclick="loadMvCategory('all')">전체</button>
+          <button class="yt-tab-pill" id="ytTabGirl" onclick="loadMvCategory('girlgroup')">걸그룹</button>
+          <button class="yt-tab-pill" id="ytTabBoy" onclick="loadMvCategory('boygroup')">보이그룹</button>
+          <button class="yt-tab-pill" id="ytTabSolo" onclick="loadMvCategory('solo')">솔로</button>
+        </div>
+        <button class="yt-close-btn" onclick="closeYouTube(event)" aria-label="Close YouTube">✕ 닫기</button>
+      </div>
+    </div>
+
+    <div class="yt-stage" id="ytStage" onclick="handleYtStageClick(event)">
+      <div class="yt-video-wrap" id="ytVideoWrap">
+        <div id="ytPlayer"></div>
+      </div>
+      <div id="ytTapBadge" class="yt-tap-badge">▶</div>
+    </div>
+
+    <div class="yt-bottom-bar" id="ytBottomBar">
+      <div class="yt-btn-group">
+        <button class="yt-btn" onclick="ytPrev(event)" aria-label="이전 영상">⏮</button>
+        <button class="yt-btn primary" id="ytPlayBtn" onclick="ytToggle(event)" aria-label="재생/일시정지">⏸</button>
+        <button class="yt-btn" onclick="ytNext(event)" aria-label="다음 영상">⏭</button>
+      </div>
+      <div class="yt-queue-badge" id="ytQueueBadge">1 / 40</div>
     </div>
   </div>
 
@@ -551,6 +697,259 @@ DISPLAY_HTML = r"""<!doctype html>
   let layoutMode = "auto";
   let isDacVolumeFixed = false;
   let playbackState = { mode: "stop", elapsed: 0, duration: 0, updatedAt: Date.now() };
+
+  /* YouTube & Continuous K-Pop MV Player State */
+  let ytPlayer = null;
+  let ytApiLoaded = false;
+  let ytActive = false;
+  let ytQueue = [];
+  let ytIndex = 0;
+  let ytControlsTimer = null;
+  let ytCategory = "all";
+
+  function loadYouTubeIframeApi() {
+    if (window.YT && window.YT.Player) {
+      ytApiLoaded = true;
+      return;
+    }
+    if (document.getElementById("ytApiScript")) return;
+    const tag = document.createElement("script");
+    tag.id = "ytApiScript";
+    tag.src = "https://www.youtube.com/iframe_api";
+    document.head.appendChild(tag);
+  }
+
+  window.onYouTubeIframeAPIReady = function() {
+    ytApiLoaded = true;
+    if (ytQueue.length > 0 && ytActive && !ytPlayer) {
+      const vid = ytQueue[ytIndex] ? ytQueue[ytIndex].id : "";
+      if (vid) initYtPlayer(vid);
+    }
+  };
+
+  function initYtPlayer(videoId) {
+    if (ytPlayer && ytPlayer.loadVideoById) {
+      ytPlayer.loadVideoById(videoId);
+      return;
+    }
+    ytPlayer = new YT.Player("ytPlayer", {
+      videoId: videoId,
+      playerVars: {
+        autoplay: 1,
+        controls: 1,
+        rel: 0,
+        modestbranding: 1,
+        playsinline: 1,
+        enablejsapi: 1,
+        fs: 0,
+        origin: location.origin
+      },
+      events: {
+        onReady: onYtReady,
+        onStateChange: onYtStateChange,
+        onError: onYtError
+      }
+    });
+  }
+
+  function onYtReady(event) {
+    try { event.target.playVideo(); } catch (_) {}
+    updateYtUi();
+  }
+
+  function onYtStateChange(event) {
+    const playBtn = document.getElementById("ytPlayBtn");
+    if (event.data === (window.YT ? YT.PlayerState.ENDED : 0)) {
+      // Continuous autoplay next video when current video ends!
+      ytNext(null, true);
+    } else if (event.data === (window.YT ? YT.PlayerState.PLAYING : 1)) {
+      if (playBtn) playBtn.textContent = "⏸";
+      updateYtUi();
+    } else if (event.data === (window.YT ? YT.PlayerState.PAUSED : 2)) {
+      if (playBtn) playBtn.textContent = "▶";
+    }
+  }
+
+  function onYtError() {
+    // If embedding is disallowed or error occurs, skip to next video automatically
+    showSubtitle("info", "YouTube", "다음 K-POP 뮤직비디오로 이동합니다.", "자동 건너뛰기", 2200);
+    setTimeout(() => ytNext(null, true), 800);
+  }
+
+  async function startKpopMv(category) {
+    category = category || "all";
+    ytCategory = category;
+    updateYtCategoryPills(category);
+    try {
+      const r = await fetch("/youtube/kpop?category=" + encodeURIComponent(category));
+      if (!r.ok) return;
+      const data = await r.json();
+      if (data.videos && data.videos.length > 0) {
+        startYouTubePlayback(data.videos, 0, category);
+      }
+    } catch (_) {}
+  }
+
+  function loadMvCategory(category) {
+    ytCategory = category || "all";
+    updateYtCategoryPills(ytCategory);
+    startKpopMv(ytCategory);
+  }
+
+  function updateYtCategoryPills(cat) {
+    const tabs = ["all", "girlgroup", "boygroup", "solo"];
+    const idMap = { all: "ytTabAll", girlgroup: "ytTabGirl", boygroup: "ytTabBoy", solo: "ytTabSolo" };
+    tabs.forEach(t => {
+      const el = document.getElementById(idMap[t]);
+      if (el) {
+        if (t === cat) el.classList.add("active");
+        else el.classList.remove("active");
+      }
+    });
+  }
+
+  function startYouTubePlayback(videos, startIndex, query) {
+    startIndex = startIndex || 0;
+    query = query || "kpop";
+    ytQueue = videos || [];
+    ytIndex = Math.max(0, Math.min(ytQueue.length - 1, startIndex));
+    ytActive = true;
+
+    const overlay = document.getElementById("ytOverlay");
+    if (overlay) {
+      overlay.style.display = "flex";
+      overlay.setAttribute("aria-hidden", "false");
+    }
+
+    loadYouTubeIframeApi();
+    const cur = ytQueue[ytIndex];
+    if (cur) {
+      if (ytApiLoaded && window.YT && window.YT.Player) {
+        initYtPlayer(cur.id);
+      }
+    }
+    updateYtUi();
+    resetYtControlsTimer();
+    showYtTapBadge("▶");
+
+    // Pause LMS local state
+    playbackState.mode = "pause";
+    const playBtn = document.getElementById("playBtn");
+    if (playBtn) playBtn.textContent = "▶";
+  }
+
+  function updateYtUi() {
+    const cur = ytQueue[ytIndex];
+    if (!cur) return;
+    const tEl = document.getElementById("ytMainTitle");
+    const sEl = document.getElementById("ytSubTitle");
+    const qEl = document.getElementById("ytQueueBadge");
+    if (tEl) tEl.textContent = cur.title || "K-POP 뮤직비디오";
+    if (sEl) sEl.textContent = cur.artist ? (cur.artist + " · K-POP 연속 재생") : "연속 재생 중";
+    if (qEl) qEl.textContent = (ytIndex + 1) + " / " + ytQueue.length;
+  }
+
+  function ytNext(e, notify) {
+    if (e) e.stopPropagation();
+    if (ytQueue.length === 0) return;
+    ytIndex = (ytIndex + 1) % ytQueue.length;
+    const cur = ytQueue[ytIndex];
+    if (ytPlayer && ytPlayer.loadVideoById) {
+      try { ytPlayer.loadVideoById(cur.id); } catch (_) {}
+    }
+    showYtTapBadge("⏭");
+    updateYtUi();
+    resetYtControlsTimer();
+    if (notify !== false) notifyYtControl("next");
+  }
+
+  function ytPrev(e, notify) {
+    if (e) e.stopPropagation();
+    if (ytQueue.length === 0) return;
+    ytIndex = (ytIndex - 1 + ytQueue.length) % ytQueue.length;
+    const cur = ytQueue[ytIndex];
+    if (ytPlayer && ytPlayer.loadVideoById) {
+      try { ytPlayer.loadVideoById(cur.id); } catch (_) {}
+    }
+    showYtTapBadge("⏮");
+    updateYtUi();
+    resetYtControlsTimer();
+    if (notify !== false) notifyYtControl("prev");
+  }
+
+  function ytToggle(e) {
+    if (e) e.stopPropagation();
+    if (!ytPlayer) return;
+    let isPlaying = false;
+    try {
+      const st = ytPlayer.getPlayerState ? ytPlayer.getPlayerState() : -1;
+      isPlaying = (st === (window.YT ? YT.PlayerState.PLAYING : 1));
+      if (isPlaying) {
+        ytPlayer.pauseVideo();
+        showYtTapBadge("⏸");
+        notifyYtControl("pause");
+      } else {
+        ytPlayer.playVideo();
+        showYtTapBadge("▶");
+        notifyYtControl("play");
+      }
+    } catch (_) {}
+    resetYtControlsTimer();
+  }
+
+  function showYtTapBadge(icon) {
+    const badge = document.getElementById("ytTapBadge");
+    if (!badge) return;
+    badge.textContent = icon;
+    badge.classList.remove("show");
+    void badge.offsetWidth;
+    badge.classList.add("show");
+    setTimeout(() => badge.classList.remove("show"), 450);
+  }
+
+  function handleYtStageClick(e) {
+    const overlay = document.getElementById("ytOverlay");
+    if (!overlay) return;
+    if (overlay.classList.contains("yt-ui-hidden")) {
+      overlay.classList.remove("yt-ui-hidden");
+      resetYtControlsTimer();
+    } else {
+      ytToggle(e);
+    }
+  }
+
+  function resetYtControlsTimer() {
+    clearTimeout(ytControlsTimer);
+    const overlay = document.getElementById("ytOverlay");
+    if (overlay) overlay.classList.remove("yt-ui-hidden");
+    ytControlsTimer = setTimeout(() => {
+      if (ytActive && overlay) overlay.classList.add("yt-ui-hidden");
+    }, 4500);
+  }
+
+  function closeYouTube(e, notify) {
+    if (e) e.stopPropagation();
+    ytActive = false;
+    clearTimeout(ytControlsTimer);
+    if (ytPlayer && ytPlayer.stopVideo) {
+      try { ytPlayer.stopVideo(); } catch (_) {}
+    }
+    const overlay = document.getElementById("ytOverlay");
+    if (overlay) {
+      overlay.style.display = "none";
+      overlay.setAttribute("aria-hidden", "true");
+    }
+    if (notify !== false) notifyYtControl("stop");
+    setTimeout(refresh, 200);
+  }
+
+  function notifyYtControl(act) {
+    fetch("/youtube/control", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: act })
+    }).catch(() => {});
+  }
 
   function fmtTime(sec) {
     sec = Math.max(0, Math.floor(sec || 0));
@@ -789,6 +1188,35 @@ DISPLAY_HTML = r"""<!doctype html>
       return;
     }
 
+    if (ev.type === "youtube_play") {
+      if (ev.videos && ev.videos.length > 0) {
+        startYouTubePlayback(ev.videos, ev.index || 0, ev.query || "kpop");
+      }
+      return;
+    }
+
+    if (ev.type === "youtube_cmd") {
+      if (ev.cmd === "stop") {
+        closeYouTube(null, false);
+      } else if (ev.cmd === "pause") {
+        if (ytPlayer && ytPlayer.pauseVideo) ytPlayer.pauseVideo();
+      } else if (ev.cmd === "play") {
+        if (ytPlayer && ytPlayer.playVideo) ytPlayer.playVideo();
+      } else if (ev.cmd === "next") {
+        ytNext(null, false);
+      } else if (ev.cmd === "prev") {
+        ytPrev(null, false);
+      }
+      return;
+    }
+
+    if (ev.type === "youtube_duck") {
+      if (ytPlayer && ytPlayer.setVolume) {
+        ytPlayer.setVolume(ev.duck ? 15 : 100);
+      }
+      return;
+    }
+
     if (ev.type === "result") {
       const spoken = ev.text || "";
       const msg = ev.message || "";
@@ -966,6 +1394,14 @@ DISPLAY_HTML = r"""<!doctype html>
       const outBadge = document.getElementById("outputBadge");
       if (outBadge) outBadge.textContent = s.audio_output_label || "🔊 오디오";
       updateQuizBadge(s.quiz);
+
+      if (s.youtube && s.youtube.active && !ytActive) {
+        if (s.youtube.current) {
+          startYouTubePlayback([s.youtube.current], s.youtube.index || 0, s.youtube.query || "kpop");
+        }
+      } else if (s.youtube && !s.youtube.active && ytActive) {
+        closeYouTube(null, false);
+      }
 
       const np = s.now_playing || {};
       const hasTrack = Boolean(np.title) || np.mode === "play";

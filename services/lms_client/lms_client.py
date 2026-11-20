@@ -348,6 +348,24 @@ class LMSClient:
         self.power(player_id, 1)
         return self.call(player_id, ["playlist", "play", url])
 
+    def youtube_search(
+        self,
+        player_id: str,
+        query: str,
+        search_type: str = "video",
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Search YouTube via LMS YouTube plugin (item_id:1 video, item_id:2 music, item_id:4 playlist)."""
+        item_id = "1" if search_type == "video" else ("4" if search_type == "playlist" else "2")
+        resp = self.call(player_id, ["youtube", "items", 0, limit, f"item_id:{item_id}", f"search:{query}"])
+        return resp.get("loop_loop") or []
+
+    def youtube_play(self, player_id: str, video_id: str) -> dict[str, Any]:
+        """Play a YouTube video URL on the LMS player."""
+        vid = video_id.strip()
+        url = vid if vid.startswith("youtube://") else f"youtube://www.youtube.com/v/{vid}"
+        return self.play_url(player_id, url)
+
     def get_dstm_provider(self, player_id: str) -> str:
         """Return currently configured LMS Don't Stop The Music provider ('' if disabled)."""
         res = self.call(player_id, ["playerpref", "plugin.dontstopthemusic:provider", "?"])

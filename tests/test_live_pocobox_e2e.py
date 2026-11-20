@@ -49,6 +49,9 @@ class TestLivePocoBoxE2E(unittest.TestCase):
             ("볼륨 50으로 해줘", "volume_set"),
             ("다음 곡", "next"),
             ("멈춰", "pause"),
+            ("kpop 뮤직비디오 틀어줘", "play_youtube"),
+            ("유튜브에서 뉴진스 틀어줘", "play_youtube"),
+            ("유튜브 꺼줘", "stop_youtube"),
         ]
         for text, expected_action in queries:
             with self.subTest(command=text):
@@ -59,6 +62,17 @@ class TestLivePocoBoxE2E(unittest.TestCase):
                 self.assertEqual(code, 200, f"Failed for '{text}': {res}")
                 self.assertTrue(res["ok"], f"Not ok for '{text}': {res}")
                 self.assertEqual(res["action"], expected_action)
+
+    def test_live_youtube_endpoints(self) -> None:
+        code, kpop_res = _http_json(f"{VOICE_URL}/youtube/kpop?category=girlgroup")
+        self.assertEqual(code, 200)
+        self.assertTrue(kpop_res["ok"])
+        self.assertGreaterEqual(len(kpop_res.get("videos", [])), 10)
+
+        code, state_res = _http_json(f"{VOICE_URL}/youtube/state")
+        self.assertEqual(code, 200)
+        self.assertTrue(state_res["ok"])
+        self.assertIn("active", state_res["state"])
 
 
 if __name__ == "__main__":
