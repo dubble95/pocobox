@@ -5,8 +5,9 @@ Hardened against false triggers (호출 오탐) in music and living-room environ
   and everyday speech instead of forcing them into wake-word hypotheses.
 - Strict trigger whitelist (drops false-positive magnets like 'ok coco', 'hey coco', 'poker ya').
 - Bare 2-syllable 'poco' is disabled during music playback.
-- Requires high word-level confidence on final results (>= 0.72 in music, >= 0.60 quiet)
-  or multi-chunk consecutive partial stability (3 chunks in music, 2 chunks quiet).
+- Requires word-level confidence on final results (>= 0.60 music, >= 0.60 quiet; 'hey poco' >= 0.75 music)
+  or multi-chunk consecutive partial stability (2 chunks music, 2 chunks quiet).
+- Korean ASR variants ("boco ya", "poko ya", "poco yah", "poco ya ya", Hangul "포코야") normalize to "poco ya".
 - Silence-gated periodic reset so utterances crossing the reset boundary are not cut off.
 """
 
@@ -100,6 +101,31 @@ QUIET_ONLY_PHRASES: frozenset[str] = frozenset()
 # Singing vocals in music frequently false-trigger English vocal phrases like 'hey poco' (0 TP, 5 FP)
 MUSIC_STRICT_PHRASES: frozenset[str] = frozenset({"hey poco"})
 
+# Korean wake-phrase ASR variants the English Vosk model commonly hears as
+# "poco ya" / "poco box" / "hey poco". Normalized before matching so variants
+# such as "boco ya", "poko ya", "poco yah", and "poco ya ya" still wake the device.
+_WAKE_VARIANT_NORMALIZATIONS: tuple[tuple[str, str], ...] = (
+    ("포코야", "poco ya"),
+    ("포코박스", "poco box"),
+    ("헤이 포코", "hey poco"),
+    ("안녕 포코", "hey poco"),
+    ("포쿠야", "poco ya"),
+    ("포코약", "poco ya"),
+    ("포코얘", "poco ya"),
+    ("포코박서", "poco box"),
+    ("포코박쓰", "poco box"),
+)
+
+# Latin ASR confusions for the Korean wake phrase "포코야" -> "poco ya".
+_WAKE_LATIN_VARIANTS: dict[str, str] = {
+    "boco": "poco",
+    "poko": "poco",
+    "poco": "poco",
+    "yah": "ya",
+    "yahn": "ya",
+    "yaw": "ya",
+}
+
 
 class VoskWakeWordSpotter:
     """Streaming 16kHz PCM keyword spotter for hands-free wake-word detection."""
@@ -141,7 +167,9 @@ class VoskWakeWordSpotter:
         self.music_min_confidence = (
             music_min_confidence
             if music_min_confidence is not None
-            else float(os.environ.get("VOICE_WAKE_MIN_CONF", "0.65"))
+            else float(
+                os.environ.get("VOICE_WAKE_MUSIC_MIN_CONF", os.environ.get("VOICE_WAKE_MIN_CONF", "0.60"))
+            )
         )
         self.quiet_min_confidence = (
             quiet_min_confidence
@@ -207,11 +235,45 @@ class VoskWakeWordSpotter:
         self._partial_streak = 0
         self._has_active_partial = False
 
-    def _match_text(self, text: str, music_playing: bool = False) -> str | None:
+    @staticmethod
+    def _norm_wake_word(word: str) -> str:
+        w = (word or "").strip(".,!?~:;").lower().replace("[unk]", "")
+        return _WAKE_LATIN_VARIANTS.get(w, w)
+
+    def _normalize_wake_text(self, text: str) -> str:
         cleaned = (text or "").strip().lower()
+        for ko, en in _WAKE_VARIANT_NORMALIZATIONS:
+            cleaned = cleaned.replace(ko, en)
+
+        tokens: list[str] = []
+        for t in cleaned.split():
+            t = self._norm_wake_word(t)
+            if not t:
+                continue
+            tokens.append(t)
+
+        collapsed: list[str] = []
+        for t in tokens:
+            if collapsed and collapsed[-1] == t:
+                continue
+            collapsed.append(t)
+
+        normalized = " ".join(collapsed)
+        if normalized.startswith("poco ya "):
+            normalized = "poco ya"
+        if normalized.startswith("poco box "):
+            normalized = "poco box"
+        if normalized.startswith("hey poco "):
+            normalized = "hey poco"
+        if normalized == "poco ya poco ya":
+            normalized = "poco ya"
+        return normalized
+
+    def _match_text(self, text: str, music_playing: bool = False) -> str | None:
+        cleaned = self._normalize_wake_text(text)
         if not cleaned or cleaned == "[unk]":
             return None
-        tokens = [t for t in cleaned.split() if t != "[unk]"]
+        tokens = cleaned.split()
         if not tokens:
             return None
 
@@ -235,7 +297,7 @@ class VoskWakeWordSpotter:
         confs = [
             float(w.get("conf", 1.0))
             for w in words
-            if isinstance(w, dict) and str(w.get("word", "")).lower() in phrase_tokens
+            if isinstance(w, dict) and self._norm_wake_word(w.get("word", "")) in phrase_tokens
         ]
         if not confs:
             return None, None

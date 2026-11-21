@@ -69,7 +69,8 @@ pocobox/
 1. **Wake word**: Local streaming Vosk grammar (`vosk-model-small-en-us-0.15`) on AEC3 + bandpass audio → triggers instant LMS auto-ducking (`18%`) + chime.
 2. **Command capture**: Dynamic post-duck VAD floor (`wake_cmd_floor`, `VOICE_WAKE_SILENCE_SEC=0.7`) ends recording ~0.7s after speech stops.
 3. **Local-First STT (`LOCAL_STT_URL=http://127.0.0.1:8766`)**: SenseVoice-Small INT8 (`lang=ko`, auto-handles Korean + English + BGM/nospeech) transcribes in ~0.15–0.33s. Repeated phonetic user corrections are persisted locally and applied before intent parsing.
-4. **Offline Rule Fast-Path (`rule_parser.py`)**: Playback controls, volume, TIDAL search/mix, KST time/date, and quiz start/stop execute in <1ms with **zero cloud API calls**. The adaptive learner never participates in blind quiz STT.
+4. **Wake-word during music**: Vosk grammar accepts `포코야`/`poco ya` plus Korean ASR variants (`boco ya`, `poko ya`, `poco yah`, `poco ya ya`) and normalizes them before matching. During playback, AEC3-cancelled audio loosens the wake energy/SNR gate; `hey poco` stays stricter to avoid vocal false-triggers.
+5. **Offline Rule Fast-Path (`rule_parser.py`)**: Playback controls, volume, TIDAL search/mix, KST time/date, and quiz start/stop execute in <1ms with **zero cloud API calls**. The adaptive learner never participates in blind quiz STT.
 5. **Optional Cloud Text Fallback (`VOICE_CLOUD_FALLBACK=1`)**: Only general Q&A (`answer_qa`) or unrecognized utterances escalate **text-only** to Gemini/OpenAI (with HTTP keep-alive & 503 retry).
 
 ---

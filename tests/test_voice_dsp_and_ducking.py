@@ -305,6 +305,76 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
         self.assertIsNone(spotter.accept_pcm16k(chunk, music_playing=True))
         self.assertEqual(spotter.accept_pcm16k(chunk, music_playing=True), "poco ya")
 
+    def test_wake_korean_variants_normalize_to_poco_ya(self) -> None:
+        with mock.patch.dict(os.environ, {"VOICE_WAKE_ENGINE": "off"}):
+            spotter = VoskWakeWordSpotter()
+        ya_variants = [
+            "포코야",
+            "포코약",
+            "포코얘",
+            "boco ya",
+            "poko ya",
+            "poco yah",
+            "poco ya ya",
+            "poco ya poco ya",
+        ]
+        for variant in ya_variants:
+            self.assertEqual(spotter._match_text(variant, music_playing=True), "poco ya", variant)
+            self.assertEqual(spotter._match_text(variant, music_playing=False), "poco ya", variant)
+        for variant in ("포코박서", "포코박쓰"):
+            self.assertEqual(spotter._match_text(variant, music_playing=True), "poco box", variant)
+            self.assertEqual(spotter._match_text(variant, music_playing=False), "poco box", variant)
+
+    def test_wake_variant_confidence_matches_normalized_phrase(self) -> None:
+        import json as _json
+
+        class _FakeRec:
+            def __init__(self, is_final: bool, payload: dict) -> None:
+                self.is_final = is_final
+                self.payload = payload
+
+            def AcceptWaveform(self, data: bytes) -> bool:
+                return self.is_final
+
+            def Result(self) -> str:
+                return _json.dumps(self.payload)
+
+            def PartialResult(self) -> str:
+                return _json.dumps(self.payload)
+
+            def Reset(self) -> None:
+                pass
+
+        with mock.patch.dict(os.environ, {"VOICE_WAKE_ENGINE": "off"}):
+            spotter = VoskWakeWordSpotter(music_min_confidence=0.60)
+        spotter.available = True
+        spotter._rec = _FakeRec(
+            True,
+            {"text": "boco ya", "result": [{"word": "boco", "conf": 0.9}, {"word": "ya", "conf": 0.85}]},
+        )
+        chunk = b"\x00\x01" * 160
+        self.assertEqual(spotter.accept_pcm16k(chunk, music_playing=True), "poco ya")
+
+        spotter.reset()
+        spotter._rec = _FakeRec(
+            True,
+            {"text": "boco ya", "result": [{"word": "boco", "conf": 0.3}, {"word": "ya", "conf": 0.4}]},
+        )
+        self.assertIsNone(spotter.accept_pcm16k(chunk, music_playing=True))
+
+    def test_wake_music_min_conf_default_is_looser_than_quiet(self) -> None:
+        with mock.patch.dict(os.environ, {"VOICE_WAKE_ENGINE": "off"}, clear=False):
+            os.environ.pop("VOICE_WAKE_MUSIC_MIN_CONF", None)
+            os.environ.pop("VOICE_WAKE_MIN_CONF", None)
+            spotter = VoskWakeWordSpotter()
+        self.assertEqual(spotter.music_min_confidence, 0.60)
+        self.assertEqual(spotter.quiet_min_confidence, 0.60)
+
+        with mock.patch.dict(os.environ, {"VOICE_WAKE_ENGINE": "off", "VOICE_WAKE_MIN_CONF": "0.65"}):
+            spotter = VoskWakeWordSpotter()
+        self.assertEqual(spotter.music_min_confidence, 0.65)
+        self.assertEqual(spotter.quiet_min_confidence, 0.60)
+
     def test_wake_rms_window_preserves_speech_peak_across_kaldi_is_final_delay(self) -> None:
         with mock.patch.dict(os.environ, {"VOICE_WAKE_ENGINE": "off", "VOICE_USE_AEC3": "0", "VOICE_USE_RNNOISE": "0"}):
             listener = ContinuousVoiceListener(on_utterance=lambda b: None)
@@ -373,6 +443,16 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
         self.assertFalse(listener.passes_wake_energy_gate(174.5))
         self.assertFalse(listener.passes_wake_energy_gate(315.0))  # < 300 * 1.08 = 324 and diff=15 < 25
         self.assertTrue(listener.passes_wake_energy_gate(450.0))
+
+        # AEC3-active music playback loosens the gate because echo is already cancelled
+        class _FakeAec:
+            available = True
+            active = True
+            echo_reduction_db = 12.0
+
+        listener.aec3 = _FakeAec()  # type: ignore[assignment]
+        self.assertTrue(listener.passes_wake_energy_gate(320.0))  # < 324 but diff=20 >= 15 with AEC
+        self.assertFalse(listener.passes_wake_energy_gate(305.0))  # < 306 and diff=5 < 15 even with AEC
 
     def test_telemetry_logging_clip_relabeling_and_recommendations(self) -> None:
         import tempfile
@@ -461,7 +541,7 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
         self.assertTrue(res["reset"])
         self.assertEqual(ctrl.continuous_listener.wake_snr_ratio, 1.08)
         self.assertEqual(ctrl.continuous_listener.wake_spotter.music_confirm_chunks, 2)
-        self.assertEqual(ctrl.continuous_listener.wake_spotter.music_min_confidence, 0.65)
+        self.assertEqual(ctrl.continuous_listener.wake_spotter.music_min_confidence, 0.60)
         self.assertEqual(ctrl.vad_threshold, 40.0)
         self.assertEqual(ctrl.duck_volume, 18)
         self.assertTrue(ctrl.duck_enabled)

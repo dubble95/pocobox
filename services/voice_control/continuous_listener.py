@@ -220,10 +220,17 @@ class ContinuousVoiceListener:
         if self.music_playing:
             # During loud playback, speech adds non-coherent power to the music floor.
             # Demanding a 25% jump on top of 1000 RMS music requires shouting; we require
-            # either an SNR ratio (>=1.08) OR an envelope delta (>=25.0 RMS) above ambient.
+            # either an SNR ratio or an envelope delta above ambient. When AEC3 has
+            # demonstrably cancelled speaker echo, the gate can be looser because the
+            # music floor in the wake path is already suppressed.
+            snr_req = self.wake_snr_ratio
+            delta_req = 25.0
+            if self.aec3 is not None and self.aec3.active and self.aec3.echo_reduction_db >= 6.0:
+                snr_req = min(self.wake_snr_ratio, 1.02)
+                delta_req = 15.0
             if (
-                recent_peak_rms < self.wake_ambient_rms * self.wake_snr_ratio
-                and (recent_peak_rms - self.wake_ambient_rms) < 25.0
+                recent_peak_rms < self.wake_ambient_rms * snr_req
+                and (recent_peak_rms - self.wake_ambient_rms) < delta_req
             ):
                 return False
         return True
