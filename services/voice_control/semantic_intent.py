@@ -12,6 +12,7 @@ from typing import Any
 
 from .aliases import expand_tidal_queries, strip_wake_prefix
 from .intent_schema import IntentAction, VoiceIntent
+from .jamo_util import jamo_phonetic_similarity
 
 # Semantic dual-root triggers: (entity_pattern, action_verb_pattern)
 # Both patterns must match (or one if the other is empty).
@@ -183,7 +184,13 @@ def _semantic_similarity(query: str, target: str) -> float:
     ng3_jac = len(q_ng3 & t_ng3) / max(1, len(q_ng3 | t_ng3))
 
     seq = difflib.SequenceMatcher(None, query, target).ratio()
-    return 0.35 * ng2_jac + 0.25 * ng3_jac + 0.20 * w_jac + 0.20 * seq
+    base_score = 0.35 * ng2_jac + 0.25 * ng3_jac + 0.20 * w_jac + 0.20 * seq
+
+    # Boost Korean phonetic similarity via Jamo decomposition if Korean characters present
+    if re.search(r"[가-힣]", query) or re.search(r"[가-힣]", target):
+        j_sim = jamo_phonetic_similarity(query, target)
+        return round(0.55 * base_score + 0.45 * j_sim, 4)
+    return base_score
 
 
 def parse_semantic_command(raw_text: str, *, threshold: float = 0.58) -> VoiceIntent | None:

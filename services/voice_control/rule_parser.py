@@ -129,6 +129,12 @@ def parse_command(raw_text: str, context: Any | None = None) -> VoiceIntent:
 
     low = text.lower()
 
+    # 0. Contextual multi-turn follow-up and slot inheritance
+    if context is not None and hasattr(context, "resolve_contextual_followup"):
+        followup = context.resolve_contextual_followup(raw_text)
+        if followup is not None:
+            return followup
+
     # 0. ENGLISH LISTENING QUIZ start / stop (check before pause/play so "play english quiz" or "퀴즈 멈춰" routes properly)
     if re.search(
         r"((?:영어\s*(?:리스닝\s*|단어\s*|듣기\s*|문장\s*)?)?퀴즈\s*(?:그만|종료|끝|끝내|중단|멈춰|나가기|꺼)|(?:stop|quit|exit|end)\s+(?:the\s+)?(?:english\s+)?quiz)",

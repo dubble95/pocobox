@@ -789,6 +789,21 @@ def expand_tidal_queries(query: str) -> list[str]:
         for mv in m_vals:
             add(mv)
     else:
+        # Phonetic fuzzy Jamo matching for slightly misrecognized artist or track names
+        try:
+            from .jamo_util import match_alias_with_jamo
+            best_artist_key, best_artist_vals, a_score = match_alias_with_jamo(q, ARTIST_ALIASES, threshold=0.68)
+            if best_artist_key is not None and best_artist_vals:
+                for av in best_artist_vals:
+                    add(av)
+            else:
+                best_track_key, best_track_vals, t_score = match_alias_with_jamo(q, TRACK_ALIASES, threshold=0.68)
+                if best_track_key is not None and best_track_vals:
+                    for tv in best_track_vals:
+                        add(tv)
+        except Exception:
+            pass
+
         translated = _translate_classical_terms(q)
         if translated != q:
             add(translated)

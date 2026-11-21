@@ -33,52 +33,7 @@ _KST = datetime.timezone(datetime.timedelta(hours=9))
 _KO_WEEKDAYS = ("월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일")
 
 
-class ConversationContext:
-    """Tracks short-term voice interaction dialogue turns for contextual intent resolution."""
-
-    def __init__(self, expiry_sec: float = 45.0) -> None:
-        self.expiry_sec = expiry_sec
-        self.last_action: str | None = None
-        self.last_query: str | None = None
-        self.last_display_query: str | None = None
-        self.last_track_title: str | None = None
-        self.last_artist: str | None = None
-        self.last_timestamp: float = 0.0
-        self.turns: list[dict[str, str]] = []
-
-    def record_turn(
-        self,
-        role: str,
-        text: str,
-        *,
-        action: str | None = None,
-        query: str | None = None,
-        track_title: str | None = None,
-        artist: str | None = None,
-    ) -> None:
-        now = time.time()
-        if self.last_timestamp and (now - self.last_timestamp > self.expiry_sec):
-            self.turns.clear()
-        self.last_timestamp = now
-        if action:
-            self.last_action = action
-        if query:
-            self.last_query = query
-        if track_title:
-            self.last_track_title = track_title
-        if artist:
-            self.last_artist = artist
-        self.turns.append({"role": role, "text": text})
-        if len(self.turns) > 6:
-            self.turns = self.turns[-6:]
-
-    def is_active(self) -> bool:
-        return bool(self.turns) and (time.time() - self.last_timestamp <= self.expiry_sec)
-
-    def is_recent_music_playback(self) -> bool:
-        if not self.is_active():
-            return False
-        return self.last_action in ("play_search", "play_mix", "play_favorite", "resume")
+from .context import ConversationContext
 
 
 SYSTEM_PROMPT = """You are the voice assistant and music controller for PocoBox, a Korean/English smart speaker backed by Lyrion Music Server (LMS) and TIDAL.
