@@ -496,6 +496,7 @@ TRACK_ALIASES: dict[str, list[str]] = {
     "한 페이지가 될 수 있게": ["Time of Our Life", "한 페이지가 될 수 있게"],
     "야생화": ["Wild Flower", "야생화"],
     "셰이프 오브 유": ["Shape of You"],
+    "솔로": ["SOLO", "솔로"],
     "픽스 유": ["Fix You"],
     "옐로우": ["Yellow"],
     "비바 라 비다": ["Viva La Vida"],
@@ -792,12 +793,13 @@ def expand_tidal_queries(query: str) -> list[str]:
         # Phonetic fuzzy Jamo matching for slightly misrecognized artist or track names
         try:
             from .jamo_util import match_alias_with_jamo
-            best_artist_key, best_artist_vals, a_score = match_alias_with_jamo(q, ARTIST_ALIASES, threshold=0.68)
+            jamo_thresh = 0.80 if len(q) <= 2 else 0.68
+            best_artist_key, best_artist_vals, a_score = match_alias_with_jamo(q, ARTIST_ALIASES, threshold=jamo_thresh)
             if best_artist_key is not None and best_artist_vals:
                 for av in best_artist_vals:
                     add(av)
             else:
-                best_track_key, best_track_vals, t_score = match_alias_with_jamo(q, TRACK_ALIASES, threshold=0.68)
+                best_track_key, best_track_vals, t_score = match_alias_with_jamo(q, TRACK_ALIASES, threshold=jamo_thresh)
                 if best_track_key is not None and best_track_vals:
                     for tv in best_track_vals:
                         add(tv)
@@ -805,7 +807,7 @@ def expand_tidal_queries(query: str) -> list[str]:
             # Check dynamic user library catalog (LMS favorites/recent playback)
             from .dynamic_catalog import get_dynamic_catalog
             d_cat = get_dynamic_catalog()
-            d_name, d_type, d_meta, d_score = d_cat.match_entity(q, threshold=0.68)
+            d_name, d_type, d_meta, d_score = d_cat.match_entity(q, threshold=jamo_thresh)
             if d_name:
                 if d_type == "track" and d_meta.get("artist"):
                     add(f"{d_meta['artist']} {d_name}")

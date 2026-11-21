@@ -74,6 +74,8 @@ _WEATHER_QUERY_RE = re.compile(
 # Trailing command verbs/phrases to strip from play queries (Korean & English)
 _KO_PLAY_SUFFIX_RE = re.compile(
     r"(?:"
+    r"(?:\s*(?:으로|로))?\s*(?:바꿔\s*줘|바꿔\s*주세요|바꿔\s*줄래|바꿔|교체해\s*줘|교체해\s*주세요|교체해|전환해\s*줘|전환해)"
+    r"|"
     r"\s+(?:좀|한번|한 번|바로|지금|빨리|계속)?"
     r"(?:\s*(?:노래|음악|곡|트랙|앨범|플레이리스트|믹스|메들리))?"
     r"(?:\s*(?:좀|한번|한 번))?"
@@ -611,6 +613,38 @@ def parse_command(raw_text: str, context: Any | None = None) -> VoiceIntent:
                 search_type = "artist"
             else:
                 search_type = "track"
+
+        # Contextual artist slot inheritance for track queries
+        if (
+            context is not None
+            and getattr(context, "last_artist", None)
+            and getattr(context, "is_recent_music_playback", lambda: False)()
+            and search_type == "track"
+        ):
+            last_art = getattr(context, "last_artist")
+            if (
+                last_art
+                and last_art not in extracted
+                and extracted not in ARTIST_ALIASES
+                and extracted not in GENRE_MOOD_ALIASES
+            ):
+                candidate_combined = f"{last_art} {extracted}".strip()
+                expanded = expand_tidal_queries(candidate_combined)
+                primary = expanded[0] if expanded else candidate_combined
+                fallbacks = expanded[1:] if len(expanded) > 1 else []
+                resolved_to_tidal = not bool(re.search(r"[가-힣]", primary))
+                return VoiceIntent(
+                    action=IntentAction.PLAY_SEARCH,
+                    raw_text=raw_text,
+                    query=primary,
+                    fallback_queries=fallbacks,
+                    display_query=candidate_combined,
+                    search_type="track",
+                    confidence=0.96 if resolved_to_tidal else 0.88,
+                    wake_word_detected=wake_detected or is_correction,
+                    language=lang,
+                    provider="rule-context-artist-track",
+                )
 
         expanded = expand_tidal_queries(extracted)
         primary = expanded[0] if expanded else extracted

@@ -531,7 +531,7 @@ class HybridVoiceInterpreter:
         if (
             context is not None
             and context.is_active()
-            and intent.provider == "context-correction-slot-inheritance"
+            and "context-correction-slot-inheritance" in intent.provider
             and intent.action == IntentAction.PLAY_SEARCH
         ):
             source = (context.last_display_query or context.last_query or "").strip()

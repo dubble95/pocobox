@@ -311,6 +311,19 @@ DASHBOARD_HTML = r"""<!doctype html>
   </div>
 
   <div class="card">
+    <h2>🧠 온디바이스 음성 학습 (자율 발음 교정 사본) <button onclick="pollLearningEntries()" style="padding:4px 10px; font-size:11px">새로고침</button></h2>
+    <div class="kv" style="grid-template-columns: repeat(4, 1fr)">
+      <div class="stat"><div class="label">승인 활성 (Active)</div><div id="statLrnActive" class="val" style="color:var(--ok)">0</div></div>
+      <div class="stat"><div class="label">1회 감지 (Pending)</div><div id="statLrnPending" class="val" style="color:var(--warn)">0</div></div>
+      <div class="stat"><div class="label">자모 거절 (Rejected)</div><div id="statLrnRej" class="val" style="color:var(--muted)">0</div></div>
+      <div class="stat"><div class="label">학습 적용 횟수</div><div id="statLrnApplied" class="val" style="color:var(--accent)">0</div></div>
+    </div>
+    <div id="learningList" style="margin-top:12px; max-height:220px; overflow-y:auto; font-size:13px; display:flex; flex-direction:column; gap:6px">
+      <div style="color:var(--muted); font-size:12.5px">학습된 발음 교정 규칙이 없습니다. 사용자가 음성으로 정정하면 2회 확인 후 자동 등록됩니다.</div>
+    </div>
+  </div>
+
+  <div class="card">
     <h2>📜 실시간 음성 인식 자막 & 이벤트 로그 <button onclick="clearLogs()" style="padding:4px 10px; font-size:11px">지우기</button></h2>
     <div id="logs" class="logs"></div>
   </div>
@@ -402,7 +415,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
       document.getElementById("npTitle").textContent = np.title || "재생 중인 곡 없음";
       document.getElementById("npArtist").textContent = [np.artist, np.album].filter(Boolean).join(" — ") || "-";
-      const isDacFixed = Boolean(j.dac_fixed_volume || j.audio_output_mode === "usb_dac" || np.digital_volume_control === 0 || np.use_volume_control === 0);
+      const isDacFixed = Boolean(s.dac_fixed_volume || s.audio_output_mode === "usb_dac" || np.digital_volume_control === 0 || np.use_volume_control === 0);
       const volLabel = isDacFixed ? "DAC 100% (고정)" : ("VOL " + (np.volume ?? 0) + "%");
       document.getElementById("npStatus").textContent = (np.mode || "stop") + " · " + volLabel;
       const artKey = (np.title || "") + "|" + (np.coverid || "");
@@ -723,11 +736,73 @@ DASHBOARD_HTML = r"""<!doctype html>
     } catch (_) {}
   }
 
+  async function pollLearningEntries() {
+    try {
+      const r = await fetch("/learning/entries", {cache: "no-store"});
+      if (!r.ok) return;
+      const d = await r.json();
+      const stats = d.stats || {};
+      const entries = d.entries || [];
+      document.getElementById("statLrnActive").textContent = stats.active_rules ?? 0;
+      document.getElementById("statLrnPending").textContent = stats.pending_rules ?? 0;
+      document.getElementById("statLrnRej").textContent = stats.rejections ?? 0;
+      document.getElementById("statLrnApplied").textContent = stats.corrections_applied ?? 0;
+
+      const listEl = document.getElementById("learningList");
+      if (!entries.length) {
+        listEl.innerHTML = '<div style="color:var(--muted); font-size:12.5px">학습된 발음 교정 규칙이 없습니다. 사용자가 음성으로 정정하면 2회 확인 후 자동 등록됩니다.</div>';
+        return;
+      }
+      listEl.innerHTML = "";
+      for (const item of entries) {
+        const div = document.createElement("div");
+        div.style.cssText = "display:flex; justify-content:space-between; align-items:center; background:rgba(255,255,255,0.04); padding:8px 12px; border-radius:8px; border:1px solid rgba(255,255,255,0.06);";
+        const isActive = item.state === "active";
+        const badgeCls = isActive ? "b-ok" : "b-proc";
+        const badgeText = isActive ? "활성" : "1회 확인";
+        const sim = Number(item.phonetic_similarity || 0).toFixed(2);
+        div.innerHTML = `
+          <div style="display:flex; align-items:center; gap:8px; min-width:0; overflow:hidden">
+            <span class="badge ${badgeCls}">${badgeText}</span>
+            <strong style="color:var(--fg); white-space:nowrap">${item.source}</strong>
+            <span style="color:var(--muted)">→</span>
+            <strong style="color:var(--accent); white-space:nowrap">${item.target}</strong>
+            <span style="color:var(--muted); font-size:11.5px; white-space:nowrap">(확인 ${item.confirmations}회 · 유사도 ${sim})</span>
+          </div>
+          <button style="padding:3px 8px; font-size:11px; margin-left:8px" onclick="forgetLearningEntry('${item.source.replace(/'/g, "\\'")}')">삭제</button>
+        `;
+        listEl.appendChild(div);
+      }
+    } catch (_) {}
+  }
+
+  async function forgetLearningEntry(src) {
+    if (!confirm(`“${src}” 발음 교정 규칙을 삭제하시겠습니까?`)) return;
+    try {
+      const r = await fetch("/learning/forget", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({source: src})
+      });
+      const d = await r.json();
+      if (d.ok) {
+        addLog("LEARN", `“${src}” 규칙 삭제 완료`, "b-ok");
+        pollLearningEntries();
+      } else {
+        addLog("LEARN", `삭제 실패: ${d.error}`, "b-rec");
+      }
+    } catch (e) {
+      addLog("LEARN", `네트워크 오류: ${e}`, "b-rec");
+    }
+  }
+
   connectSSE();
   pollMetrics();
   pollTelemetry();
+  pollLearningEntries();
   setInterval(pollMetrics, 200);
   setInterval(pollTelemetry, 10000);
+  setInterval(pollLearningEntries, 10000);
 </script>
 </body>
 </html>

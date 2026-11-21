@@ -40,9 +40,9 @@ _CORRECTION_PREFIX_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Relative music continuation cues (e.g. "다른 거", "딴 노래", "다른 노래")
+# Relative music continuation cues (e.g. "다른 거", "딴 노래", "다른 노래", "다른 노래로 바꿔줘")
 _ANOTHER_SONG_RE = re.compile(
-    r"^(?:다른\s*(?:곡|노래|음악|거|트랙)|딴\s*(?:곡|노래|음악|거)|다른\s*걸로|딴\s*걸로)(?:\s+(?:틀어|재생|들려|플레이|켜).*)?$",
+    r"^(?:다른\s*(?:곡|노래|음악|거|트랙)|딴\s*(?:곡|노래|음악|거)|다른\s*걸로|딴\s*걸로)(?:\s*(?:으로|로))?(?:\s+(?:틀어|재생|들려|플레이|켜|바꿔).*)?$",
     re.IGNORECASE,
 )
 
@@ -229,26 +229,58 @@ class ConversationContext:
         # 4. Music Continuation / Correction ("다른 거", "그거 말고 밤편지")
         # -------------------------------------------------------------
         if self.is_recent_music_playback():
-            # 4a. "다른 노래", "딴 거 틀어줘" -> inherit artist
-            if _ANOTHER_SONG_RE.match(clean_text) and self.last_artist:
-                expanded = expand_tidal_queries(self.last_artist)
-                primary = expanded[0] if expanded else self.last_artist
-                return VoiceIntent(
-                    action=IntentAction.PLAY_SEARCH,
-                    raw_text=raw_text,
-                    query=primary,
-                    fallback_queries=expanded[1:] if len(expanded) > 1 else [],
-                    display_query=f"{self.last_artist} 다른 노래",
-                    search_type="artist",
-                    confidence=0.94,
-                    provider="context-artist-another-song",
-                    wake_word_detected=wake_detected,
-                )
+            # 4a. "다른 노래", "딴 거 틀어줘", "다른 노래로 바꿔줘" -> inherit artist or genre/playlist
+            if _ANOTHER_SONG_RE.match(clean_text):
+                if self.last_artist:
+                    expanded = expand_tidal_queries(self.last_artist)
+                    primary = expanded[0] if expanded else self.last_artist
+                    return VoiceIntent(
+                        action=IntentAction.PLAY_SEARCH,
+                        raw_text=raw_text,
+                        query=primary,
+                        fallback_queries=expanded[1:] if len(expanded) > 1 else [],
+                        display_query=f"{self.last_artist} 다른 노래",
+                        search_type="artist",
+                        confidence=0.94,
+                        provider="context-artist-another-song",
+                        wake_word_detected=wake_detected,
+                    )
+                elif self.last_query:
+                    inherited_target = self.last_display_query or self.last_query
+                    expanded = expand_tidal_queries(self.last_query)
+                    primary = expanded[0] if expanded else self.last_query
+                    return VoiceIntent(
+                        action=IntentAction.PLAY_SEARCH,
+                        raw_text=raw_text,
+                        query=primary,
+                        fallback_queries=expanded[1:] if len(expanded) > 1 else [],
+                        display_query=f"{inherited_target} 다른 곡",
+                        search_type=self.last_search_type or "playlist",
+                        confidence=0.92,
+                        provider="context-genre-another-song",
+                        wake_word_detected=wake_detected,
+                    )
 
-            # 4b. Correction: "그거 말고 밤편지", "아니 밤편지"
+            # 4b. Correction: "그거 말고 밤편지", "아니 밤편지", "그거 말고 다른 노래"
             if _CORRECTION_PREFIX_RE.search(clean_text):
                 corrected_target = _CORRECTION_PREFIX_RE.sub("", clean_text).strip(" .!?,~")
                 if corrected_target:
+                    # If stripped target is requesting another song (e.g. "그거 말고 다른 노래")
+                    if _ANOTHER_SONG_RE.match(corrected_target) and self.last_artist:
+                        expanded = expand_tidal_queries(self.last_artist)
+                        primary = expanded[0] if expanded else self.last_artist
+                        return VoiceIntent(
+                            action=IntentAction.PLAY_SEARCH,
+                            raw_text=raw_text,
+                            query=primary,
+                            fallback_queries=expanded[1:] if len(expanded) > 1 else [],
+                            display_query=f"{self.last_artist} 다른 노래",
+                            search_type="artist",
+                            confidence=0.94,
+                            provider="context-artist-another-song",
+                            wake_word_detected=wake_detected,
+                        )
+
                     # If user specified a track and we have the artist, combine them
                     artist_prefix = self.last_artist if (self.last_artist and self.last_artist not in corrected_target) else ""
                     combined = f"{artist_prefix} {corrected_target}".strip() if artist_prefix else corrected_target

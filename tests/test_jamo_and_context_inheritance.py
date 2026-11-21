@@ -161,6 +161,89 @@ class TestConversationContextSlotInheritance(unittest.TestCase):
         self.assertEqual(intent_big.action, IntentAction.VOLUME_UP)
         self.assertEqual(intent_big.delta, 10)
 
+    def test_switch_music_with_bakwojwo(self) -> None:
+        intent_iu = parse_command("아이유로 바꿔줘")
+        self.assertEqual(intent_iu.action, IntentAction.PLAY_SEARCH)
+        self.assertEqual(intent_iu.query, "IU")
+
+        intent_classic = parse_command("클래식으로 바꿔줘")
+        self.assertEqual(intent_classic.action, IntentAction.PLAY_SEARCH)
+        self.assertIn("Classical", intent_classic.query)
+
+        intent_night = parse_command("밤편지로 바꿔줘")
+        self.assertEqual(intent_night.action, IntentAction.PLAY_SEARCH)
+        self.assertIn("Through the Night", intent_night.query)
+
+        # Ensure trailing "로" in title like "솔로" is preserved and expanded
+        intent_solo = parse_command("솔로로 바꿔줘")
+        self.assertEqual(intent_solo.action, IntentAction.PLAY_SEARCH)
+        self.assertEqual(intent_solo.query, "SOLO")
+
+    def test_another_song_with_bakwojwo_and_genre_continuation(self) -> None:
+        # Artist continuation
+        self.ctx.record_turn(
+            role="assistant",
+            text="아이유의 좋은날을 재생합니다.",
+            action=IntentAction.PLAY_SEARCH.value,
+            query="IU Good Day",
+            artist="아이유",
+        )
+        intent_art = parse_command("다른 노래로 바꿔줘", context=self.ctx)
+        self.assertEqual(intent_art.action, IntentAction.PLAY_SEARCH)
+        self.assertEqual(intent_art.query, "IU")
+        self.assertEqual(intent_art.provider, "context-artist-another-song")
+
+        # Genre continuation without artist
+        self.ctx.clear_slots()
+        self.ctx.record_turn(
+            role="assistant",
+            text="재즈 음악을 재생합니다.",
+            action=IntentAction.PLAY_SEARCH.value,
+            query="Jazz",
+            display_query="재즈",
+            search_type="playlist",
+        )
+        intent_genre = parse_command("다른 거 틀어줘", context=self.ctx)
+        self.assertEqual(intent_genre.action, IntentAction.PLAY_SEARCH)
+        self.assertEqual(intent_genre.query, "Jazz")
+        self.assertEqual(intent_genre.provider, "context-genre-another-song")
+
+    def test_track_switch_inherits_artist_slot(self) -> None:
+        self.ctx.record_turn(
+            role="assistant",
+            text="아이유 음악을 재생합니다.",
+            action=IntentAction.PLAY_SEARCH.value,
+            query="IU",
+            display_query="아이유",
+            artist="아이유",
+        )
+
+        # Track under same artist inherits artist prefix
+        intent_track = parse_command("좋은 날로 바꿔줘", context=self.ctx)
+        self.assertEqual(intent_track.action, IntentAction.PLAY_SEARCH)
+        self.assertIn("Good Day", intent_track.query)
+        self.assertEqual(intent_track.display_query, "아이유 좋은 날")
+        self.assertEqual(intent_track.provider, "rule-context-artist-track")
+
+        # New artist is NOT inherited
+        intent_new_art = parse_command("뉴진스로 바꿔줘", context=self.ctx)
+        self.assertEqual(intent_new_art.action, IntentAction.PLAY_SEARCH)
+        self.assertEqual(intent_new_art.query, "NewJeans")
+
+        # Audio output switch is NOT captured as song
+        intent_out = parse_command("소리 dac으로 바꿔줘", context=self.ctx)
+        self.assertEqual(intent_out.action, IntentAction.SWITCH_OUTPUT)
+        self.assertEqual(intent_out.query, "dac")
+
+    def test_dashboard_ui_contains_learning_elements(self) -> None:
+        from voice_control.dashboard_ui import DASHBOARD_HTML
+        self.assertIn("statLrnActive", DASHBOARD_HTML)
+        self.assertIn("statLrnPending", DASHBOARD_HTML)
+        self.assertIn("statLrnRej", DASHBOARD_HTML)
+        self.assertIn("statLrnApplied", DASHBOARD_HTML)
+        self.assertIn("pollLearningEntries", DASHBOARD_HTML)
+        self.assertIn("forgetLearningEntry", DASHBOARD_HTML)
+
     def test_local_slm_payload_includes_gbnf_grammar(self) -> None:
         from unittest.mock import MagicMock
         from voice_control.cloud_stt_intent import HybridVoiceInterpreter, _LOCAL_SLM_GBNF
