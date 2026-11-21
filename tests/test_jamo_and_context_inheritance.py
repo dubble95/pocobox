@@ -161,6 +161,28 @@ class TestConversationContextSlotInheritance(unittest.TestCase):
         self.assertEqual(intent_big.action, IntentAction.VOLUME_UP)
         self.assertEqual(intent_big.delta, 10)
 
+    def test_local_slm_payload_includes_gbnf_grammar(self) -> None:
+        from unittest.mock import MagicMock
+        from voice_control.cloud_stt_intent import HybridVoiceInterpreter, _LOCAL_SLM_GBNF
+
+        interp = HybridVoiceInterpreter(
+            local_llm_url="http://127.0.0.1:8767",
+            enable_local_llm=True,
+        )
+        interp._http_json = MagicMock(return_value={
+            "choices": [{"message": {"content": '{"action": "play_search", "query": "아이유"}'}}]
+        })
+
+        intent = interp._local_llm_text_intent("아이유 노래 틀어줘")
+        self.assertIsNotNone(intent)
+        self.assertEqual(intent.action, IntentAction.PLAY_SEARCH)
+
+        # Verify GBNF grammar was passed in payload
+        call_args = interp._http_json.call_args
+        payload = call_args[0][1]
+        self.assertEqual(payload.get("grammar"), _LOCAL_SLM_GBNF)
+        self.assertEqual(payload.get("response_format"), {"type": "json_object"})
+
 
 if __name__ == "__main__":
     unittest.main()

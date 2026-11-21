@@ -73,6 +73,13 @@ Rules:
 - Return pure JSON only, no markdown fences."""
 
 
+_LOCAL_SLM_GBNF = r'''root ::= "{" ws "\"action\":" ws action ("," ws "\"query\":" ws string)? ("," ws "\"answer\":" ws string)? ws "}"
+action ::= "\"play_search\"" | "\"play_mix\"" | "\"now_playing\"" | "\"pause\"" | "\"resume\"" | "\"next\"" | "\"previous\"" | "\"volume_up\"" | "\"volume_down\"" | "\"weather\"" | "\"answer_qa\"" | "\"unknown\""
+string ::= "\"" ([^"\\] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]))* "\""
+ws ::= [ \t\n\r]*
+'''
+
+
 def _build_system_prompt(context: ConversationContext | None = None) -> str:
     now = datetime.datetime.now(tz=_KST)
     wd = _KO_WEEKDAYS[now.weekday()]
@@ -573,9 +580,21 @@ class HybridVoiceInterpreter:
             "messages": messages,
             "temperature": 0.0,
             "max_tokens": 50,
+            "grammar": _LOCAL_SLM_GBNF,
+            "response_format": {"type": "json_object"},
         }
         try:
-            data = self._http_json(url, payload, timeout=self.local_llm_timeout)
+            try:
+                data = self._http_json(url, payload, timeout=self.local_llm_timeout)
+            except Exception as http_err:
+                # If server rejects 'grammar' parameter with 400/422, retry with plain payload
+                if "grammar" in payload:
+                    payload.pop("grammar", None)
+                    payload.pop("response_format", None)
+                    data = self._http_json(url, payload, timeout=self.local_llm_timeout)
+                else:
+                    raise http_err
+
             choices = data.get("choices")
             if not choices:
                 return None

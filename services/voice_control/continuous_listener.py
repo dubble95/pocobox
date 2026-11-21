@@ -599,7 +599,16 @@ class ContinuousVoiceListener:
                             done_timeout = (not wake_speech_seen) and len(captured) >= self.wake_no_speech_chunks
                             done_max = len(captured) >= self.wake_max_chunks
                             if done_silence or done_timeout or done_max:
-                                wav_bytes = pcm_to_wav_bytes(b"".join(captured)) if wake_speech_seen else None
+                                if wake_speech_seen and captured:
+                                    # Trim excess trailing silence (keeping ~200ms padding) for crisp low-latency STT
+                                    if consecutive_silence > 2:
+                                        excess = consecutive_silence - 2
+                                        trimmed_chunks = captured[:-excess] if len(captured) > excess else captured
+                                    else:
+                                        trimmed_chunks = captured
+                                    wav_bytes = pcm_to_wav_bytes(b"".join(trimmed_chunks))
+                                else:
+                                    wav_bytes = None
                                 phrase = wake_phrase
                                 recording = False
                                 wake_mode = False
