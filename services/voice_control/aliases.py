@@ -801,6 +801,15 @@ def expand_tidal_queries(query: str) -> list[str]:
                 if best_track_key is not None and best_track_vals:
                     for tv in best_track_vals:
                         add(tv)
+
+            # Check dynamic user library catalog (LMS favorites/recent playback)
+            from .dynamic_catalog import get_dynamic_catalog
+            d_cat = get_dynamic_catalog()
+            d_name, d_type, d_meta, d_score = d_cat.match_entity(q, threshold=0.68)
+            if d_name:
+                if d_type == "track" and d_meta.get("artist"):
+                    add(f"{d_meta['artist']} {d_name}")
+                add(d_name)
         except Exception:
             pass
 

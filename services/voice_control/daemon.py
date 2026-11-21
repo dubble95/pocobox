@@ -1096,9 +1096,24 @@ class VoiceController:
                 log.debug("Waiting for LMS to enable TIDAL autoplay: %s", exc)
                 time.sleep(2.0)
 
+    def _sync_dynamic_catalog_bg(self) -> None:
+        """Periodically sync LMS favorites, playlists, and recently played items into DynamicMusicCatalog."""
+        from voice_control.dynamic_catalog import get_dynamic_catalog
+        catalog = get_dynamic_catalog()
+        time.sleep(3.0)  # Short initial wait for LMS to be ready
+        while True:
+            try:
+                pid = self.lms.resolve_player_id(self.player_name, timeout=1.5)
+                if pid:
+                    catalog.update_from_lms(self.lms, pid)
+            except Exception as exc:
+                log.debug("Dynamic catalog sync background error: %s", exc)
+            time.sleep(300.0)
+
     def start_background_listeners(self) -> None:
         if self.enable_tidal_autoplay:
             threading.Thread(target=self._init_tidal_autoplay_bg, name="tidal-dstm-init", daemon=True).start()
+        threading.Thread(target=self._sync_dynamic_catalog_bg, name="dynamic-catalog-sync", daemon=True).start()
         if self.continuous_listener is not None:
             self.continuous_listener.start()
 
@@ -1135,18 +1150,31 @@ class VoiceController:
         if not dry_run:
             self._update_display_wake_for_action(res.action)
             if res.ok:
+                loc = res.details.get("location") or (intent.query if res.action == IntentAction.WEATHER.value else None)
+                trk_title = res.details.get("title") or res.details.get("track")
+                art_name = res.details.get("artist")
                 self.conversation_context.record_turn(
                     "user",
                     intent.raw_text or text,
                     action=res.action,
                     query=intent.query,
+                    display_query=intent.display_query,
+                    location=loc,
+                    volume_delta=intent.delta,
                 )
                 self.conversation_context.record_turn(
                     "assistant",
                     res.message,
-                    track_title=res.details.get("title") or res.details.get("track"),
-                    artist=res.details.get("artist"),
+                    track_title=trk_title,
+                    artist=art_name,
+                    location=loc,
                 )
+                if trk_title or art_name:
+                    try:
+                        from voice_control.dynamic_catalog import get_dynamic_catalog
+                        get_dynamic_catalog().add_track(trk_title or "", art_name or "", source="playback")
+                    except Exception:
+                        pass
         self.last_result = res.to_dict()
         self.events.publish({
             "type": "result",
@@ -1342,18 +1370,31 @@ class VoiceController:
         if not dry_run:
             self._update_display_wake_for_action(res.action)
             if res.ok:
+                loc = res.details.get("location") or (intent.query if res.action == IntentAction.WEATHER.value else None)
+                trk_title = res.details.get("title") or res.details.get("track")
+                art_name = res.details.get("artist")
                 self.conversation_context.record_turn(
                     "user",
                     intent.raw_text,
                     action=res.action,
                     query=intent.query,
+                    display_query=intent.display_query,
+                    location=loc,
+                    volume_delta=intent.delta,
                 )
                 self.conversation_context.record_turn(
                     "assistant",
                     res.message,
-                    track_title=res.details.get("title") or res.details.get("track"),
-                    artist=res.details.get("artist"),
+                    track_title=trk_title,
+                    artist=art_name,
+                    location=loc,
                 )
+                if trk_title or art_name:
+                    try:
+                        from voice_control.dynamic_catalog import get_dynamic_catalog
+                        get_dynamic_catalog().add_track(trk_title or "", art_name or "", source="playback")
+                    except Exception:
+                        pass
         res.details["vad"] = metrics.__dict__
         res.details["stt_ms"] = stt_ms
         res.details["stt_provider"] = intent.provider
