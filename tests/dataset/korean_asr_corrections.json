@@ -1,0 +1,50 @@
+[
+  {
+    "id": "ko-asr-001",
+    "source": "쇼핑 녹턴 틀어줘",
+    "target": "쇼팽 녹턴 틀어줘",
+    "expected_query_contains": "Chopin Nocturne"
+  },
+  {
+    "id": "ko-asr-002",
+    "source": "차이콥스키 틀어줘",
+    "target": "차이코프스키 틀어줘",
+    "expected_query_contains": "Tchaikovsky"
+  },
+  {
+    "id": "ko-asr-003",
+    "source": "유진스 노래 틀어줘",
+    "target": "뉴진스 노래 틀어줘",
+    "expected_query_contains": "NewJeans"
+  },
+  {
+    "id": "ko-asr-004",
+    "source": "브루노 마쓰 틀어줘",
+    "target": "브루노마스 틀어줘",
+    "expected_query_contains": "Bruno Mars"
+  },
+  {
+    "id": "ko-asr-005",
+    "source": "박효심 틀어줘",
+    "target": "박효신 틀어줘",
+    "expected_query_contains": "Park Hyo Shin"
+  },
+  {
+    "id": "ko-asr-006",
+    "source": "세븐팅 틀어줘",
+    "target": "세븐틴 틀어줘",
+    "expected_query_contains": "SEVENTEEN"
+  },
+  {
+    "id": "ko-asr-007",
+    "source": "라흐만이 너프 틀어줘",
+    "target": "라흐마니노프 틀어줘",
+    "expected_query_contains": "Rachmaninoff"
+  },
+  {
+    "id": "ko-asr-008",
+    "source": "모차르느 틀어줘",
+    "target": "모차르트 틀어줘",
+    "expected_query_contains": "Mozart"
+  }
+]

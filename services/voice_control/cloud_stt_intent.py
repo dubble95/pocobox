@@ -21,6 +21,7 @@ try:
 except Exception:  # pragma: no cover
     _requests = None
 
+from .adaptive_learning import KoreanAdaptiveLearner
 from .aliases import expand_tidal_queries, is_classical_movement_work, is_classical_work, strip_wake_prefix
 from .english_quiz import QuizQuestion, classify_quiz_command, is_local_answer_match, parse_quiz_options
 from .intent_schema import IntentAction, VoiceIntent
@@ -435,6 +436,8 @@ class HybridVoiceInterpreter:
         gemini_max_rpm: int | None = None,
         cache_ttl_sec: float | None = None,
         telemetry: Any | None = None,
+        adaptive_learner: KoreanAdaptiveLearner | None = None,
+        learning_path: str | None = None,
     ) -> None:
         self.gemini_api_key = gemini_api_key if gemini_api_key is not None else os.environ.get("GEMINI_API_KEY", "").strip()
         self.gemini_model = gemini_model or os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
@@ -446,6 +449,7 @@ class HybridVoiceInterpreter:
         self.quota_tracker = GeminiQuotaTracker(daily_limit=gemini_daily_limit, max_rpm=gemini_max_rpm)
         self.intent_cache = IntentTTLCache(ttl_sec=cache_ttl_sec or 1800.0)
         self.telemetry = telemetry
+        self.adaptive_learner = adaptive_learner or KoreanAdaptiveLearner(path=learning_path)
 
         raw_local_url = local_stt_url if local_stt_url is not None else os.environ.get("LOCAL_STT_URL", "")
         self.local_stt_url = raw_local_url.strip().rstrip("/")
@@ -500,6 +504,47 @@ class HybridVoiceInterpreter:
 
     def set_telemetry(self, telemetry: Any) -> None:
         self.telemetry = telemetry
+
+    def learning_stats(self) -> dict[str, Any]:
+        return self.adaptive_learner.stats()
+
+    def _parse_with_learning(
+        self,
+        text: str,
+        context: ConversationContext | None = None,
+    ) -> VoiceIntent:
+        """Apply confirmed ASR fixes before parsing and capture contextual corrections."""
+        adapted_text = self.adaptive_learner.apply(text)
+        intent = parse_command(adapted_text, context=context)
+        if adapted_text != text:
+            intent.raw_text = text
+            if intent.action != IntentAction.UNKNOWN:
+                intent.provider = f"{intent.provider}+adaptive"
+            if self.telemetry:
+                self.telemetry.record(
+                    "adaptive_asr_applied",
+                    transcript=text,
+                    corrected_transcript=adapted_text,
+                    action=intent.action.value,
+                )
+
+        if (
+            context is not None
+            and context.is_active()
+            and intent.provider == "context-correction-slot-inheritance"
+            and intent.action == IntentAction.PLAY_SEARCH
+            and context.last_display_query
+            and intent.display_query
+        ):
+            status = self.adaptive_learner.record_correction(context.last_display_query, intent.display_query)
+            if status in ("pending", "active") and self.telemetry:
+                self.telemetry.record(
+                    "adaptive_correction_observed",
+                    status=status,
+                    source=context.last_display_query,
+                    target=intent.display_query,
+                )
+        return intent
 
     def local_stt_health(self, force_refresh: bool = False) -> dict[str, Any]:
         """Check local SenseVoice STT HTTP server health (cached for 10s)."""
@@ -630,7 +675,7 @@ class HybridVoiceInterpreter:
         context: ConversationContext | None = None,
     ) -> VoiceIntent:
         """Fast-path local rule parsing first; optionally escalate complex/unknown text to cloud LLM."""
-        local_intent = parse_command(text, context=context)
+        local_intent = self._parse_with_learning(text, context=context)
         if local_intent.action != IntentAction.UNKNOWN and local_intent.confidence >= 0.9:
             return local_intent
 
@@ -717,9 +762,10 @@ class HybridVoiceInterpreter:
                         wake_word_detected=False,
                     )
 
-                fast = parse_command(transcript, context=context)
+                fast = self._parse_with_learning(transcript, context=context)
                 if fast.action != IntentAction.UNKNOWN and fast.confidence >= 0.85:
-                    fast.provider = "sensevoice+rule"
+                    adaptive_suffix = "+adaptive" if "+adaptive" in fast.provider else ""
+                    fast.provider = f"sensevoice+rule{adaptive_suffix}"
                     return fast
 
                 # Bare wake-word utterance ("포코야") -> return immediately without any cloud call
@@ -791,9 +837,10 @@ class HybridVoiceInterpreter:
             if not transcript:
                 return VoiceIntent(action=IntentAction.UNKNOWN, raw_text="", confidence=0.0, provider="openai")
             # Ultra-fast local rule fast-path avoids a 2nd LLM round-trip for clear commands!
-            fast = parse_command(transcript)
+            fast = self._parse_with_learning(transcript, context=context)
             if fast.action != IntentAction.UNKNOWN and fast.confidence >= 0.9:
-                fast.provider = "openai-stt+rule"
+                adaptive_suffix = "+adaptive" if "+adaptive" in fast.provider else ""
+                fast.provider = f"openai-stt+rule{adaptive_suffix}"
                 return fast
             return self._openai_text_intent(transcript)
         raise RuntimeError(

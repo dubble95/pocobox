@@ -16,6 +16,7 @@ pocobox/
 ├── services/
 │   ├── voice_control/          # Main always-on voice, TTS, quiz & display daemon
 │   │   ├── daemon.py           # HTTP API (:8765), SSE subtitles, hardware button trigger
+│   │   ├── adaptive_learning.py # Persistent local Korean ASR correction learner
 │   │   ├── continuous_listener.py  # 24/7 mic capture, AEC3, RNNoise, Vosk wake-word, dynamic VAD
 │   │   ├── cloud_stt_intent.py # Local-first SenseVoice STT + rule fast-path + Gemini/OpenAI fallback
 │   │   ├── rule_parser.py      # Sub-ms offline Korean/English command & time/date parser
@@ -43,8 +44,10 @@ pocobox/
 │   └── deploy.sh               # One-command full stack deployment to pocobox
 └── tests/
     ├── dataset/voice_commands_ko_en.json   # 84 Korean/English command regression dataset
+    ├── dataset/korean_asr_corrections.json # Confirmed Korean ASR correction regression cases
     ├── fixtures/audio/*.wav    # 16kHz mono PCM16 Korean/English audio fixtures
     ├── test_*.py               # Offline unittest suite (run before every commit/deploy)
+    ├── test_adaptive_learning.py # Local ASR learning, persistence, and safety tests
     ├── run_voice_benchmark.py  # Live TIDAL accuracy benchmark
     └── run_wake_regression.py  # Wake-word false-positive/true-positive regression runner
 ```
@@ -65,8 +68,8 @@ pocobox/
 ### Voice Latency & Routing Flow
 1. **Wake word**: Local streaming Vosk grammar (`vosk-model-small-en-us-0.15`) on AEC3 + bandpass audio → triggers instant LMS auto-ducking (`18%`) + chime.
 2. **Command capture**: Dynamic post-duck VAD floor (`wake_cmd_floor`, `VOICE_WAKE_SILENCE_SEC=0.7`) ends recording ~0.7s after speech stops.
-3. **Local-First STT (`LOCAL_STT_URL=http://127.0.0.1:8766`)**: SenseVoice-Small INT8 (`lang=ko`, auto-handles Korean + English + BGM/nospeech) transcribes in ~0.15–0.33s.
-4. **Offline Rule Fast-Path (`rule_parser.py`)**: Playback controls, volume, TIDAL search/mix, KST time/date, and quiz start/stop execute in <1ms with **zero cloud API calls**.
+3. **Local-First STT (`LOCAL_STT_URL=http://127.0.0.1:8766`)**: SenseVoice-Small INT8 (`lang=ko`, auto-handles Korean + English + BGM/nospeech) transcribes in ~0.15–0.33s. Repeated phonetic user corrections are persisted locally and applied before intent parsing.
+4. **Offline Rule Fast-Path (`rule_parser.py`)**: Playback controls, volume, TIDAL search/mix, KST time/date, and quiz start/stop execute in <1ms with **zero cloud API calls**. The adaptive learner never participates in blind quiz STT.
 5. **Optional Cloud Text Fallback (`VOICE_CLOUD_FALLBACK=1`)**: Only general Q&A (`answer_qa`) or unrecognized utterances escalate **text-only** to Gemini/OpenAI (with HTTP keep-alive & 503 retry).
 
 ---

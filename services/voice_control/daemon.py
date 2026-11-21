@@ -1978,6 +1978,7 @@ class VoiceController:
             "provider": self.interpreter.provider,
             "local_stt": local_stt,
             "local_slm": self.interpreter.local_llm_health(),
+            "adaptive_learning": self.interpreter.learning_stats(),
             "gemini": self.interpreter.quota_tracker.stats() if self.interpreter else {},
             "gemini_model": self.interpreter.gemini_model,
             "gemini_configured": bool(self.interpreter.gemini_api_key),
