@@ -65,6 +65,13 @@ def main() -> int:
     q_daily.add_argument("--force", action="store_true", help="Force start even if quiz is already running")
     q_daily.add_argument("--dry-run", action="store_true")
 
+    p_learn = sub.add_parser("learning", help="Manage Korean adaptive ASR corrections")
+    l_sub = p_learn.add_subparsers(dest="learning_cmd", required=True)
+    l_sub.add_parser("status", help="Show adaptive learning statistics")
+    l_sub.add_parser("list", help="List confirmed learned corrections")
+    l_forget = l_sub.add_parser("forget", help="Remove a learned correction rule")
+    l_forget.add_argument("source", help="Source misrecognized phrase to remove")
+
     args = parser.parse_args()
     base = args.url.rstrip("/")
 
@@ -116,6 +123,16 @@ def main() -> int:
             code, res = _request(f"{base}/quiz/stop", data=b"{}")
         else:
             parser.error(f"Unknown quiz command: {args.quiz_cmd}")
+    elif args.cmd == "learning":
+        if args.learning_cmd in ("status", "list"):
+            code, res = _request(f"{base}/learning/entries")
+            if args.learning_cmd == "status" and "stats" in res:
+                res = {"ok": True, "stats": res.get("stats")}
+        elif args.learning_cmd == "forget":
+            payload = json.dumps({"source": args.source}).encode("utf-8")
+            code, res = _request(f"{base}/learning/forget", data=payload)
+        else:
+            parser.error(f"Unknown learning command: {args.learning_cmd}")
     else:
         parser.error(f"Unknown command: {args.cmd}")
 

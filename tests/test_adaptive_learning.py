@@ -152,6 +152,40 @@ class TestAdaptiveLearningInVoicePipeline(unittest.TestCase):
                 f"{case['id']}: {source} -> {intent.all_queries()}",
             )
 
+    def test_apply_multiple_independent_corrections(self) -> None:
+        self.learner.record_correction("쇼핑", "쇼팽")
+        self.learner.record_correction("쇼핑", "쇼팽")
+        self.learner.record_correction("이발디", "비발디")
+        self.learner.record_correction("이발디", "비발디")
+
+        # Both corrections should be applied to the transcript in a single pass
+        applied = self.learner.apply("쇼핑 이발디 틀어줘")
+        self.assertEqual(applied, "쇼팽 비발디 틀어줘")
+
+    def test_prefix_phrase_generalization(self) -> None:
+        # Repeating "가수 배개린" -> "가수 백예린" should also generalize and register "배개린" -> "백예린"
+        self.learner.record_correction("가수 배개린", "가수 백예린")
+        self.learner.record_correction("가수 배개린", "가수 백예린")
+
+        # Sub-phrase "배개린" should be promoted to active and applied to bare command
+        self.assertEqual(self.learner.apply("배개린 틀어줘"), "백예린 틀어줘")
+
+    def test_daemon_http_learning_endpoints(self) -> None:
+        from unittest.mock import MagicMock
+        from voice_control.daemon import VoiceController
+
+        controller = VoiceController.__new__(VoiceController)
+        controller.interpreter = self.interp
+        self.learner.record_correction("쇼핑", "쇼팽")
+        self.learner.record_correction("쇼핑", "쇼팽")
+
+        entries = controller.interpreter.adaptive_learner.learned_entries()
+        self.assertTrue(any(e["source"] == "쇼핑" and e["target"] == "쇼팽" for e in entries))
+
+        # Forget rule
+        self.assertTrue(controller.interpreter.adaptive_learner.forget("쇼핑"))
+        self.assertFalse(any(e["source"] == "쇼핑" for e in controller.interpreter.adaptive_learner.learned_entries()))
+
     def test_health_stats_are_json_serializable(self) -> None:
         self.learner.record_correction("쇼핑 녹턴", "쇼팽 녹턴")
         stats = self.interp.learning_stats()

@@ -106,14 +106,21 @@ MUSIC_STRICT_PHRASES: frozenset[str] = frozenset({"hey poco"})
 # such as "boco ya", "poko ya", "poco yah", and "poco ya ya" still wake the device.
 _WAKE_VARIANT_NORMALIZATIONS: tuple[tuple[str, str], ...] = (
     ("포코야", "poco ya"),
-    ("포코박스", "poco box"),
-    ("헤이 포코", "hey poco"),
-    ("안녕 포코", "hey poco"),
+    ("포코 야", "poco ya"),
+    ("폭호야", "poco ya"),
+    ("포코아", "poco ya"),
+    ("포코얌", "poco ya"),
     ("포쿠야", "poco ya"),
     ("포코약", "poco ya"),
     ("포코얘", "poco ya"),
+    ("포코박스", "poco box"),
+    ("포코 박스", "poco box"),
     ("포코박서", "poco box"),
     ("포코박쓰", "poco box"),
+    ("헤이 포코", "hey poco"),
+    ("헤이포코", "hey poco"),
+    ("안녕 포코", "hey poco"),
+    ("안녕포코", "hey poco"),
 )
 
 # Latin ASR confusions for the Korean wake phrase "포코야" -> "poco ya".
@@ -121,9 +128,16 @@ _WAKE_LATIN_VARIANTS: dict[str, str] = {
     "boco": "poco",
     "poko": "poco",
     "poco": "poco",
+    "polco": "poco",
+    "pork": "poco",
+    "pocco": "poco",
+    "porco": "poco",
+    "bocco": "poco",
     "yah": "ya",
     "yahn": "ya",
     "yaw": "ya",
+    "yha": "ya",
+    "yuh": "ya",
 }
 
 

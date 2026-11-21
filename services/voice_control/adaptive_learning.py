@@ -119,6 +119,35 @@ class KoreanAdaptiveLearner:
             and not any(ord(ch) < 32 for ch in source + target)
         )
 
+    def _record_single_pair_locked(self, clean_source: str, clean_target: str, now: float) -> str:
+        key = clean_source.lower()
+        current = self._active.get(key)
+        if current and current["target"].lower() == clean_target.lower():
+            current["confirmations"] = min(self.required_confirmations, int(current["confirmations"]) + 1)
+            current["updated_at"] = now
+            return "active"
+
+        candidate = self._pending.get(key)
+        confirmations = 1
+        if candidate and candidate["target"].lower() == clean_target.lower():
+            confirmations = int(candidate["confirmations"]) + 1
+
+        entry = {
+            "source": clean_source,
+            "target": clean_target,
+            "confirmations": confirmations,
+            "updated_at": now,
+        }
+        if confirmations >= self.required_confirmations:
+            self._pending.pop(key, None)
+            self._active[key] = entry
+            self._prune_locked(self._active, self.max_entries)
+            return "active"
+        else:
+            self._pending[key] = entry
+            self._prune_locked(self._pending, self.max_entries)
+            return "pending"
+
     def record_correction(self, source: str, target: str) -> str:
         """Record a correction and return disabled/rejected/pending/active."""
         if not self.enabled:
@@ -130,36 +159,19 @@ class KoreanAdaptiveLearner:
         if jamo_phonetic_similarity(clean_source, clean_target) < self.min_similarity:
             return "rejected"
 
-        key = clean_source.lower()
         now = time.time()
         with self._lock:
-            current = self._active.get(key)
-            if current and current["target"].lower() == clean_target.lower():
-                current["confirmations"] = min(self.required_confirmations, int(current["confirmations"]) + 1)
-                current["updated_at"] = now
-                self._save_locked()
-                return "active"
+            status = self._record_single_pair_locked(clean_source, clean_target, now)
 
-            candidate = self._pending.get(key)
-            confirmations = 1
-            if candidate and candidate["target"].lower() == clean_target.lower():
-                confirmations = int(candidate["confirmations"]) + 1
+            # Generalize shared-prefix phrases (e.g. "아이유 반편지" -> "아이유 밤편지" implies "반편지" -> "밤편지")
+            s_toks = clean_source.split()
+            t_toks = clean_target.split()
+            if len(s_toks) >= 2 and len(t_toks) >= 2 and s_toks[0].lower() == t_toks[0].lower():
+                sub_s = " ".join(s_toks[1:])
+                sub_t = " ".join(t_toks[1:])
+                if self._valid_pair(sub_s, sub_t) and jamo_phonetic_similarity(sub_s, sub_t) >= self.min_similarity:
+                    self._record_single_pair_locked(sub_s, sub_t, now)
 
-            entry = {
-                "source": clean_source,
-                "target": clean_target,
-                "confirmations": confirmations,
-                "updated_at": now,
-            }
-            if confirmations >= self.required_confirmations:
-                self._pending.pop(key, None)
-                self._active[key] = entry
-                self._prune_locked(self._active, self.max_entries)
-                status = "active"
-            else:
-                self._pending[key] = entry
-                self._prune_locked(self._pending, self.max_entries)
-                status = "pending"
             self._save_locked()
             return status
 
@@ -170,7 +182,7 @@ class KoreanAdaptiveLearner:
             del entries[oldest]
 
     def apply(self, text: str) -> str:
-        """Apply at most one longest confirmed correction to a recognition transcript."""
+        """Apply confirmed corrections to a recognition transcript."""
         original = text or ""
         if not self.enabled or not original:
             return original
@@ -178,12 +190,17 @@ class KoreanAdaptiveLearner:
             if not self._active:
                 return original
             cleaned = _clean_phrase(original)
+            result = cleaned
             entries = sorted(self._active.values(), key=lambda item: len(item["source"]), reverse=True)
+            applied = False
             for item in entries:
                 pattern = re.compile(re.escape(item["source"]), re.IGNORECASE)
-                if pattern.search(cleaned):
-                    self._applications += 1
-                    return pattern.sub(item["target"], cleaned)
+                if pattern.search(result):
+                    result = pattern.sub(item["target"], result)
+                    applied = True
+            if applied:
+                self._applications += 1
+                return result
         return original
 
     def forget(self, source: str) -> bool:

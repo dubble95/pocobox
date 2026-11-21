@@ -310,10 +310,17 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
             spotter = VoskWakeWordSpotter()
         ya_variants = [
             "포코야",
+            "포코 야",
+            "폭호야",
+            "포코아",
+            "포코얌",
             "포코약",
             "포코얘",
             "boco ya",
             "poko ya",
+            "polco ya",
+            "pork ya",
+            "pocco ya",
             "poco yah",
             "poco ya ya",
             "poco ya poco ya",
@@ -321,9 +328,11 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
         for variant in ya_variants:
             self.assertEqual(spotter._match_text(variant, music_playing=True), "poco ya", variant)
             self.assertEqual(spotter._match_text(variant, music_playing=False), "poco ya", variant)
-        for variant in ("포코박서", "포코박쓰"):
+        for variant in ("포코박스", "포코 박스", "포코박서", "포코박쓰"):
             self.assertEqual(spotter._match_text(variant, music_playing=True), "poco box", variant)
             self.assertEqual(spotter._match_text(variant, music_playing=False), "poco box", variant)
+        for variant in ("헤이 포코", "헤이포코", "안녕 포코", "안녕포코"):
+            self.assertEqual(spotter._match_text(variant, music_playing=False), "hey poco", variant)
 
     def test_wake_variant_confidence_matches_normalized_phrase(self) -> None:
         import json as _json

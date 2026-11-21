@@ -533,17 +533,25 @@ class HybridVoiceInterpreter:
             and context.is_active()
             and intent.provider == "context-correction-slot-inheritance"
             and intent.action == IntentAction.PLAY_SEARCH
-            and context.last_display_query
-            and intent.display_query
         ):
-            status = self.adaptive_learner.record_correction(context.last_display_query, intent.display_query)
-            if status in ("pending", "active") and self.telemetry:
-                self.telemetry.record(
-                    "adaptive_correction_observed",
-                    status=status,
-                    source=context.last_display_query,
-                    target=intent.display_query,
-                )
+            source = (context.last_display_query or context.last_query or "").strip()
+            target = (intent.display_query or intent.query or "").strip()
+            if source and target:
+                status = self.adaptive_learner.record_correction(source, target)
+                if status in ("pending", "active") and self.telemetry:
+                    self.telemetry.record(
+                        "adaptive_correction_observed",
+                        status=status,
+                        source=source,
+                        target=target,
+                    )
+                # When newly promoted to active, immediately index into DynamicMusicCatalog
+                if status == "active":
+                    try:
+                        from .dynamic_catalog import get_dynamic_catalog
+                        get_dynamic_catalog().add_track(target, source="adaptive_learning")
+                    except Exception:
+                        pass
         return intent
 
     def local_stt_health(self, force_refresh: bool = False) -> dict[str, Any]:

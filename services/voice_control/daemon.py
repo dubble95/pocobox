@@ -2147,6 +2147,12 @@ def make_handler(controller: VoiceController) -> type[BaseHTTPRequestHandler]:
             if path == "/youtube/state":
                 self._send_json(200, {"ok": True, "state": controller.youtube.to_dict()})
                 return
+            if path == "/learning/entries":
+                learner = controller.interpreter.adaptive_learner if controller.interpreter else None
+                entries = learner.learned_entries() if learner else []
+                stats = learner.stats() if learner else {}
+                self._send_json(200, {"ok": True, "entries": entries, "stats": stats})
+                return
             if path == "/telemetry/stats":
                 hours = 24.0
                 if "hours=" in self.path:
@@ -2283,6 +2289,24 @@ def make_handler(controller: VoiceController) -> type[BaseHTTPRequestHandler]:
                     self._send_json(200, res)
                 except Exception as exc:
                     self._send_json(400, {"ok": False, "error": str(exc)})
+                return
+
+            if path == "/learning/forget":
+                try:
+                    data = json.loads(body.decode("utf-8")) if body else {}
+                except json.JSONDecodeError:
+                    self._send_json(400, {"ok": False, "error": "Invalid JSON"})
+                    return
+                src = str(data.get("source", "")).strip()
+                if not src:
+                    self._send_json(400, {"ok": False, "error": "Missing 'source' parameter"})
+                    return
+                learner = controller.interpreter.adaptive_learner if controller.interpreter else None
+                if learner:
+                    removed = learner.forget(src)
+                    self._send_json(200, {"ok": True, "removed": removed, "source": src, "stats": learner.stats()})
+                else:
+                    self._send_json(400, {"ok": False, "error": "Learner disabled"})
                 return
 
             if path == "/display/control":
