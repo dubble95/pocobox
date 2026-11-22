@@ -355,6 +355,11 @@ class TestYouTubeExecutorIntegration(unittest.TestCase):
         self.assertTrue(res_pause.ok)
         self.assertIn(IntentAction.PAUSE, handled_actions)
 
+        # NOW_PLAYING intent while YouTube is active -> routed to YouTube handler!
+        res_np = executor.execute(VoiceIntent(action=IntentAction.NOW_PLAYING))
+        self.assertTrue(res_np.ok)
+        self.assertIn(IntentAction.NOW_PLAYING, handled_actions)
+
         # PLAY_SEARCH arrives while YouTube active -> stops YouTube, then plays LMS!
         mock_lms.tidal_search_and_play.return_value = {"ok": True, "category": "songs", "title": "Celebrity"}
         executor.execute(VoiceIntent(action=IntentAction.PLAY_SEARCH, query="아이유 Celebrity"))
@@ -401,6 +406,126 @@ class TestDaemonYouTubeEndpointsAndState(unittest.TestCase):
         with mock.patch.object(client, "play_url", return_value={"ok": True}) as mock_play:
             client.youtube_play("pid1", "11cta61wi0g")
             mock_play.assert_called_with("pid1", "youtube://www.youtube.com/v/11cta61wi0g")
+
+    def test_youtube_now_playing_in_display_state(self) -> None:
+        sample_videos = [
+            {"id": "vid1", "title": "IU - Celebrity MV", "artist": "아이유", "category": "kpop", "thumbnail": "https://i.ytimg.com/vi/vid1/hqdefault.jpg"},
+            {"id": "vid2", "title": "NewJeans - Hype Boy", "artist": "NewJeans", "category": "kpop", "thumbnail": "https://i.ytimg.com/vi/vid2/hqdefault.jpg"},
+        ]
+        self.ctrl.youtube.load_queue(sample_videos, query="kpop", start_index=0)
+        self.assertTrue(self.ctrl.youtube.active)
+        self.assertTrue(self.ctrl.youtube.playing)
+
+        # 1. Active & playing state reflected in now_playing
+        st = self.ctrl.display_state()
+        np = st["now_playing"]
+        self.assertEqual(np["player_name"], "YouTube")
+        self.assertEqual(np["title"], "IU - Celebrity MV")
+        self.assertEqual(np["artist"], "아이유")
+        self.assertEqual(np["album"], "YouTube")
+        self.assertEqual(np["coverid"], "vid1")
+        self.assertEqual(np["artwork_url"], "https://i.ytimg.com/vi/vid1/hqdefault.jpg")
+        self.assertEqual(np["mode"], "play")
+        self.assertTrue(st["display"]["music_playing"])
+
+        # 2. Pause state reflected
+        self.ctrl.handle_youtube_intent(VoiceIntent(action=IntentAction.PAUSE))
+        st_paused = self.ctrl.display_state()
+        self.assertEqual(st_paused["now_playing"]["mode"], "pause")
+        self.assertFalse(st_paused["display"]["music_playing"])
+
+        # 3. Next video reflected
+        self.ctrl.handle_youtube_intent(VoiceIntent(action=IntentAction.NEXT))
+        st_next = self.ctrl.display_state()
+        self.assertEqual(st_next["now_playing"]["title"], "NewJeans - Hype Boy")
+        self.assertEqual(st_next["now_playing"]["artist"], "NewJeans")
+        self.assertEqual(st_next["now_playing"]["coverid"], "vid2")
+        self.assertEqual(st_next["now_playing"]["mode"], "play")
+
+        # 4. Stop YouTube -> falls back to LMS now_playing
+        self.ctrl.handle_youtube_intent(VoiceIntent(action=IntentAction.STOP_YOUTUBE))
+        self.assertFalse(self.ctrl.youtube.active)
+        st_stopped = self.ctrl.display_state()
+        self.assertEqual(st_stopped["now_playing"]["title"], "Test")
+        self.assertNotEqual(st_stopped["now_playing"].get("player_name"), "YouTube")
+
+    def test_youtube_dashboard_display_controls(self) -> None:
+        sample_videos = [
+            {"id": "vid1", "title": "Song 1", "artist": "Artist 1"},
+            {"id": "vid2", "title": "Song 2", "artist": "Artist 2"},
+        ]
+        self.ctrl.youtube.load_queue(sample_videos, query="kpop", start_index=0)
+
+        # Toggle (pause)
+        res_pause = self.ctrl.display_control("toggle")
+        self.assertTrue(res_pause["ok"])
+        self.assertFalse(self.ctrl.youtube.playing)
+
+        # Toggle (resume)
+        res_play = self.ctrl.display_control("toggle")
+        self.assertTrue(res_play["ok"])
+        self.assertTrue(self.ctrl.youtube.playing)
+
+        # Next
+        res_next = self.ctrl.display_control("next")
+        self.assertTrue(res_next["ok"])
+        self.assertEqual(self.ctrl.youtube.current_video()["id"], "vid2")
+
+        # Prev
+        res_prev = self.ctrl.display_control("prev")
+        self.assertTrue(res_prev["ok"])
+        self.assertEqual(self.ctrl.youtube.current_video()["id"], "vid1")
+
+        self.ctrl.youtube.stop()
+
+    def test_youtube_cover_art_fetch_when_active(self) -> None:
+        sample_videos = [
+            {"id": "thumb123", "title": "Test Title", "thumbnail": "https://i.ytimg.com/vi/thumb123/hqdefault.jpg"},
+        ]
+        self.ctrl.youtube.load_queue(sample_videos, query="kpop", start_index=0)
+
+        mock_resp = mock.MagicMock()
+        mock_resp.read.return_value = b"FAKE_JPEG_DATA"
+        mock_resp.headers = {"Content-Type": "image/jpeg"}
+
+        with mock.patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value.__enter__.return_value = mock_resp
+            art = self.ctrl.fetch_cover_art()
+            self.assertIsNotNone(art)
+            self.assertEqual(art[0], b"FAKE_JPEG_DATA")
+            self.assertEqual(art[1], "image/jpeg")
+            # Verify request url targeted YouTube thumbnail
+            req = mock_urlopen.call_args[0][0]
+            url = req.full_url if hasattr(req, "full_url") else str(req)
+            self.assertIn("thumb123", url)
+
+        self.ctrl.youtube.stop()
+
+    def test_lms_client_now_playing_youtube_url(self) -> None:
+        client = LMSClient()
+        fake_status = {
+            "player_name": "pocobox",
+            "mode": "play",
+            "playlist_tracks": 1,
+            "current_title": "YouTube Stream",
+            "playlist_loop": [
+                {
+                    "title": "youtube://www.youtube.com/v/dQw4w9WgXcQ",
+                    "url": "youtube://www.youtube.com/v/dQw4w9WgXcQ",
+                    "artist": "",
+                }
+            ],
+            "remoteMeta": {
+                "title": "Rick Astley - Never Gonna Give You Up",
+            },
+        }
+        with mock.patch.object(client, "player_status", return_value=fake_status):
+            np = client.now_playing("pid")
+            self.assertEqual(np["artist"], "Rick Astley")
+            self.assertEqual(np["title"], "Never Gonna Give You Up")
+            self.assertEqual(np["album"], "YouTube")
+            self.assertEqual(np["coverid"], "dQw4w9WgXcQ")
+            self.assertEqual(np["artwork_url"], "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg")
 
     def test_youtube_dac_routing_lifecycle(self) -> None:
         from voice_control.feedback import (

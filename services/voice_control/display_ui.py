@@ -845,9 +845,11 @@ DISPLAY_HTML = r"""<!doctype html>
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "ensure_dac" })
       }).catch(() => {});
+      notifyYtControl("sync", { active: true, playing: true, index: ytIndex });
       if (playBtn) playBtn.textContent = "⏸";
       updateYtUi();
     } else if (event.data === (window.YT ? YT.PlayerState.PAUSED : 2)) {
+      notifyYtControl("sync", { active: true, playing: false, index: ytIndex });
       if (playBtn) playBtn.textContent = "▶";
     }
   }
@@ -918,6 +920,13 @@ DISPLAY_HTML = r"""<!doctype html>
     updateYtUi();
     resetYtControlsTimer();
     showYtTapBadge("▶");
+    notifyYtControl("sync", {
+      active: true,
+      playing: true,
+      index: ytIndex,
+      query: ytCategory || query,
+      videos: ytQueue
+    });
 
     // Pause LMS local state
     playbackState.mode = "pause";

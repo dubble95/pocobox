@@ -50,6 +50,7 @@ from voice_control.executor import (  # noqa: E402
     VoiceExecutor,
     format_command_ack,
     format_command_failure,
+    format_now_playing_response,
     is_dac_mode,
 )
 from voice_control.feedback import (  # noqa: E402
@@ -482,6 +483,8 @@ class VoiceController:
             self._chime_playing = False
 
     def _is_music_playing(self) -> bool:
+        if self.youtube.active and self.youtube.playing:
+            return True
         try:
             pid = self.lms.resolve_player_id(self.player_name)
             st = self.lms.player_status(pid)
@@ -1624,6 +1627,25 @@ class VoiceController:
         return {"ok": True, "voice": self.display_state()["voice"]}
 
     def display_control(self, action: str) -> dict[str, Any]:
+        log.info("Display control action='%s'", action)
+        if self.youtube.active:
+            if action == "toggle":
+                act = IntentAction.PAUSE if self.youtube.playing else IntentAction.RESUME
+                res = self.handle_youtube_intent(VoiceIntent(action=act))
+                self._wake_display(15.0)
+                return {"ok": res.ok, "action": action, "message": res.message}
+            if action == "next":
+                res = self.handle_youtube_intent(VoiceIntent(action=IntentAction.NEXT))
+                self._wake_display(15.0)
+                return {"ok": res.ok, "action": action, "message": res.message}
+            if action == "prev":
+                res = self.handle_youtube_intent(VoiceIntent(action=IntentAction.PREVIOUS))
+                self._wake_display(15.0)
+                return {"ok": res.ok, "action": action, "message": res.message}
+            if action in ("vol_up", "vol_down"):
+                if self.is_dac_mode():
+                    return {"ok": False, "error": "DAC 모드에서는 볼륨이 100%로 고정되어 있습니다.", "fixed": True}
+
         player_id = self.lms.resolve_player_id(self.player_name)
         log.info("Display control action='%s' (player=%s)", action, player_id)
         if action == "toggle":
@@ -1797,6 +1819,18 @@ class VoiceController:
             title = prv.get("title", "이전 영상") if prv else "이전 영상"
             return ExecutionResult(ok=True, action=act, message=f"이전 영상 '{title}'으로 돌아갑니다.")
 
+        if act == IntentAction.NOW_PLAYING:
+            info = self._youtube_now_playing()
+            msg = format_now_playing_response(info, language=intent.language)
+            return ExecutionResult(
+                ok=True,
+                action=act,
+                message=msg,
+                intent=intent.to_dict(),
+                details={"now_playing": info, "youtube": self.youtube.to_dict()},
+                latency_ms=round((time.monotonic() - t0) * 1000.0, 1),
+            )
+
         return ExecutionResult(ok=False, action=act, message="지원하지 않는 유튜브 명령입니다.")
 
     def get_daily_quiz_schedule(self, force_refresh: bool = False) -> dict[str, Any]:
@@ -1808,13 +1842,46 @@ class VoiceController:
         self._schedule_cache_time = now
         return dict(st)
 
+    def _youtube_now_playing(self) -> dict[str, Any]:
+        cur = self.youtube.current_video() or {}
+        title = str(cur.get("title") or "YouTube 동영상").strip()
+        artist = str(cur.get("artist") or "").strip()
+        album = "YouTube"
+        vid = str(cur.get("id") or "").strip()
+        thumb = str(cur.get("thumbnail") or "").strip()
+        if not thumb and vid:
+            thumb = f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+        mode = "play" if self.youtube.playing else "pause"
+        return {
+            "player_id": "youtube",
+            "player_name": "YouTube",
+            "mode": mode,
+            "power": 1,
+            "volume": self.youtube.volume,
+            "digital_volume_control": 1,
+            "use_volume_control": 1,
+            "playlist_tracks": len(self.youtube.queue),
+            "time": 0.0,
+            "duration": float(cur.get("duration", 0) or 0),
+            "title": title,
+            "artist": artist,
+            "album": album,
+            "coverid": vid,
+            "artwork_url": thumb,
+            "category": cur.get("category", "kpop"),
+            "url": cur.get("url", f"https://www.youtube.com/watch?v={vid}" if vid else ""),
+        }
+
     def display_state(self) -> dict[str, Any]:
         np: dict[str, Any] = {}
-        try:
-            pid = self.lms.resolve_player_id(self.player_name)
-            np = self.lms.now_playing(pid)
-        except Exception:
-            pass
+        if self.youtube.active:
+            np = self._youtube_now_playing()
+        else:
+            try:
+                pid = self.lms.resolve_player_id(self.player_name)
+                np = self.lms.now_playing(pid)
+            except Exception:
+                pass
         voice_info = (
             self.continuous_listener.status_dict()
             if self.continuous_listener is not None
@@ -1866,11 +1933,33 @@ class VoiceController:
         }
 
     def fetch_cover_art(self) -> tuple[bytes, str] | None:
+        if self.youtube.active:
+            cur = self.youtube.current_video() or {}
+            thumb = str(cur.get("thumbnail") or "").strip()
+            vid = str(cur.get("id") or "").strip()
+            candidates: list[str] = []
+            if thumb:
+                candidates.append(thumb)
+            if vid:
+                candidates.append(f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg")
+                candidates.append(f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg")
+            for url in candidates:
+                try:
+                    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (PocoBox)"})
+                    with urllib.request.urlopen(req, timeout=4.0) as resp:
+                        data = resp.read()
+                        if data:
+                            return data, resp.headers.get("Content-Type", "image/jpeg")
+                except Exception as exc:
+                    log.debug("Failed to fetch YouTube thumbnail (%s): %s", url, exc)
+                    continue
+            return None
+
         try:
             pid = self.lms.resolve_player_id(self.player_name)
         except Exception:
             pid = "02:70:6f:63:6f:01"
-        candidates: list[str] = [
+        candidates = [
             f"http://{self.lms.host}:{self.lms.port}/music/current/cover.jpg?player={pid}",
         ]
         try:
@@ -1886,7 +1975,8 @@ class VoiceController:
 
         for url in candidates:
             try:
-                with urllib.request.urlopen(url, timeout=4.0) as resp:
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (PocoBox)"})
+                with urllib.request.urlopen(req, timeout=4.0) as resp:
                     data = resp.read()
                     if data:
                         return data, resp.headers.get("Content-Type", "image/jpeg")
@@ -2349,6 +2439,14 @@ def make_handler(controller: VoiceController) -> type[BaseHTTPRequestHandler]:
                     self._send_json(200, {"ok": True, "sink": sink})
                     return
                 if act == "sync":
+                    if "videos" in data and isinstance(data["videos"], list) and data["videos"]:
+                        controller.youtube.queue = list(data["videos"])
+                    if "query" in data:
+                        controller.youtube.query = str(data["query"])
+                    if "active" in data:
+                        controller.youtube.active = bool(data["active"])
+                    if "playing" in data:
+                        controller.youtube.set_playing(bool(data["playing"]))
                     idx = data.get("index")
                     if idx is not None:
                         try:

@@ -16,6 +16,10 @@ _TIDAL_TRACK_ID_RE = re.compile(
     r"(?:tidal|wimp)://(?:track:)?(\d+)(?:\.[a-z0-9]+)?$|tidal\.com/(?:browse/)?track/(\d+)",
     re.IGNORECASE,
 )
+_YT_TRACK_ID_RE = re.compile(
+    r"(?:v=|youtu\.be/|/v/|/embed/|youtube://)([a-zA-Z0-9_-]{11})|(?:vi[/]|vi%2F)([a-zA-Z0-9_-]{11})",
+    re.IGNORECASE,
+)
 
 
 def extract_tidal_track_id(url: str | None) -> str | None:
@@ -26,6 +30,19 @@ def extract_tidal_track_id(url: str | None) -> str | None:
     if not m:
         return None
     return m.group(1) or m.group(2)
+
+
+def extract_youtube_video_id(url: str | None) -> str | None:
+    """Extract 11-character YouTube video ID from a URL or stream path."""
+    if not url:
+        return None
+    cleaned = str(url).strip()
+    m = _YT_TRACK_ID_RE.search(cleaned)
+    if m:
+        return m.group(1) or m.group(2)
+    if len(cleaned) == 11 and re.fullmatch(r"[a-zA-Z0-9_-]{11}", cleaned):
+        return cleaned
+    return None
 
 
 def _tokenize(text: str) -> set[str]:
@@ -199,23 +216,56 @@ class LMSClient:
         raise RuntimeError(f"No LMS players connected (waited up to {timeout:.1f}s).")
 
     def player_status(self, player_id: str) -> dict[str, Any]:
-        return self.call(player_id, ["status", "-", 1, "tags:aAlKdc"])
+        return self.call(player_id, ["status", "-", 1, "tags:aAlKdcu"])
 
     def now_playing(self, player_id: str) -> dict[str, Any]:
         st = self.player_status(player_id)
         loop = st.get("playlist_loop") or []
         track = loop[0] if loop else {}
         remote_meta = st.get("remoteMeta") if isinstance(st.get("remoteMeta"), dict) else {}
-        title = (
-            track.get("title")
-            or remote_meta.get("title")
-            or st.get("current_title")
-            or ""
-        )
-        artist = track.get("artist") or remote_meta.get("artist") or ""
-        album = track.get("album") or remote_meta.get("album") or ""
+
+        raw_title = str(track.get("title") or "").strip()
+        url = str(track.get("url") or "").strip()
+        is_url_title = raw_title.startswith(("http://", "https://", "youtube://")) or "youtube.com" in raw_title
+
+        title = ""
+        if not is_url_title and raw_title:
+            title = raw_title
+        elif remote_meta.get("title"):
+            title = str(remote_meta.get("title")).strip()
+        elif st.get("remote_title"):
+            title = str(st.get("remote_title")).strip()
+        elif st.get("current_title"):
+            title = str(st.get("current_title")).strip()
+        else:
+            title = raw_title
+
+        artist = str(track.get("artist") or remote_meta.get("artist") or st.get("remote_artist") or "").strip()
+        album = str(track.get("album") or remote_meta.get("album") or "").strip()
         coverid = str(track.get("coverid") or remote_meta.get("coverid") or "")
         artwork_url = str(track.get("artwork_url") or remote_meta.get("artwork_url") or "")
+
+        # If artist is missing but title has "Artist - Title" (common for YouTube / stream titles):
+        if not artist and " - " in title:
+            parts = title.split(" - ", 1)
+            candidate_artist = parts[0].strip()
+            candidate_title = parts[1].strip()
+            if candidate_artist and candidate_title:
+                artist = candidate_artist
+                title = candidate_title
+
+        # If playing YouTube via LMS and album/artwork_url are missing, derive metadata from video ID:
+        is_youtube = url.startswith("youtube://") or "youtube.com" in url or "youtu.be" in url or raw_title.startswith("youtube://")
+        if is_youtube:
+            if not album:
+                album = "YouTube"
+            if not artwork_url:
+                vid = extract_youtube_video_id(url) or extract_youtube_video_id(raw_title)
+                if vid:
+                    artwork_url = f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+                    if not coverid:
+                        coverid = vid
+
         duration = float(
             st.get("duration")
             or track.get("duration")

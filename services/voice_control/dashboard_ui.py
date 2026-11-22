@@ -166,7 +166,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     </div>
 
     <div class="card">
-      <h2>💿 현재 재생 곡 (Now Playing)</h2>
+      <h2>💿 현재 재생 곡 (Now Playing) <span id="npSourceBadge" class="badge b-rec" style="display:none">YouTube</span></h2>
       <div class="np-box">
         <img id="npArt" class="np-art" src="" alt="" />
         <div style="min-width:0">
@@ -413,15 +413,32 @@ DASHBOARD_HTML = r"""<!doctype html>
         applyVoiceCfgToUI(v);
       }
 
+      const isYt = Boolean((s.youtube && s.youtube.active) || np.player_name === "YouTube" || (s.display && s.display.youtube_active));
+      const ytBadge = document.getElementById("npSourceBadge");
+      if (ytBadge) {
+        if (isYt) {
+          ytBadge.textContent = "YouTube";
+          ytBadge.style.display = "inline-block";
+        } else {
+          ytBadge.style.display = "none";
+        }
+      }
+
       document.getElementById("npTitle").textContent = np.title || "재생 중인 곡 없음";
       document.getElementById("npArtist").textContent = [np.artist, np.album].filter(Boolean).join(" — ") || "-";
       const isDacFixed = Boolean(s.dac_fixed_volume || s.audio_output_mode === "usb_dac" || np.digital_volume_control === 0 || np.use_volume_control === 0);
       const volLabel = isDacFixed ? "DAC 100% (고정)" : ("VOL " + (np.volume ?? 0) + "%");
-      document.getElementById("npStatus").textContent = (np.mode || "stop") + " · " + volLabel;
-      const artKey = (np.title || "") + "|" + (np.coverid || "");
+      const modeLabel = isYt ? (np.mode === "play" ? "YouTube 재생 중" : "YouTube 일시정지") : (np.mode || "stop");
+      document.getElementById("npStatus").textContent = modeLabel + " · " + volLabel;
+      const artKey = (np.title || "") + "|" + (np.coverid || "") + "|" + (np.artwork_url || "");
       if (np.title && artKey !== lastArtKey) {
         lastArtKey = artKey;
-        document.getElementById("npArt").src = "/display/cover?v=" + encodeURIComponent(artKey);
+        const artEl = document.getElementById("npArt");
+        if (np.artwork_url && (np.artwork_url.startsWith("http://") || np.artwork_url.startsWith("https://")) && !np.artwork_url.includes("/music/current/cover")) {
+          artEl.src = np.artwork_url;
+        } else {
+          artEl.src = "/display/cover?v=" + encodeURIComponent(artKey);
+        }
       }
     } catch (_) {}
   }

@@ -342,12 +342,13 @@ class VoiceExecutor:
             target = "내장 스피커" if intent.query == "speaker" else "USB DAC"
             return done(True, f"사운드를 {target}으로 전환했습니다.", {"target": intent.query})
 
-        # If YouTube video is actively playing on screen, route pause/resume/next/prev to YouTube
+        # If YouTube video is actively playing on screen, route pause/resume/next/prev/now_playing to YouTube
         if self.is_youtube_active_fn() and intent.action in (
             IntentAction.PAUSE,
             IntentAction.RESUME,
             IntentAction.NEXT,
             IntentAction.PREVIOUS,
+            IntentAction.NOW_PLAYING,
         ):
             if self.youtube_handler is not None:
                 return self.youtube_handler(intent, dry_run)
