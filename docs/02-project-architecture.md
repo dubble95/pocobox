@@ -130,3 +130,50 @@ Phase 2 구현 절차:
 ### Phase 4 — 마무리 및 운영 안정화
 - [ ] 기본 비밀번호 변경, SSH 키 전용 보안 설정
 - [ ] 자동 배포 스크립트 및 전체 운영 매뉴얼 정리
+
+---
+
+## 5. 하드웨어 이식성 및 범용 리눅스 확장 설계 (Hardware Portability)
+
+PocoBox 아키텍처는 기준 기기인 POCO F1(Snapdragon 845)에 종속되지 않도록 **범용 코어 계층(Generic Core)**과 **하드웨어 적응 계층(HAL)**을 명확히 분리하여 설계되었습니다.
+
+### 5.1 계층 구조 (Layered Architecture)
+
+```mermaid
+flowchart TD
+    subgraph APP["Application & Presentation Layer"]
+        KIOSK["Fullscreen Now-Playing Web UI (:8765/display)"]
+        DASH["Audio DSP / Telemetry Dashboard (:8765/dashboard)"]
+        CLI["CLI Commands (pocobox-voice, pocobox-lms)"]
+    end
+
+    subgraph CORE["Generic Portable Core (Any Linux: ARM64 & x86_64)"]
+        VOICE["Voice Daemon & Rule Engine (Python 3.10+)"]
+        STT["SenseVoice-Small INT8 Docker Container (:8766)"]
+        LMS["Lyrion Music Server Docker Container (:9000)"]
+        SQL["Squeezelite Native Player (Bit-perfect ALSA / Pulse)"]
+        AEC["Decoupled WebRTC AEC3 Echo Cancellation (libpocobox_aec3.so)"]
+        UDEV["Generic Linux udev USB Sound Card Monitor"]
+    end
+
+    subgraph HAL["Hardware Adaptation Layer (Device-Specific)"]
+        PHONE["Smartphones (POCO F1, OnePlus, Pixel 등): All-in-One, DTB Host 필요 시 패치"]
+        SBC["SBC (Raspberry Pi, Orange Pi): USB/I2S Mic + USB DAC + HDMI/DSI 터치스크린"]
+        PC["Mini PC / Laptops (x86_64 / arm64): USB DAC 직결, 고성능 로컬 SLM 구동"]
+    end
+
+    APP --> CORE
+    CORE --> HAL
+```
+
+### 5.2 기기별 구성 차이 및 이식 가이드
+
+| 구성 요소 | 스마트폰 업사이클링 (POCO F1 등) | 싱글보드 컴퓨터 (Raspberry Pi 4/5 등) | 미니 PC / 노트북 (x86_64) |
+|---|---|---|---|
+| **OS 환경** | postmarketOS / Alpine (`musl`, systemd) | Raspberry Pi OS / Debian / Ubuntu | Debian / Ubuntu / Arch Linux |
+| **USB Host** | 기종에 따라 DTB `dr_mode="host"` 설정 필요 | 기본 제공 (패치 불필요) | 기본 제공 (패치 불필요) |
+| **마이크 입력** | 스마트폰 내장 마이크 (PulseAudio source) | USB 마이크 / I2S 마이크 모듈 (ReSpeaker 등) | USB 마이크 / 노트북 내장 마이크 |
+| **안내음/TTS 출력** | 스마트폰 내장 스피커 (PulseAudio sink 분리) | 3.5mm 오디오 / 보조 스피커 / 모니터 스피커 | 메인보드 3.5mm / 내장 스피커 |
+| **Hi-Res 음악 출력** | USB-C DAC 직결 (`hw:CARD=...,DEV=0`) | USB DAC 직결 (`hw:CARD=...,DEV=0`) | USB DAC 직결 (`hw:CARD=...,DEV=0`) |
+| **화면/터치** | 내장 LCD 터치스크린 (`cage + firefox-esr`) | 공식 7인치 터치스크린 / HDMI 디스플레이 | 내장 화면 / 외부 모니터 / 헤드리스 모드 |
+| **백라이트 제어** | `/sys/class/backlight/*` 자동 감지 | `rpi_backlight` 또는 DPMS | `intel_backlight` 또는 DPMS (헤드리스 시 no-op) |

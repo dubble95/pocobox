@@ -48,6 +48,11 @@ def select_internal_speaker_sink(sinks_short_output: str) -> str | None:
         sl = s.lower()
         if "speaker" in sl and "usb-" not in sl and not sl.endswith(".monitor"):
             return s
+    # Priority 4: any non-USB onboard/SoC/PCI sink (e.g. Raspberry Pi, Intel NUC, PC) that is not Headphones/Earpiece
+    for s in sinks:
+        sl = s.lower()
+        if "usb-" not in sl and "headphone" not in sl and "earpiece" not in sl and not sl.endswith(".monitor"):
+            return s
     return None
 
 

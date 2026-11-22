@@ -20,11 +20,20 @@ for candidate in webrtc-audio-processing-1 webrtc-audio-processing-2; do
 done
 
 if [ -z "${PKG}" ] && command -v apk >/dev/null 2>&1; then
-    echo "==> Installing webrtc-audio-processing-1-dev and build tools..."
+    echo "==> Installing webrtc-audio-processing-1-dev and build tools (Alpine/postmarketOS)..."
     apk add --no-interactive --no-cache g++ pkgconf webrtc-audio-processing-1-dev </dev/null || \
         apk add --no-interactive --no-cache g++ pkgconf webrtc-audio-processing-2-dev </dev/null || \
         yes | apk add --no-cache g++ pkgconf webrtc-audio-processing-1-dev
     for candidate in webrtc-audio-processing-1 webrtc-audio-processing-2; do
+        if pkg-config --exists "${candidate}" 2>/dev/null; then
+            PKG="${candidate}"
+            break
+        fi
+    done
+elif [ -z "${PKG}" ] && command -v apt-get >/dev/null 2>&1; then
+    echo "==> Installing webrtc-audio-processing headers and build tools (Debian/Ubuntu/Raspberry Pi OS)..."
+    apt-get update && apt-get install -y libwebrtc-audio-processing-dev pkg-config g++ || true
+    for candidate in webrtc-audio-processing-1 webrtc-audio-processing-2 webrtc-audio-processing; do
         if pkg-config --exists "${candidate}" 2>/dev/null; then
             PKG="${candidate}"
             break

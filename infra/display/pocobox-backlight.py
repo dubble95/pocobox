@@ -227,7 +227,12 @@ class SysfsBacklight:
     """Controls Linux /sys/class/backlight/<name> brightness and bl_power."""
 
     def __init__(self, backlight_dir: str | Path = "/sys/class/backlight/backlight") -> None:
-        self.base = Path(backlight_dir)
+        p = Path(backlight_dir)
+        if not p.exists() and Path("/sys/class/backlight").exists():
+            candidates = sorted(Path("/sys/class/backlight").glob("*"))
+            if candidates:
+                p = candidates[0]
+        self.base = p
         self.brightness_path = self.base / "brightness"
         self.bl_power_path = self.base / "bl_power"
         self.max_brightness_path = self.base / "max_brightness"
