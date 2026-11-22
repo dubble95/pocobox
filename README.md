@@ -16,25 +16,37 @@
 
 ---
 
-## 구현 현황 (All Phases Complete)
+## 주요 기능 및 핵심 아키텍처 (Key Features & Highlights)
 
-- [x] **Phase 0: 리눅스 설치 및 기본 환경 구축** ([01-linux-installation.md](docs/01-linux-installation.md))
-  - POCO F1 (`beryllium_global`, `EBBG` 패널) 부트로더 공식 언락 완료
-  - postmarketOS (Nura `v26.06` · Phosh · `xiaomi-beryllium-ebbg`) 플래싱 및 부팅 완료
-  - 호스트네임 `pocobox` (`pocobox.local` mDNS), Wi-Fi(2.4G/5G), Mac 비밀번호 없는 SSH(`ssh pocobox`) 완료
-- [x] **Phase 1: LMS (Docker) + TIDAL 설정/이관 + Squeezelite 로컬 오디오 출력**
-  - Lyrion Music Server 9.1.2 (`pocobox-lms`, `http://pocobox.local:9000/material/`) 구동 완료
-  - 기존 LMS 설정(`TIDAL`, `MaterialSkin`, `YouTube`, `Favorites` 등) 무중단 이관 및 고유 `server_uuid` 분리
-  - Squeezelite `2.0.0-1612` 네이티브 arm64 빌드 (ALSA + DSD + SoXR + Opus + SSL, 고정 MAC `02:70:6f:63:6f:01`)
-  - LMS/TIDAL 스마트 검색 JSON-RPC CLI (`pocobox-lms`) 구현 및 실서버 검증
-- [x] **Phase 2: USB-C Host 모드 활성화 + USB DAC 연결 감지 시 자동 전환 & 이어재생**
-  - 원본 `boot.img` 이중 백업 + Device Tree `dr_mode = "host"` 패치 및 `mkinitfs` 반영 (`lsusb` xHCI 2.0/3.0 확인)
-  - `pocobox-dac-autoplay.service` 구현·배포 (USB DAC 연결 → `plughw:CARD=<ID>,DEV=0` 전환 + 이어재생 / 분리 → 자동 일시정지)
-- [x] **Phase 3: 하이브리드 음성 명령(로컬 Fast-Path + Gemini/OpenAI STT + LMS/TIDAL)**
-  - `pocobox-voice.service` (`http://pocobox.local:8765`), `pocobox-voice` CLI, 볼륨업 0.7초 길게 누르기 트리거, Phosh 앱 아이콘 구축
-  - 84개 한국어/영어 혼합 음성명령 테스트 데이터셋 + 단위/VAD/라이브 TIDAL E2E 자동화 테스트 셋 구축 및 **100% 통과**
-- [x] **Phase 4: 무인 상시 운영 안정화** ([03-operations-and-testing.md](docs/03-operations-and-testing.md))
-  - 헤드리스 PulseAudio(`pocobox-pulseaudio.service`), Wi-Fi 절전 방지, 자동 슬립 방지, `nftables` 방화벽 규칙 영구 반영, 원클릭 배포 스크립트(`scripts/deploy.sh`)
+### 1. 상시 호스트 기반 Lyrion Music Server (LMS · TIDAL · YouTube)
+- **호스트 네트워크 Docker 컨테이너 (`:9000`)**: SlimProto(`3483`), Web UI(`9000`), CLI(`9090`), mDNS가 브릿지 오버헤드 없이 네이티브 직결됩니다.
+- **TIDAL & YouTube 완벽 지원**: TIDAL 공식 플러그인(OAuth 기기 인증), My Mix, 트랙 라디오(DSTM), K-pop/클래식 공식 뮤직비디오 스트리밍을 지원합니다.
+- **네이티브 Squeezelite 플레이어**: C 소스로 직접 빌드된 경량 데몬으로 ALSA Bit-perfect 직결, DSD, SoXR VHQ 리샘플링, Opus, SSL 스트리밍을 제공합니다.
+
+### 2. USB DAC 핫플러그 감지 & Bit-Perfect 자동 이어재생
+- **Linux udev 이벤트 연동 (`pocobox-dac-autoplay`)**: 외장 USB DAC 연결 시 1초 내 ALSA 카드 ID를 감지하여 Squeezelite 출력을 `hw:CARD=<ID>,DEV=0`으로 즉각 전환합니다.
+- **스마트 재생 제어**: DAC 연결 시 이전 재생 대기열을 자동으로 이어서 재생(Resume)하며, 케이블 분리 시 즉시 일시정지(Pause)하여 내장 스피커로 소리가 튀는 것을 원천 차단합니다.
+- **하드웨어 믹서 고정**: DAC 하드웨어 볼륨을 100%(0.00 dB)로 고정하여 DAC 본연의 다이내믹 레인지와 비트 퍼펙트 음질을 유지합니다.
+
+### 3. 로컬 우선 초저지연 하이브리드 음성 제어 (Local-First Voice Control)
+- **오프라인 0초 호출어 감지**: WebRTC AEC3 음향 에코 캔슬러와 Vosk 초경량 문법 모델이 결합되어 음악 재생 중에도 오작동 없이 `"포코야"`, `"Hey Poco"` 호출을 정확히 포착하며, 감지 즉시 LMS 음악을 18%로 자동 감쇄(Auto-Ducking)합니다.
+- **온디바이스 SenseVoice STT (~150–300ms)**: Docker 컨테이너(`pocobox-stt`)에서 구동되는 INT8 모델로 한국어/영어 자연어를 완전 오프라인으로 고속 전사하며 클라우드 API 호출 비용이 들지 않습니다.
+- **초고속 서브밀리초 규칙 엔진 (<1ms)**: 곡 검색, 재생 제어, 볼륨, 한국 표준시(KST) 시간/날씨, 이중언어 영어 퀴즈 등 84개+ 실전 명령 패턴을 로컬에서 1ms 미만에 즉시 파싱 및 실행합니다.
+- **선택적 클라우드/SLM 폴백**: 백과사전식 Q&A나 미등록 발화에 한해 텍스트만 Gemini 또는 OpenAI로 안전하게 에스컬레이션합니다.
+
+### 4. 물리적 오디오 경로 격리 (Audio Path Isolation)
+- **하이파이 음악 감상 보호**: 메인 음악 스트림은 외장 USB DAC로만 독점 출력됩니다.
+- **안내음/TTS 격리**: 피드백 차임음, 음성 안내, 영어 퀴즈 구연동화는 헤드리스 PulseAudio를 통해 기기 내장 스피커(또는 온보드 3.5mm 단자)로만 분리 출력되어 음악 감상을 결코 방해하지 않습니다.
+
+### 5. 풀스크린 반응형 Now-Playing 키오스크 UI & 대시보드
+- **상시 전용 키오스크 (`/display`)**: 초경량 Wayland 콤포지터(`cage`) + `firefox-esr` 기반으로 잠금화면 없이 앨범 아트워크, 트랙 정보, 재생 제어, 실시간 음성 자막을 풀스크린으로 표시합니다.
+- **스마트 백라이트 절전 (`pocobox-backlight`)**: 음악 정지 시 디스플레이를 자동 절전(`DISPLAY_POWER_MODE=auto`)하고, 터치 또는 재생 시 즉각 복귀합니다. 가속도계 센서(`iio-sensor-proxy`) 기반 자동 화면 회전을 지원합니다.
+- **실시간 엔지니어링 대시보드 (`/dashboard`)**: 마이크 RMS 레벨, VAD 임계치, 에코 캔슬링(AEC3) 감쇄율, 적응형 발음 학습 현황을 웹에서 실시간 모니터링 및 튜닝할 수 있습니다.
+
+### 6. 무인 24/7 상시 운영 안정화
+- Wi-Fi 절전 방지(`99-pocobox-no-powersave.conf`) 및 커널 자동 슬립 방지(`99-pocobox-nosuspend.conf`).
+- 스마트폰 기종의 경우 내장 배터리가 무정전 전원 장치(UPS) 역할을 수행하여 전원 케이블 분리나 이동 시에도 무중단 동작.
+- `nftables` 방화벽 자동 구성 및 장애 발생 시 systemd 자동 재기동 보장.
 
 ---
 
