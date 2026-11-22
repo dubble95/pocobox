@@ -201,11 +201,16 @@ def record_utterance_wav(
             r = chunk_rms(data)
 
             if idx < calibration_chunks:
-                ambient_samples.append(r)
+                # Do not poison ambient noise floor with early human speech (> 110 RMS)
+                if r < 110.0:
+                    ambient_samples.append(r)
+                else:
+                    speech_started = True
+                    speech_chunks += 1
                 continue
 
             ambient = sum(ambient_samples) / len(ambient_samples) if ambient_samples else 30.0
-            threshold = max(min_threshold, ambient * 2.2)
+            threshold = max(min_threshold, min(95.0, ambient * 2.0))
 
             if r >= threshold:
                 speech_started = True

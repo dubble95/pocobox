@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-UI_VERSION = "10"
+UI_VERSION = "11"
 
 DISPLAY_MANIFEST = json.dumps(
     {
@@ -214,11 +214,20 @@ DISPLAY_HTML = r"""<!doctype html>
     top: -10px; bottom: -10px; left: -6px; right: -6px;
   }
   .btn.mic {
+    width: clamp(52px, 13vw, 64px);
+    height: clamp(52px, 13vw, 64px);
+    font-size: clamp(21px, 5.2vw, 27px);
     background: rgba(56, 189, 248, 0.22); border-color: rgba(56, 189, 248, 0.55);
+    margin-left: clamp(4px, 1.2vw, 12px);
+    z-index: 4;
+  }
+  .btn.mic::after {
+    top: -14px; bottom: -14px; left: -8px; right: -24px;
+    border-radius: 50%;
   }
   .btn.mic.active {
-    background: rgba(239, 68, 68, 0.34); border-color: rgba(239, 68, 68, 0.85);
-    box-shadow: 0 0 18px rgba(239, 68, 68, 0.45);
+    background: rgba(239, 68, 68, 0.42); border-color: rgba(239, 68, 68, 0.95);
+    box-shadow: 0 0 22px rgba(239, 68, 68, 0.65);
   }
 
   /* Landscape side-by-side layout (auto via orientation OR manual .layout-landscape) */
@@ -273,6 +282,12 @@ DISPLAY_HTML = r"""<!doctype html>
       height: clamp(60px, 15dvh, 76px);
       font-size: clamp(23px, 5.8dvh, 30px);
       margin: 0 clamp(8px, 1.5vw, 16px);
+    }
+    body:not(.layout-portrait) .btn.mic {
+      width: clamp(52px, 13dvh, 66px);
+      height: clamp(52px, 13dvh, 66px);
+      font-size: clamp(21px, 5.2dvh, 27px);
+      margin-left: clamp(4px, 1.2vw, 12px);
     }
   }
 
@@ -681,7 +696,7 @@ DISPLAY_HTML = r"""<!doctype html>
           <button class="btn primary" id="playBtn" onclick="ctrl('toggle')" aria-label="Play/Pause">▶</button>
           <button class="btn" onclick="ctrl('next')" aria-label="Next">⏭</button>
           <button class="btn" id="volUpBtn" onclick="ctrl('vol_up')" aria-label="Volume Up">+</button>
-          <button class="btn mic" id="micBtn" onclick="triggerMic()" aria-label="Voice">🎙</button>
+          <button class="btn mic" id="micBtn" onclick="triggerMic(event)" aria-label="Voice">🎙</button>
         </div>
       </div>
     </div>
@@ -1381,12 +1396,53 @@ DISPLAY_HTML = r"""<!doctype html>
     ctrl("toggle");
   }
 
-  async function triggerMic() {
+  let micTriggerBusy = false;
+  let lastMicTriggerAt = 0;
+
+  async function triggerMic(ev) {
+    if (ev) {
+      ev.stopPropagation();
+      if (ev.cancelable && ev.type === "touchend") {
+        ev.preventDefault();
+      }
+    }
+    const now = Date.now();
+    if (micTriggerBusy || (now - lastMicTriggerAt < 450)) return;
+    lastMicTriggerAt = now;
+    micTriggerBusy = true;
+
+    const micBtn = document.getElementById("micBtn");
+    if (micBtn) micBtn.classList.add("active");
+
+    if (quizActive) {
+      showSubtitle(
+        "recording",
+        '<span class="wave"><span></span><span></span><span></span><span></span></span> 🎙️ 영어 퀴즈 답변 듣는 중',
+        "정답을 말씀해 주세요...",
+        '"다시", "천천히", "힌트", "패스", "그만"',
+        0
+      );
+    } else {
+      showSubtitle(
+        "recording",
+        '<span class="wave"><span></span><span></span><span></span><span></span></span> 🎙️ 음성 듣는 중',
+        "말씀해 주세요...",
+        "말씀을 마치면 자동으로 인식합니다",
+        0
+      );
+    }
+
     try {
       const r = await fetch("/voice/listen", {method: "POST", body: "{}"});
-      await r.json();
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok && data && data.message) {
+        showSubtitle("ambient", "🎙️ 음성 안내", data.message, "", 3200);
+      }
       refresh();
-    } catch (_) {}
+    } catch (_) {
+    } finally {
+      micTriggerBusy = false;
+    }
   }
 
   function setBackdropUrl(url) {
@@ -1513,6 +1569,13 @@ DISPLAY_HTML = r"""<!doctype html>
   appRootEl.addEventListener("touchstart", handleTouchStart, {passive: true});
   appRootEl.addEventListener("touchmove", handleTouchMove, {passive: true});
   appRootEl.addEventListener("touchend", handleTouchEnd, {passive: false});
+
+  const micBtnEl = document.getElementById("micBtn");
+  if (micBtnEl) {
+    micBtnEl.addEventListener("touchend", (e) => {
+      triggerMic(e);
+    }, {passive: false});
+  }
 
   // Tap empty background to briefly toggle minimal HUD (ignored if swipe occurred)
   appRootEl.addEventListener("click", (e) => {

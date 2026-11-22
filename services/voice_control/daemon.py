@@ -1465,9 +1465,19 @@ class VoiceController:
 
     def listen_once(self, dry_run: bool = False) -> ExecutionResult:
         if self._quiz_loop_active:
-            return ExecutionResult(ok=False, action="busy", message="영어 퀴즈가 이미 음성으로 진행 중입니다.")
+            if not self.quiz.active:
+                for _ in range(25):
+                    if not self._quiz_loop_active:
+                        break
+                    time.sleep(0.1)
+            if self._quiz_loop_active:
+                if self.quiz.active:
+                    msg = "영어 퀴즈가 음성으로 진행 중입니다. 신호음 후 정답을 말씀해 주세요."
+                else:
+                    msg = "영어 퀴즈 마무리 중입니다. 잠시 후 다시 눌러주세요."
+                return ExecutionResult(ok=False, action="busy", message=msg)
         if not self._listen_lock.acquire(blocking=False):
-            return ExecutionResult(ok=False, action="busy", message="이미 음성 명령을 듣는 중입니다.")
+            return ExecutionResult(ok=False, action="busy", message="이미 음성을 듣고 있습니다. 편하게 말씀해 주세요.")
         self._manual_busy = True
         skip_restore = False
         try:
