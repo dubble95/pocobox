@@ -6,7 +6,7 @@ __pycache__/
 *.pyo
 
 # Large OS images & flashing artifacts
-images/
+/images/
 *.img
 *.img.xz
 *.zip

@@ -18,6 +18,10 @@
 
 ## 2. 시스템 아키텍처
 
+<p align="center">
+  <img src="images/pocobox-architecture.svg" alt="PocoBox Architecture" width="100%" />
+</p>
+
 ```mermaid
 flowchart TB
     subgraph HW["POCO F1 Hardware (SDM845 / postmarketOS v26.06)"]

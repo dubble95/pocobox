@@ -1,5 +1,9 @@
 # PocoBox
 
+<p align="center">
+  <img src="docs/images/pocobox-hero.jpg" alt="PocoBox Setup Concept" width="100%" style="border-radius: 12px; max-width: 900px;" />
+</p>
+
 **PocoBox**는 쓰지 않는 중고 스마트폰, 싱글보드 컴퓨터(Raspberry Pi 등), 또는 저전력 미니 PC를 상시 대기형 전용 스마트 오디오 플레이어 겸 한/영 음성 어시스턴트로 업사이클링하는 오픈소스 소프트웨어 스택입니다.
 
 **Xiaomi POCO F1 (`xiaomi-beryllium`)**을 기준 하드웨어(Reference Device)로 개발되었으나, **핵심 파이프라인 전체가 표준 리눅스(postmarketOS, Debian, Ubuntu, Raspberry Pi OS, Alpine) 기반으로 모듈화**되어 있어 하드웨어 제약 없이 손쉽게 포팅하고 확장할 수 있습니다.
@@ -57,6 +61,10 @@ python3 tests/run_voice_benchmark.py --live http://pocobox.local:8765 --live-lim
 ---
 
 ## 하드웨어 확장성 (Hardware Portability & Beyond POCO F1)
+
+<p align="center">
+  <img src="docs/images/pocobox-architecture.svg" alt="PocoBox Architecture Diagram" width="100%" style="border-radius: 12px; max-width: 1000px;" />
+</p>
 
 PocoBox는 기준 기기인 POCO F1 외에도 표준 리눅스(`systemd` + ALSA/PulseAudio + Docker)가 지원되는 다양한 하드웨어 환경에 손쉽게 배포할 수 있습니다.
 
