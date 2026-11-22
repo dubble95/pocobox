@@ -280,6 +280,190 @@ class VoiceTelemetryLogger:
         return summarize_events(events, window_hours=hours, log_path=str(self.path))
 
 
+def record_command_result(
+    logger: "VoiceTelemetryLogger",
+    *,
+    transcript: str,
+    action: str,
+    ok: bool,
+    provider: str,
+    confidence: float,
+    stt_ms: float,
+    music_playing: bool,
+    wake_word_detected: bool = False,
+    search_type: str = "",
+    query: str = "",
+    message: str = "",
+    duration_sec: float = 0.0,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Record a command interpretation result for accuracy tracking.
+
+    Stores an event tagged ``command_result`` with music_playing context so the
+    dashboard can break down recognition accuracy by whether music was playing.
+    """
+    mode = "music" if music_playing else "quiet"
+    return logger.record(
+        "command_result",
+        transcript=transcript,
+        action=action,
+        ok=bool(ok),
+        provider=provider,
+        confidence=round(confidence, 4) if isinstance(confidence, (int, float)) else confidence,
+        stt_ms=round(stt_ms, 2) if isinstance(stt_ms, (int, float)) else stt_ms,
+        music_playing=bool(music_playing),
+        mode=mode,
+        wake_word_detected=bool(wake_word_detected),
+        search_type=search_type,
+        query=query,
+        message=message,
+        duration_sec=round(duration_sec, 3) if isinstance(duration_sec, (int, float)) else duration_sec,
+        **extra,
+    )
+
+
+def _accuracy_bucket(conf: float | None) -> str:
+    if conf is None:
+        return "unknown"
+    if conf >= 0.9:
+        return "high"
+    if conf >= 0.7:
+        return "medium"
+    return "low"
+
+
+def accuracy_summary(
+    events: list[dict[str, Any]],
+    window_hours: float = 24.0,
+) -> dict[str, Any]:
+    """Compute command recognition accuracy broken down by music_playing mode.
+
+    Returns overall and per-mode success rate, latency percentiles, confidence
+    distribution, and per-action accuracy. Only ``command_result`` events are
+    considered.
+    """
+    results = [e for e in events if e.get("event") == "command_result"]
+    modes: dict[str, dict[str, Any]] = {
+        "music": {"total": 0, "ok": 0, "latencies": [], "confidences": [], "actions": {}},
+        "quiet": {"total": 0, "ok": 0, "latencies": [], "confidences": [], "actions": {}},
+    }
+    action_stats: dict[str, dict[str, int]] = {}
+    provider_stats: dict[str, dict[str, int]] = {}
+    conf_distribution: dict[str, int] = {"high": 0, "medium": 0, "low": 0, "unknown": 0}
+    all_latencies: list[float] = []
+
+    for ev in results:
+        mode = "music" if ev.get("music_playing") else "quiet"
+        m = modes[mode]
+        m["total"] += 1
+        if ev.get("ok"):
+            m["ok"] += 1
+
+        lat = ev.get("stt_ms")
+        if isinstance(lat, (int, float)):
+            m["latencies"].append(float(lat))
+            all_latencies.append(float(lat))
+
+        conf = ev.get("confidence")
+        if isinstance(conf, (int, float)):
+            m["confidences"].append(float(conf))
+            conf_distribution[_accuracy_bucket(float(conf))] += 1
+
+        action = str(ev.get("action", "unknown"))
+        m["actions"].setdefault(action, {"total": 0, "ok": 0})
+        m["actions"][action]["total"] += 1
+        if ev.get("ok"):
+            m["actions"][action]["ok"] += 1
+        action_stats.setdefault(action, {"total": 0, "ok": 0})
+        action_stats[action]["total"] += 1
+        if ev.get("ok"):
+            action_stats[action]["ok"] += 1
+
+        provider = str(ev.get("provider", "unknown"))
+        provider_stats.setdefault(provider, {"total": 0, "ok": 0})
+        provider_stats[provider]["total"] += 1
+        if ev.get("ok"):
+            provider_stats[provider]["ok"] += 1
+
+    def _pct(vals: list[float], p: float) -> float | None:
+        if not vals:
+            return None
+        s = sorted(vals)
+        idx = (len(s) - 1) * (p / 100.0)
+        lo = int(idx)
+        hi = min(len(s) - 1, lo + 1)
+        frac = idx - lo
+        return round(s[lo] + (s[hi] - s[lo]) * frac, 2)
+
+    def _mode_summary(m: dict[str, Any]) -> dict[str, Any]:
+        total = m["total"]
+        ok = m["ok"]
+        acc = round(ok / total, 4) if total > 0 else None
+        lat = m["latencies"]
+        conf = m["confidences"]
+        per_action = {}
+        for act, st in sorted(m["actions"].items(), key=lambda kv: kv[1]["total"], reverse=True):
+            denom = st["total"]
+            per_action[act] = {
+                "total": denom,
+                "ok": st["ok"],
+                "accuracy": round(st["ok"] / denom, 4) if denom > 0 else None,
+            }
+        return {
+            "total": total,
+            "ok": ok,
+            "accuracy": acc,
+            "accuracy_pct": round(acc * 100, 1) if acc is not None else None,
+            "latency_p50_ms": _pct(lat, 50),
+            "latency_p95_ms": _pct(lat, 95),
+            "latency_avg_ms": round(sum(lat) / len(lat), 2) if lat else None,
+            "confidence_avg": round(sum(conf) / len(conf), 3) if conf else None,
+            "confidence_p50": _pct(conf, 50),
+            "per_action": per_action,
+        }
+
+    overall_total = modes["music"]["total"] + modes["quiet"]["total"]
+    overall_ok = modes["music"]["ok"] + modes["quiet"]["ok"]
+    overall_acc = round(overall_ok / overall_total, 4) if overall_total > 0 else None
+
+    per_action_out: dict[str, dict[str, Any]] = {}
+    for act, st in sorted(action_stats.items(), key=lambda kv: kv[1]["total"], reverse=True):
+        denom = st["total"]
+        per_action_out[act] = {
+            "total": denom,
+            "ok": st["ok"],
+            "accuracy": round(st["ok"] / denom, 4) if denom > 0 else None,
+            "accuracy_pct": round(st["ok"] / denom * 100, 1) if denom > 0 else None,
+        }
+
+    per_provider_out: dict[str, dict[str, Any]] = {}
+    for prov, st in sorted(provider_stats.items(), key=lambda kv: kv[1]["total"], reverse=True):
+        denom = st["total"]
+        per_provider_out[prov] = {
+            "total": denom,
+            "ok": st["ok"],
+            "accuracy": round(st["ok"] / denom, 4) if denom > 0 else None,
+            "accuracy_pct": round(st["ok"] / denom * 100, 1) if denom > 0 else None,
+        }
+
+    return {
+        "window_hours": window_hours,
+        "total_commands": overall_total,
+        "overall_accuracy": overall_acc,
+        "overall_accuracy_pct": round(overall_acc * 100, 1) if overall_acc is not None else None,
+        "by_mode": {
+            "music": _mode_summary(modes["music"]),
+            "quiet": _mode_summary(modes["quiet"]),
+        },
+        "per_action": per_action_out,
+        "per_provider": per_provider_out,
+        "confidence_distribution": conf_distribution,
+        "latency_p50_ms": _pct(all_latencies, 50),
+        "latency_p95_ms": _pct(all_latencies, 95),
+        "latency_avg_ms": round(sum(all_latencies) / len(all_latencies), 2) if all_latencies else None,
+    }
+
+
 def summarize_events(
     events: list[dict[str, Any]],
     window_hours: float = 24.0,

@@ -62,7 +62,8 @@ from voice_control.feedback import (  # noqa: E402
     set_internal_speaker_volume,
 )
 from voice_control.intent_schema import ExecutionResult, IntentAction, VoiceIntent  # noqa: E402
-from voice_control.telemetry import VoiceTelemetryLogger  # noqa: E402
+from voice_control.background_verifier import BackgroundVerifier  # noqa: E402
+from voice_control.telemetry import VoiceTelemetryLogger, record_command_result, accuracy_summary  # noqa: E402
 from voice_control.tts import (  # noqa: E402
     AVAILABLE_VOICES,
     VALID_VOICE_IDS,
@@ -414,6 +415,12 @@ class VoiceController:
                 is_chime_playing_fn=lambda: self._chime_playing,
                 telemetry=self.telemetry,
             )
+
+        self.background_verifier = BackgroundVerifier(
+            interpreter=self.interpreter,
+            telemetry=self.telemetry,
+            clips_dir=self.telemetry.command_clips_dir,
+        )
 
         self._default_runtime_config: dict[str, Any] = {
             "require_wake_word": self.require_wake_word,
@@ -1119,6 +1126,8 @@ class VoiceController:
         threading.Thread(target=self._sync_dynamic_catalog_bg, name="dynamic-catalog-sync", daemon=True).start()
         if self.continuous_listener is not None:
             self.continuous_listener.start()
+        if self.background_verifier is not None:
+            self.background_verifier.start()
 
     def handle_text(self, text: str, dry_run: bool = False, use_cloud: bool = True) -> ExecutionResult:
         self.events.publish({"type": "transcript", "text": text, "wake": True, "ts": time.time()})
@@ -1418,6 +1427,21 @@ class VoiceController:
             cmd_clip = self.telemetry.save_command_clip(wav_bytes, res.action, cmd_meta)
             if cmd_clip:
                 res.details["command_clip_path"] = cmd_clip
+            record_command_result(
+                self.telemetry,
+                transcript=intent.raw_text,
+                action=res.action,
+                ok=res.ok,
+                provider=intent.provider,
+                confidence=intent.confidence,
+                stt_ms=stt_ms,
+                music_playing=bool(self.continuous_listener.music_playing) if self.continuous_listener else False,
+                wake_word_detected=intent.wake_word_detected,
+                search_type=intent.search_type,
+                query=intent.query,
+                message=res.message,
+                duration_sec=metrics.duration_sec,
+            )
 
         self.last_result = res.to_dict()
         self.events.publish({
@@ -2262,6 +2286,16 @@ def make_handler(controller: VoiceController) -> type[BaseHTTPRequestHandler]:
                         hours = 24.0
                 self._send_json(200, controller.telemetry.summarize(hours=hours))
                 return
+            if path == "/telemetry/accuracy":
+                hours = 24.0
+                if "hours=" in self.path:
+                    try:
+                        hours = float(self.path.split("hours=", 1)[1].split("&", 1)[0])
+                    except ValueError:
+                        hours = 24.0
+                events = controller.telemetry.read_recent(limit=0, since_ts=time.time() - hours * 3600.0) if hours > 0 else controller.telemetry.read_recent(limit=0)
+                self._send_json(200, {"ok": True, "accuracy": accuracy_summary(events, window_hours=hours)})
+                return
             if path == "/telemetry/recent":
                 limit = 50
                 if "limit=" in self.path:
@@ -2322,6 +2356,17 @@ def make_handler(controller: VoiceController) -> type[BaseHTTPRequestHandler]:
                     return
                 ctype = "audio/wav" if target.suffix == ".wav" else "application/json; charset=utf-8"
                 self._send_bytes(200, target.read_bytes(), ctype)
+                return
+            if path == "/verifier/stats":
+                stats = controller.background_verifier.stats_dict() if controller.background_verifier else {}
+                self._send_json(200, {"ok": True, "verifier": stats})
+                return
+            if path == "/verifier/scan":
+                if controller.background_verifier:
+                    result = controller.background_verifier.scan_once()
+                    self._send_json(200, {"ok": True, "scan": result})
+                else:
+                    self._send_json(200, {"ok": False, "error": "verifier disabled"})
                 return
             if path == "/telemetry/wake_clip":
                 import urllib.parse

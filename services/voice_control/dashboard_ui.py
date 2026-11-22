@@ -311,6 +311,35 @@ DASHBOARD_HTML = r"""<!doctype html>
   </div>
 
   <div class="card">
+    <h2>🎯 명령 인식 정확도 (음악 재생 여부별) <button onclick="pollAccuracy()" style="padding:4px 10px; font-size:11px">새로고침</button></h2>
+    <div class="kv" style="grid-template-columns: repeat(4, 1fr)">
+      <div class="stat"><div class="label">전체 정확도</div><div id="accOverall" class="val">-</div></div>
+      <div class="stat"><div class="label">음악 재생 중</div><div id="accMusic" class="val">-</div></div>
+      <div class="stat"><div class="label">조용할 때</div><div id="accQuiet" class="val">-</div></div>
+      <div class="stat"><div class="label">명령 건수</div><div id="accTotal" class="val">0</div></div>
+    </div>
+    <div class="kv" style="grid-template-columns: repeat(4, 1fr); margin-top:8px">
+      <div class="stat"><div class="label">지연 p50 (ms)</div><div id="accLatP50" class="val">-</div></div>
+      <div class="stat"><div class="label">지연 p95 (ms)</div><div id="accLatP95" class="val">-</div></div>
+      <div class="stat"><div class="label">신뢰도 평균</div><div id="accConfAvg" class="val">-</div></div>
+      <div class="stat"><div class="label">높은 신뢰도 비율</div><div id="accConfHigh" class="val">-</div></div>
+    </div>
+    <div id="accByAction" style="margin-top:10px; font-size:12px; color:var(--muted); max-height:160px; overflow-y:auto"></div>
+    <div id="accRec" style="margin-top:8px; font-size:12.5px; color:var(--muted)">인식 정확도 데이터 수집 대기 중...</div>
+  </div>
+
+  <div class="card">
+    <h2>🔍 백그라운드 음성 검증 (상시녹음 재분석) <button onclick="pollVerifier()" style="padding:4px 10px; font-size:11px">새로고침</button> <button onclick="triggerVerifierScan()" style="padding:4px 10px; font-size:11px">즉시 스캔</button></h2>
+    <div class="kv" style="grid-template-columns: repeat(4, 1fr)">
+      <div class="stat"><div class="label">검증 스캔 횟수</div><div id="verScans" class="val">0</div></div>
+      <div class="stat"><div class="label">검증된 클립</div><div id="verVerified" class="val">0</div></div>
+      <div class="stat"><div class="label">불일치 탐지</div><div id="verMismatch" class="val" style="color:var(--rec)">0</div></div>
+      <div class="stat"><div class="label">오류</div><div id="verErrors" class="val" style="color:var(--rec)">0</div></div>
+    </div>
+    <div id="verRec" style="margin-top:10px; font-size:12.5px; color:var(--muted)">백그라운드 검증 데이터 수집 대기 중...</div>
+  </div>
+
+  <div class="card">
     <h2>🧠 온디바이스 음성 학습 (자율 발음 교정 사본) <button onclick="pollLearningEntries()" style="padding:4px 10px; font-size:11px">새로고침</button></h2>
     <div class="kv" style="grid-template-columns: repeat(4, 1fr)">
       <div class="stat"><div class="label">승인 활성 (Active)</div><div id="statLrnActive" class="val" style="color:var(--ok)">0</div></div>
@@ -753,6 +782,66 @@ DASHBOARD_HTML = r"""<!doctype html>
     } catch (_) {}
   }
 
+  async function pollAccuracy() {
+    try {
+      const r = await fetch("/telemetry/accuracy?hours=24", {cache: "no-store"});
+      const j = await r.json();
+      const a = j.accuracy || {};
+      document.getElementById("accOverall").textContent = a.overall_accuracy_pct !== null && a.overall_accuracy_pct !== undefined ? (a.overall_accuracy_pct + "%") : "-";
+      document.getElementById("accMusic").textContent = a.by_mode?.music?.accuracy_pct !== null && a.by_mode?.music?.accuracy_pct !== undefined ? (a.by_mode.music.accuracy_pct + "%") : "-";
+      document.getElementById("accQuiet").textContent = a.by_mode?.quiet?.accuracy_pct !== null && a.by_mode?.quiet?.accuracy_pct !== undefined ? (a.by_mode.quiet.accuracy_pct + "%") : "-";
+      document.getElementById("accTotal").textContent = a.total_commands ?? 0;
+      document.getElementById("accLatP50").textContent = a.latency_p50_ms !== null ? (a.latency_p50_ms + " ms") : "-";
+      document.getElementById("accLatP95").textContent = a.latency_p95_ms !== null ? (a.latency_p95_ms + " ms") : "-";
+      document.getElementById("accConfAvg").textContent = a.confidence_avg !== null ? (Number(a.confidence_avg).toFixed(2)) : "-";
+      const cd = a.confidence_distribution || {};
+      const cdTotal = (cd.high || 0) + (cd.medium || 0) + (cd.low || 0) + (cd.unknown || 0);
+      document.getElementById("accConfHigh").textContent = cdTotal > 0 ? (((cd.high || 0) / cdTotal * 100).toFixed(0) + "%") : "-";
+
+      const byAction = a.per_action || {};
+      const rows = Object.entries(byAction).map(([act, st]) => {
+        const pct = st.accuracy_pct !== null && st.accuracy_pct !== undefined ? (st.accuracy_pct + "%") : "-";
+        return `<div style="display:flex; justify-content:space-between; padding:2px 0; border-bottom:1px solid rgba(255,255,255,0.04); font-size:11.5px">
+          <span style="color:var(--muted)">${act}</span>
+          <span style="font-variant-numeric:tabular-nums">${st.ok} / ${st.total} = <strong>${pct}</strong></span>
+        </div>`;
+      }).join("");
+      const accByAction = document.getElementById("accByAction");
+      if (accByAction) {
+        accByAction.innerHTML = rows || '<div style="color:var(--muted); font-size:11.5px">액션별 데이터 없음</div>';
+      }
+      document.getElementById("accRec").textContent = "최근 24시간 기준 명령 인식 정확도";
+    } catch (_) {}
+  }
+
+  async function pollVerifier() {
+    try {
+      const r = await fetch("/verifier/stats", {cache: "no-store"});
+      const j = await r.json();
+      const v = j.verifier || {};
+      document.getElementById("verScans").textContent = v.scans ?? 0;
+      document.getElementById("verVerified").textContent = v.clips_verified ?? 0;
+      document.getElementById("verMismatch").textContent = v.mismatches ?? 0;
+      document.getElementById("verErrors").textContent = v.errors ?? 0;
+      document.getElementById("verRec").textContent = "백그라운드 상시녹음 재분석이 실행 중입니다.";
+    } catch (_) {}
+  }
+
+  async function triggerVerifierScan() {
+    try {
+      const r = await fetch("/verifier/scan", {method: "POST", cache: "no-store"});
+      const j = await r.json();
+      if (j.ok) {
+        addLog("VERIFIER", `즉시 검증 스캔: 스캔=${j.scan.scanned} 검증=${j.scan.verified} 불일치=${j.scan.mismatches}`, "b-ok");
+        pollVerifier();
+      } else {
+        addLog("VERIFIER", "검증 스캔 실패: " + (j.error || "알 수 없음"), "b-rec");
+      }
+    } catch (e) {
+      addLog("VERIFIER", "네트워크 오류: " + e, "b-rec");
+    }
+  }
+
   async function pollLearningEntries() {
     try {
       const r = await fetch("/learning/entries", {cache: "no-store"});
@@ -816,9 +905,13 @@ DASHBOARD_HTML = r"""<!doctype html>
   connectSSE();
   pollMetrics();
   pollTelemetry();
+  pollAccuracy();
+  pollVerifier();
   pollLearningEntries();
   setInterval(pollMetrics, 200);
   setInterval(pollTelemetry, 10000);
+  setInterval(pollAccuracy, 10000);
+  setInterval(pollVerifier, 10000);
   setInterval(pollLearningEntries, 10000);
 </script>
 </body>
