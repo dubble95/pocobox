@@ -1198,6 +1198,24 @@ class VoiceController:
             "ts": time.time(),
         })
         log.info("TEXT '%s' -> action=%s ok=%s msg=%s", text, res.action, res.ok, res.message)
+
+        if self.telemetry is not None and not dry_run:
+            record_command_result(
+                self.telemetry,
+                transcript=intent.raw_text or text,
+                action=res.action,
+                ok=res.ok,
+                provider=intent.provider,
+                confidence=intent.confidence,
+                stt_ms=0.0,
+                music_playing=False,
+                wake_word_detected=intent.wake_word_detected,
+                search_type=intent.search_type,
+                query=intent.query,
+                message=res.message,
+                duration_sec=0.0,
+                input_type="text",
+            )
         if not dry_run and res.ok and (self._is_spoken_action(res.action) or res.details.get("spoken")):
             threading.Thread(
                 target=self._speak_answer,
