@@ -86,9 +86,14 @@ class ContinuousVoiceListener:
         self.use_bandpass = _env_bool("VOICE_USE_BANDPASS", True)
         self.use_aec3 = _env_bool("VOICE_USE_AEC3", True)
         self.rms_fallback_during_music = _env_bool("VOICE_RMS_FALLBACK_DURING_MUSIC", False)
-        self.wake_min_rms = float(os.environ.get("VOICE_WAKE_MIN_RMS", "35.0"))
-        self.wake_snr_ratio = float(os.environ.get("VOICE_WAKE_SNR_RATIO", "1.03"))
-        self.wake_delta_rms = float(os.environ.get("VOICE_WAKE_DELTA_RMS", "12.0"))
+        self.wake_min_rms = float(os.environ.get("VOICE_WAKE_MIN_RMS", "25.0"))
+        self.wake_snr_ratio = float(os.environ.get("VOICE_WAKE_SNR_RATIO", "1.01"))
+        self.wake_delta_rms = float(os.environ.get("VOICE_WAKE_DELTA_RMS", "8.0"))
+        # Force Vosk recognizer reset every N seconds during music playback so
+        # continuous music audio does not corrupt the recognizer state and
+        # prevent wake-word matches.
+        self.wake_music_reset_sec = float(os.environ.get("VOICE_WAKE_MUSIC_RESET_SEC", "3.0"))
+        self._wake_music_reset_at: float | None = None
 
         self.bandpass_low_hz = float(os.environ.get("VOICE_BANDPASS_LOW_HZ", "150.0"))
         self.bandpass_high_hz = float(os.environ.get("VOICE_BANDPASS_HIGH_HZ", "6000.0"))
@@ -267,6 +272,7 @@ class ContinuousVoiceListener:
             "wake_snr_ratio": round(self.wake_snr_ratio, 2),
             "wake_delta_rms": round(self.wake_delta_rms, 1),
             "wake_min_rms": round(self.wake_min_rms, 1),
+            "wake_music_reset_sec": self.wake_music_reset_sec,
             "music_confirm_chunks": self.wake_spotter.music_confirm_chunks if self.wake_spotter else 2,
             "music_min_conf": round(self.wake_spotter.music_min_confidence, 2) if self.wake_spotter else 0.65,
             "last_wake_phrase": self.last_wake_phrase,
@@ -485,11 +491,22 @@ class ContinuousVoiceListener:
                         preroll.append(stt_data)
 
                         # Trigger Path 1: Local streaming Vosk wake-word spotter on AEC3 + anti-aliased audio
+                        # During music, always feed audio to Vosk so it can detect wake words.
+                        # The energy gate (passes_wake_energy_gate) filters music-only false positives.
+                        # is_silent is only used to allow Vosk to reset its recognizer state during
+                        # quiet moments in the music, preventing state corruption from continuous audio.
                         if self.music_playing:
-                            # During music, silence means wake_rms is near the music floor.
-                            # Letting Vosk see silence lets it reset its recognizer state
-                            # instead of continuously matching music lyrics as wake phrases.
-                            is_silent = wake_rms < max(self.wake_min_rms, self.wake_ambient_rms * 0.85)
+                            # Force periodic reset so music lyrics don't corrupt Vosk state
+                            now = time.monotonic()
+                            if (
+                                self._wake_music_reset_at is None
+                                or now - self._wake_music_reset_at >= self.wake_music_reset_sec
+                            ):
+                                self.wake_spotter.reset()
+                                self._wake_music_reset_at = now
+                            is_silent = wake_rms < max(
+                                self.wake_min_rms, self.wake_ambient_rms * 0.6
+                            )
                         else:
                             is_silent = wake_rms < max(self.min_threshold, self.wake_ambient_rms * 1.4)
                         hit = (

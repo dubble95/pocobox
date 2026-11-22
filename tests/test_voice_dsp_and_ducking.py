@@ -548,7 +548,7 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
         res = ctrl.update_runtime_config({"reset_defaults": True})
         self.assertTrue(res["ok"])
         self.assertTrue(res["reset"])
-        self.assertEqual(ctrl.continuous_listener.wake_snr_ratio, 1.03)
+        self.assertEqual(ctrl.continuous_listener.wake_snr_ratio, 1.01)
         self.assertEqual(ctrl.continuous_listener.wake_spotter.music_confirm_chunks, 2)
         self.assertEqual(ctrl.continuous_listener.wake_spotter.music_min_confidence, 0.55)
         self.assertEqual(ctrl.vad_threshold, 40.0)
