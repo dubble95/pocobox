@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-UI_VERSION = "11"
+UI_VERSION = "12"
 
 DISPLAY_MANIFEST = json.dumps(
     {
@@ -356,6 +356,54 @@ DISPLAY_HTML = r"""<!doctype html>
     animation: pulse 0.6s infinite;
   }
   @keyframes pulse { 0%,100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.45); opacity: 0.6; } }
+
+  /* Interactive touch ripple feedback effect */
+  .touch-ripple {
+    position: fixed;
+    width: 68px;
+    height: 68px;
+    margin-left: -34px;
+    margin-top: -34px;
+    border-radius: 50%;
+    pointer-events: none;
+    z-index: 9999;
+    will-change: transform, opacity;
+    background: radial-gradient(circle, rgba(255, 255, 255, 0.75) 0%, rgba(56, 189, 248, 0.42) 45%, rgba(56, 189, 248, 0) 75%);
+    border: 1.5px solid rgba(125, 211, 252, 0.7);
+    box-shadow: 0 0 16px rgba(56, 189, 248, 0.5);
+    animation: touchRippleAnim 0.42s cubic-bezier(0.12, 0.8, 0.32, 1) forwards;
+  }
+  @keyframes touchRippleAnim {
+    0% {
+      opacity: 0.95;
+      transform: scale(0.25);
+    }
+    100% {
+      opacity: 0;
+      transform: scale(2.2);
+    }
+  }
+
+  /* Tactile touch-active visual feedback for buttons and interactive elements */
+  .btn.touch-active, .btn:active {
+    transform: scale(0.90) !important;
+    background: rgba(255, 255, 255, 0.26) !important;
+    box-shadow: 0 0 14px rgba(56, 189, 248, 0.45);
+  }
+  .btn.primary.touch-active, .btn.primary:active {
+    transform: scale(0.92) !important;
+    background: #e2e8f0 !important;
+    box-shadow: 0 0 22px rgba(255, 255, 255, 0.65);
+  }
+  .btn.mic.touch-active, .btn.mic:active {
+    transform: scale(0.92) !important;
+    background: rgba(239, 68, 68, 0.48) !important;
+    box-shadow: 0 0 24px rgba(239, 68, 68, 0.75);
+  }
+  .art-wrap.touch-active {
+    transform: scale(0.985);
+    transition: transform 0.12s ease;
+  }
 
   /* Auto-hiding tap-to-reveal floating HUD (zero bars visible by default!) */
   .hud {
@@ -1348,9 +1396,35 @@ DISPLAY_HTML = r"""<!doctype html>
   let touchStartTime = 0;
   let touchMoved = false;
   let touchOnControls = false;
+  let lastRippleAt = 0;
+  let lastRippleX = -1;
+  let lastRippleY = -1;
+
+  function spawnTouchRipple(x, y) {
+    if (typeof x !== "number" || typeof y !== "number") return;
+    const now = Date.now();
+    if (now - lastRippleAt < 70 && Math.hypot(x - lastRippleX, y - lastRippleY) < 25) {
+      return;
+    }
+    lastRippleAt = now;
+    lastRippleX = x;
+    lastRippleY = y;
+
+    const rip = document.createElement("div");
+    rip.className = "touch-ripple";
+    rip.style.left = x + "px";
+    rip.style.top = y + "px";
+    document.body.appendChild(rip);
+    rip.addEventListener("animationend", () => rip.remove(), {once: true});
+    setTimeout(() => { if (rip.parentNode) rip.remove(); }, 480);
+  }
 
   function handleTouchStart(e) {
-    if (!e.touches || e.touches.length !== 1) return;
+    if (!e.touches) return;
+    for (let i = 0; i < e.touches.length; i++) {
+      spawnTouchRipple(e.touches[i].clientX, e.touches[i].clientY);
+    }
+    if (e.touches.length !== 1) return;
     touchOnControls = Boolean(e.target && e.target.closest(".controls, button, a, .hud"));
     touchStartX = e.touches[0].clientX;
     touchStartY = e.touches[0].clientY;
@@ -1576,6 +1650,39 @@ DISPLAY_HTML = r"""<!doctype html>
       triggerMic(e);
     }, {passive: false});
   }
+
+  window.addEventListener("pointerdown", (e) => {
+    if (e.pointerType !== "touch") {
+      spawnTouchRipple(e.clientX, e.clientY);
+    }
+  }, {passive: true});
+
+  function bindTouchFeedback() {
+    const sel = ".btn, .art-wrap, .hud-btn, .yt-btn, .yt-kpop-pill, .yt-close-btn";
+    const markActive = (e) => {
+      const el = e.target && e.target.closest(sel);
+      if (el) el.classList.add("touch-active");
+    };
+    const clearActive = (e) => {
+      const el = e.target && e.target.closest(sel);
+      if (el) {
+        setTimeout(() => el.classList.remove("touch-active"), 120);
+      } else {
+        document.querySelectorAll(".touch-active").forEach((item) => {
+          setTimeout(() => item.classList.remove("touch-active"), 120);
+        });
+      }
+    };
+    document.addEventListener("pointerdown", markActive, {passive: true});
+    document.addEventListener("pointerup", clearActive, {passive: true});
+    document.addEventListener("pointercancel", clearActive, {passive: true});
+    document.addEventListener("pointerleave", clearActive, {passive: true});
+
+    document.addEventListener("touchstart", markActive, {passive: true});
+    document.addEventListener("touchend", clearActive, {passive: true});
+    document.addEventListener("touchcancel", clearActive, {passive: true});
+  }
+  bindTouchFeedback();
 
   // Tap empty background to briefly toggle minimal HUD (ignored if swipe occurred)
   appRootEl.addEventListener("click", (e) => {

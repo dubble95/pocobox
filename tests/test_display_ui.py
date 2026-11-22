@@ -68,7 +68,7 @@ class DisplayUITests(unittest.TestCase):
         _check_js_syntax(js)
 
     def test_display_is_fullscreen_without_persistent_bars(self) -> None:
-        self.assertEqual(UI_VERSION, "11")
+        self.assertEqual(UI_VERSION, "12")
         self.assertIn('viewport-fit=cover', DISPLAY_HTML)
         self.assertIn('apple-mobile-web-app-capable', DISPLAY_HTML)
         self.assertIn('apple-mobile-web-app-status-bar-style', DISPLAY_HTML)
@@ -79,6 +79,11 @@ class DisplayUITests(unittest.TestCase):
         self.assertIn("handleTouchStart", DISPLAY_HTML)
         self.assertIn("handleTouchEnd", DISPLAY_HTML)
         self.assertIn("artTapBadge", DISPLAY_HTML)
+        # Touch ripple feedback and tactile button press animations
+        self.assertIn("touch-ripple", DISPLAY_HTML)
+        self.assertIn("touchRippleAnim", DISPLAY_HTML)
+        self.assertIn("spawnTouchRipple", DISPLAY_HTML)
+        self.assertIn("bindTouchFeedback", DISPLAY_HTML)
         # Mic button has expanded right-edge touch area and instant touch response
         self.assertIn(".btn.mic::after", DISPLAY_HTML)
         self.assertIn("triggerMic", DISPLAY_HTML)
