@@ -71,15 +71,15 @@ class TestWeatherFeature(unittest.TestCase):
     def setUp(self) -> None:
         clear_weather_cache()
 
-    def test_default_location_is_bundang(self) -> None:
+    def test_default_location_is_seoul(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("POCOBOX_LOCATION_NAME", None)
             os.environ.pop("POCOBOX_WEATHER_ZONE", None)
             loc = get_default_location()
-        self.assertEqual(loc.name, "분당")
-        self.assertEqual(loc.kma_zone, "4113551000")
-        self.assertEqual(resolve_location("").name, "분당")
-        self.assertEqual(resolve_location("여기").name, "분당")
+        self.assertEqual(loc.name, "서울")
+        self.assertEqual(loc.kma_zone, "1111061500")
+        self.assertEqual(resolve_location("").name, "서울")
+        self.assertEqual(resolve_location("여기").name, "서울")
 
     def test_default_location_env_override(self) -> None:
         with mock.patch.dict(os.environ, {"POCOBOX_LOCATION_NAME": "정자동"}, clear=False):
@@ -136,7 +136,7 @@ class TestWeatherFeature(unittest.TestCase):
     def test_kma_rss_parsing_and_spoken_korean_formatting(self) -> None:
         kst = datetime.timezone(datetime.timedelta(hours=9))
         now = datetime.datetime(2026, 11, 18, 19, 30, tzinfo=kst)
-        loc = resolve_location("")
+        loc = resolve_location("분당")
 
         fc_today = _parse_kma_rss_xml(SAMPLE_KMA_XML, loc, day_offset=0, now_kst=now)
         self.assertEqual(fc_today.location_name, "분당")
@@ -193,7 +193,7 @@ class TestWeatherFeature(unittest.TestCase):
         self.assertEqual(fc_w.condition_ko, "구름 많음")
         self.assertEqual(fc_w.current_temp_c, 9.0)
 
-    def test_executor_handles_weather_without_lms_and_uses_bundang_default(self) -> None:
+    def test_executor_handles_weather_without_lms_and_uses_default_location(self) -> None:
         seen_calls: list[tuple[str, int]] = []
 
         def fake_fetch(loc_q: str, day_offset: int) -> WeatherForecast:
@@ -217,20 +217,19 @@ class TestWeatherFeature(unittest.TestCase):
         self.assertTrue(res.ok)
         self.assertEqual(res.action, "weather")
         self.assertEqual(seen_calls, [("", 0)])
-        self.assertIn("분당", res.message)
-        self.assertNotIn("서울", res.message)
-        self.assertEqual(res.details["location"], "분당")
+        self.assertIn("서울", res.message)
+        self.assertEqual(res.details["location"], "서울")
 
         # Regression: wake word prefix ("포코야") in raw_text must NOT be parsed as a city name!
         res_wake = executor.execute(parse_command("포코야 오늘 날씨 어때?"))
         self.assertTrue(res_wake.ok)
         self.assertEqual(seen_calls[-1], ("", 0))
-        self.assertEqual(res_wake.details["location"], "분당")
-        self.assertIn("분당", res_wake.message)
+        self.assertEqual(res_wake.details["location"], "서울")
+        self.assertIn("서울", res_wake.message)
 
     def test_system_prompt_and_llm_weather_intent_and_spoken_action(self) -> None:
         prompt = _build_system_prompt()
-        self.assertIn("분당", prompt)
+        self.assertIn("서울", prompt)
         self.assertIn('action="weather"', prompt)
 
         intent = _intent_from_llm_payload(

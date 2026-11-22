@@ -24,6 +24,9 @@ MiUnlockTool/
 *.key
 *.pem
 config.local.yml
+voice.env
+*.env.local
+*.local.env
 
 # Generated audio test fixtures
 tests/fixtures/

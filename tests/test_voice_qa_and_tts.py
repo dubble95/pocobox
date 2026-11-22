@@ -467,8 +467,8 @@ class TestVoiceQAAndTTS(unittest.TestCase):
 
         # Korean measurement units and single isolated letters must NOT trigger jarring English switches
         self.assertEqual(
-            split_bilingual_segments("분당의 현재 기온은 15°C이고 풍속은 3m/s, 거리는 10km, 샘플레이트는 48kHz입니다."),
-            [("ko", "분당의 현재 기온은 15°C이고 풍속은 3m/s, 거리는 10km, 샘플레이트는 48kHz입니다.")],
+            split_bilingual_segments("서울의 현재 기온은 15°C이고 풍속은 3m/s, 거리는 10km, 샘플레이트는 48kHz입니다."),
+            [("ko", "서울의 현재 기온은 15°C이고 풍속은 3m/s, 거리는 10km, 샘플레이트는 48kHz입니다.")],
         )
         self.assertEqual(
             split_bilingual_segments("A팀과 B형 학생의 K팝 공연입니다."),

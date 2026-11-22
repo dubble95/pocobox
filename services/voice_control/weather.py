@@ -20,10 +20,10 @@ from .aliases import strip_wake_prefix
 log = logging.getLogger("pocobox-voice.weather")
 
 _KST = datetime.timezone(datetime.timedelta(hours=9))
-_DEFAULT_LOCATION_NAME = "분당"
-_DEFAULT_KMA_ZONE = "4113551000"  # 경기도 성남시분당구 분당동
-_DEFAULT_LAT = 37.3827
-_DEFAULT_LON = 127.1189
+_DEFAULT_LOCATION_NAME = "서울"
+_DEFAULT_KMA_ZONE = "1111061500"  # 서울특별시 종로구 청운효자동 (서울 중심 기상청 관측 지점)
+_DEFAULT_LAT = 37.5665
+_DEFAULT_LON = 126.9780
 _CACHE_TTL_SEC = 300.0
 _USER_AGENT = "PocoBox/1.0 (+https://github.com/pocobox)"
 
@@ -249,7 +249,7 @@ def clear_weather_cache() -> None:
 
 
 def get_default_location() -> WeatherLocation:
-    """Return the configured default PocoBox location (defaults to 분당 / 성남시 분당구)."""
+    """Return the configured default PocoBox location (defaults to 서울 / 서울특별시)."""
     raw_name = os.environ.get("POCOBOX_LOCATION_NAME", "").strip() or _DEFAULT_LOCATION_NAME
     env_zone = os.environ.get("POCOBOX_WEATHER_ZONE", "").strip()
     env_lat = os.environ.get("POCOBOX_LOCATION_LAT", "").strip()

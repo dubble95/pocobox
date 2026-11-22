@@ -234,7 +234,7 @@ def parse_command(raw_text: str, context: Any | None = None) -> VoiceIntent:
             language=lang,
         )
 
-    # 1.6 Live location-aware weather queries (default: configured POCOBOX_LOCATION_NAME / 분당)
+    # 1.6 Live location-aware weather queries (default: configured POCOBOX_LOCATION_NAME / 서울)
     if not _WEATHER_MUSIC_GUARD_RE.search(text) and _WEATHER_QUERY_RE.search(low):
         loc_q, _, _ = parse_weather_query(text)
         return VoiceIntent(

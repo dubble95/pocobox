@@ -88,7 +88,7 @@ def _build_system_prompt(context: ConversationContext | None = None) -> str:
     base = (
         SYSTEM_PROMPT
         + f"\n\nCurrent local time (Korea Standard Time, KST): {now.strftime('%Y-%m-%d %H:%M')} ({wd})."
-        + f"\nDevice default location: {loc.name} ({loc.en_name}, South Korea). For any location-dependent question where the user did not specify another city, assume {loc.name} (never default to Seoul unless the user explicitly mentions Seoul)."
+        + f"\nDevice default location: {loc.name} ({loc.en_name}, South Korea). For any location-dependent question where the user did not specify another city, assume {loc.name}."
     )
     if context and context.is_active():
         ctx_lines = []
