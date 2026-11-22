@@ -432,7 +432,8 @@ class VoiceController:
             "playing_multiplier": self.continuous_listener.playing_multiplier if self.continuous_listener else float(os.environ.get("VOICE_PLAYING_MULTIPLIER", "2.1")),
             "rms_fallback_during_music": self.continuous_listener.rms_fallback_during_music if self.continuous_listener else _env_bool("VOICE_RMS_FALLBACK_DURING_MUSIC", False),
             "aec3_delay_ms": (self.continuous_listener.aec3.delay_ms if (self.continuous_listener and self.continuous_listener.aec3) else int(os.environ.get("VOICE_AEC3_DELAY_MS", "150"))),
-            "wake_snr_ratio": self.continuous_listener.wake_snr_ratio if self.continuous_listener else float(os.environ.get("VOICE_WAKE_SNR_RATIO", "1.08")),
+            "wake_snr_ratio": self.continuous_listener.wake_snr_ratio if self.continuous_listener else float(os.environ.get("VOICE_WAKE_SNR_RATIO", "1.03")),
+            "wake_delta_rms": self.continuous_listener.wake_delta_rms if self.continuous_listener else float(os.environ.get("VOICE_WAKE_DELTA_RMS", "12.0")),
             "music_confirm_chunks": (self.continuous_listener.wake_spotter.music_confirm_chunks if (self.continuous_listener and self.continuous_listener.wake_spotter) else int(os.environ.get("VOICE_WAKE_CONFIRM_CHUNKS", "2"))),
             "music_min_conf": (self.continuous_listener.wake_spotter.music_min_confidence if (self.continuous_listener and self.continuous_listener.wake_spotter) else float(os.environ.get("VOICE_WAKE_MIN_CONF", "0.65"))),
         }
@@ -1588,6 +1589,8 @@ class VoiceController:
                     self.continuous_listener.aec3.set_delay_ms(int(d["aec3_delay_ms"]))
                 if "wake_snr_ratio" in d:
                     self.continuous_listener.wake_snr_ratio = float(d["wake_snr_ratio"])
+                if "wake_delta_rms" in d:
+                    self.continuous_listener.wake_delta_rms = float(d["wake_delta_rms"])
                 if "music_confirm_chunks" in d and self.continuous_listener.wake_spotter:
                     self.continuous_listener.wake_spotter.music_confirm_chunks = int(d["music_confirm_chunks"])
                 if "music_min_conf" in d and self.continuous_listener.wake_spotter:
@@ -1660,6 +1663,8 @@ class VoiceController:
             self.continuous_listener.aec3.set_delay_ms(int(float(data["aec3_delay_ms"])))
         if "wake_snr_ratio" in data and self.continuous_listener:
             self.continuous_listener.wake_snr_ratio = max(1.0, min(3.0, float(data["wake_snr_ratio"])))
+        if "wake_delta_rms" in data and self.continuous_listener:
+            self.continuous_listener.wake_delta_rms = max(0.0, min(100.0, float(data["wake_delta_rms"])))
         if "music_confirm_chunks" in data and self.continuous_listener and self.continuous_listener.wake_spotter:
             self.continuous_listener.wake_spotter.music_confirm_chunks = max(1, min(5, int(float(data["music_confirm_chunks"]))))
         if "music_min_conf" in data and self.continuous_listener and self.continuous_listener.wake_spotter:

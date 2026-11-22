@@ -376,7 +376,7 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
             os.environ.pop("VOICE_WAKE_MUSIC_MIN_CONF", None)
             os.environ.pop("VOICE_WAKE_MIN_CONF", None)
             spotter = VoskWakeWordSpotter()
-        self.assertEqual(spotter.music_min_confidence, 0.60)
+        self.assertEqual(spotter.music_min_confidence, 0.55)
         self.assertEqual(spotter.quiet_min_confidence, 0.60)
 
         with mock.patch.dict(os.environ, {"VOICE_WAKE_ENGINE": "off", "VOICE_WAKE_MIN_CONF": "0.65"}):
@@ -450,18 +450,18 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
         listener.music_playing = True
         listener.wake_ambient_rms = 300.0
         self.assertFalse(listener.passes_wake_energy_gate(174.5))
-        self.assertFalse(listener.passes_wake_energy_gate(315.0))  # < 300 * 1.08 = 324 and diff=15 < 25
+        self.assertTrue(listener.passes_wake_energy_gate(315.0))  # 315 >= 300 * 1.03 = 309 (looser SNR)
         self.assertTrue(listener.passes_wake_energy_gate(450.0))
 
-        # AEC3-active music playback loosens the gate because echo is already cancelled
+        # AEC3-active music playback loosens the gate further because echo is already cancelled
         class _FakeAec:
             available = True
             active = True
             echo_reduction_db = 12.0
 
         listener.aec3 = _FakeAec()  # type: ignore[assignment]
-        self.assertTrue(listener.passes_wake_energy_gate(320.0))  # < 324 but diff=20 >= 15 with AEC
-        self.assertFalse(listener.passes_wake_energy_gate(305.0))  # < 306 and diff=5 < 15 even with AEC
+        self.assertTrue(listener.passes_wake_energy_gate(320.0))  # >= 300 * 1.01 = 303 with AEC
+        self.assertFalse(listener.passes_wake_energy_gate(302.0))  # < 303 and diff=2 < 8 even with AEC
 
     def test_telemetry_logging_clip_relabeling_and_recommendations(self) -> None:
         import tempfile
@@ -548,9 +548,9 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
         res = ctrl.update_runtime_config({"reset_defaults": True})
         self.assertTrue(res["ok"])
         self.assertTrue(res["reset"])
-        self.assertEqual(ctrl.continuous_listener.wake_snr_ratio, 1.08)
+        self.assertEqual(ctrl.continuous_listener.wake_snr_ratio, 1.03)
         self.assertEqual(ctrl.continuous_listener.wake_spotter.music_confirm_chunks, 2)
-        self.assertEqual(ctrl.continuous_listener.wake_spotter.music_min_confidence, 0.60)
+        self.assertEqual(ctrl.continuous_listener.wake_spotter.music_min_confidence, 0.55)
         self.assertEqual(ctrl.vad_threshold, 40.0)
         self.assertEqual(ctrl.duck_volume, 18)
         self.assertTrue(ctrl.duck_enabled)

@@ -182,7 +182,7 @@ class VoskWakeWordSpotter:
             music_min_confidence
             if music_min_confidence is not None
             else float(
-                os.environ.get("VOICE_WAKE_MUSIC_MIN_CONF", os.environ.get("VOICE_WAKE_MIN_CONF", "0.60"))
+                os.environ.get("VOICE_WAKE_MUSIC_MIN_CONF", os.environ.get("VOICE_WAKE_MIN_CONF", "0.55"))
             )
         )
         self.quiet_min_confidence = (

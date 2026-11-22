@@ -86,8 +86,9 @@ class ContinuousVoiceListener:
         self.use_bandpass = _env_bool("VOICE_USE_BANDPASS", True)
         self.use_aec3 = _env_bool("VOICE_USE_AEC3", True)
         self.rms_fallback_during_music = _env_bool("VOICE_RMS_FALLBACK_DURING_MUSIC", False)
-        self.wake_min_rms = float(os.environ.get("VOICE_WAKE_MIN_RMS", "45.0"))
-        self.wake_snr_ratio = float(os.environ.get("VOICE_WAKE_SNR_RATIO", "1.08"))
+        self.wake_min_rms = float(os.environ.get("VOICE_WAKE_MIN_RMS", "35.0"))
+        self.wake_snr_ratio = float(os.environ.get("VOICE_WAKE_SNR_RATIO", "1.03"))
+        self.wake_delta_rms = float(os.environ.get("VOICE_WAKE_DELTA_RMS", "12.0"))
 
         self.bandpass_low_hz = float(os.environ.get("VOICE_BANDPASS_LOW_HZ", "150.0"))
         self.bandpass_high_hz = float(os.environ.get("VOICE_BANDPASS_HIGH_HZ", "6000.0"))
@@ -219,15 +220,15 @@ class ContinuousVoiceListener:
             return False
         if self.music_playing:
             # During loud playback, speech adds non-coherent power to the music floor.
-            # Demanding a 25% jump on top of 1000 RMS music requires shouting; we require
-            # either an SNR ratio or an envelope delta above ambient. When AEC3 has
-            # demonstrably cancelled speaker echo, the gate can be looser because the
+            # Require either an SNR ratio above ambient OR a small absolute delta so
+            # normal speaking volume can trigger the wake word even over music.
+            # When AEC3 has cancelled speaker echo, the gate is looser because the
             # music floor in the wake path is already suppressed.
             snr_req = self.wake_snr_ratio
-            delta_req = 25.0
+            delta_req = self.wake_delta_rms
             if self.aec3 is not None and self.aec3.active and self.aec3.echo_reduction_db >= 6.0:
-                snr_req = min(self.wake_snr_ratio, 1.02)
-                delta_req = 15.0
+                snr_req = min(self.wake_snr_ratio, 1.01)
+                delta_req = min(self.wake_delta_rms, 8.0)
             if (
                 recent_peak_rms < self.wake_ambient_rms * snr_req
                 and (recent_peak_rms - self.wake_ambient_rms) < delta_req
@@ -264,6 +265,7 @@ class ContinuousVoiceListener:
             "wake_engine": self.wake_engine_name,
             "mic_channel": self.mic_channel,
             "wake_snr_ratio": round(self.wake_snr_ratio, 2),
+            "wake_delta_rms": round(self.wake_delta_rms, 1),
             "wake_min_rms": round(self.wake_min_rms, 1),
             "music_confirm_chunks": self.wake_spotter.music_confirm_chunks if self.wake_spotter else 2,
             "music_min_conf": round(self.wake_spotter.music_min_confidence, 2) if self.wake_spotter else 0.65,
@@ -484,7 +486,10 @@ class ContinuousVoiceListener:
 
                         # Trigger Path 1: Local streaming Vosk wake-word spotter on AEC3 + anti-aliased audio
                         if self.music_playing:
-                            is_silent = False
+                            # During music, silence means wake_rms is near the music floor.
+                            # Letting Vosk see silence lets it reset its recognizer state
+                            # instead of continuously matching music lyrics as wake phrases.
+                            is_silent = wake_rms < max(self.wake_min_rms, self.wake_ambient_rms * 0.85)
                         else:
                             is_silent = wake_rms < max(self.min_threshold, self.wake_ambient_rms * 1.4)
                         hit = (
