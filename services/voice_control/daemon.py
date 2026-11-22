@@ -43,6 +43,7 @@ from voice_control.english_quiz import (  # noqa: E402
     QuizTurnResponse,
     TOPIC_LABELS,
     classify_quiz_command,
+    generate_infinite_quiz_questions,
     is_local_answer_match,
     question_from_dict,
 )
@@ -184,8 +185,8 @@ def _read_daily_quiz_schedule_status() -> dict[str, Any]:
         "configured": False,
         "timer_active": False,
         "timer_substate": "unknown",
-        "schedule_label": "평일 07:45 / 주말 09:00 (KST)",
-        "schedule_expr": "Mon..Fri *-*-* 07:45:00 Asia/Seoul / Sat,Sun *-*-* 09:00:00 Asia/Seoul",
+        "schedule_label": "평일 07:50 / 주말 09:00 (KST)",
+        "schedule_expr": "Mon..Fri *-*-* 07:50:00 Asia/Seoul / Sat,Sun *-*-* 09:00:00 Asia/Seoul",
         "next_run_kst": "-",
         "next_run_rel": "-",
         "last_run_kst": "-",
@@ -250,13 +251,13 @@ def _read_daily_quiz_schedule_status() -> dict[str, Any]:
                 has_weekday = any("Mon..Fri" in e for e in tc_entries)
                 has_weekend = any("Sat,Sun" in e or "Sat" in e for e in tc_entries)
                 if has_weekday and has_weekend:
-                    info["schedule_label"] = "평일 07:45 / 주말 09:00 (KST)"
+                    info["schedule_label"] = "평일 07:50 / 주말 09:00 (KST)"
                 elif has_weekend and not has_weekday:
                     info["schedule_label"] = "주말 09:00 (KST)"
                 elif has_weekday:
-                    info["schedule_label"] = "평일 07:45 (KST)"
-                elif len(tc_entries) == 1 and "07:45" in tc_entries[0]:
-                    info["schedule_label"] = "매일 07:45 (KST)"
+                    info["schedule_label"] = "평일 07:50 (KST)"
+                elif len(tc_entries) == 1 and "07:50" in tc_entries[0]:
+                    info["schedule_label"] = "매일 07:50 (KST)"
 
         if s_proc.returncode == 0 and s_proc.stdout.strip():
             s_props = _parse_kv_output(s_proc.stdout)
@@ -773,22 +774,37 @@ class VoiceController:
         return res
 
     def _maybe_generate_custom_quiz_questions(self, topic: str, count: int) -> list[Any] | None:
-        # Use curated offline bank for standard topics; only ask Gemini when user requests an unknown custom topic
-        # or if QUIZ_USE_LLM_GENERATION=1 is explicitly enabled.
-        want_llm = _env_bool("QUIZ_USE_LLM_GENERATION", False) or (topic not in TOPIC_LABELS and topic != "all")
-        if not want_llm or self.interpreter.provider == "local":
-            return None
-        try:
-            raw_list = self.interpreter.generate_kids_quiz_questions(
-                topic=topic,
-                count=count,
-                exclude_english=self.quiz.recent_english_texts(),
-            )
-            parsed = [q for i, item in enumerate(raw_list) if isinstance(item, dict) and (q := question_from_dict(item, i)) is not None]
-            return parsed or None
-        except Exception as exc:
-            log.warning("Dynamic quiz generation skipped (using offline bank): %s", exc)
-            return None
+        want_llm = _env_bool("QUIZ_USE_LLM_GENERATION", True)
+        recent_en = self.quiz.recent_english_texts()
+        llm_results: list[Any] = []
+        if want_llm and (self.interpreter.gemini_api_key or self.interpreter.openai_api_key):
+            try:
+                raw_list = self.interpreter.generate_kids_quiz_questions(
+                    topic=topic,
+                    count=count,
+                    exclude_english=recent_en,
+                )
+                llm_results = [
+                    q
+                    for i, item in enumerate(raw_list)
+                    if isinstance(item, dict) and (q := question_from_dict(item, i)) is not None
+                ]
+            except Exception as exc:
+                log.warning("LLM dynamic quiz generation failed; falling back to procedural generator: %s", exc)
+
+        if len(llm_results) >= count:
+            return llm_results[:count]
+
+        # Top up with infinite procedural generation so questions are ALWAYS dynamic and infinite
+        needed = count - len(llm_results)
+        exclude_set = {q.english_text.strip().lower() for q in llm_results} | {t.strip().lower() for t in recent_en}
+        procedural = generate_infinite_quiz_questions(
+            topic=topic,
+            count=needed,
+            exclude_texts=exclude_set,
+        )
+        combined = llm_results + procedural
+        return combined[:count] if combined else None
 
     def start_quiz(
         self,

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import collections
 import difflib
+import os
 import random
 import re
 import threading
@@ -16,6 +17,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from .aliases import parse_korean_number, strip_wake_prefix
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    return val.strip().lower() in ("1", "true", "yes", "on")
 
 
 @dataclass(frozen=True)
@@ -1104,6 +1112,1087 @@ def _final_encouragement(score: int, total: int) -> str:
     return "끝까지 열심히 들어주고 도전해서 정말 멋져요! 다음에 또 같이 연습해요!"
 
 
+
+# ---------------------------------------------------------------------------
+# Infinite Procedural English Listening Quiz Question Generator
+# Generates endless 2~3 sentence listening stories, descriptions, math/clocks,
+# and riddles without relying on a static question bank.
+# ---------------------------------------------------------------------------
+
+_ANIMALS_BLUEPRINTS: list[dict[str, Any]] = [
+    {
+        "key": "elephant",
+        "en": "Elephant",
+        "ko": "코끼리",
+        "hint": "큰 귀와 긴 코를 가진 커다란 회색 동물이에요! 초성 힌트는 ㅋㄲㄹ!",
+        "expl": "정답은 Elephant, 코끼리예요. 'long trunk'는 코끼리의 긴 코를 뜻해요.",
+        "accepted": ("elephant", "엘리펀트", "코끼리"),
+        "stories": [
+            "I am a very large gray mammal with big ears and white tusks. I use my long trunk to spray water and pick up fresh grass to eat. What animal am I?",
+            "I live in a family herd in the warm grasslands. I have a long, flexible trunk and giant ears that flap like fans to cool me down. What animal am I?",
+            "I am the largest animal walking on land. People love watching me splash water over my back with my long nose. What animal am I?",
+        ],
+    },
+    {
+        "key": "lion",
+        "en": "Lion",
+        "ko": "사자",
+        "hint": "밀림의 왕으로 불리며, 멋진 갈기를 가진 힘센 고양이과 동물이에요! 초성 힌트는 ㅅㅈ!",
+        "expl": "정답은 Lion, 사자예요. 'thick mane'은 수사자의 풍성한 갈기예요.",
+        "accepted": ("lion", "라이언", "사자"),
+        "stories": [
+            "I am known as the king of the jungle, and the male has a thick brown mane around his neck. I let out a mighty roar that echoes across the savanna. What animal am I?",
+            "I am a powerful golden cat that lives in a family pride. I nap under the shade of acacia trees during the hot day and hunt under the stars. What animal am I?",
+        ],
+    },
+    {
+        "key": "tiger",
+        "en": "Tiger",
+        "ko": "호랑이",
+        "hint": "주황색 털에 검은 줄무늬가 있고, 용감하고 수영을 즐기는 동물이에요! 초성 힌트는 ㅎㄹㅇ!",
+        "expl": "정답은 Tiger, 호랑이예요. 'black stripes'는 검은 줄무늬예요.",
+        "accepted": ("tiger", "타이거", "호랑이", "범"),
+        "stories": [
+            "I have fiery orange fur covered with bold black stripes. I am a solitary big cat that loves hunting in dense forests and swimming in rivers. What animal am I?",
+            "My bold stripes help me hide in the tall grass. Unlike most house cats, I love playing and swimming in cool rivers. What animal am I?",
+        ],
+    },
+    {
+        "key": "giraffe",
+        "en": "Giraffe",
+        "ko": "기린",
+        "hint": "육지에서 가장 키가 크고 아주 긴 목으로 나뭇잎을 먹는 동물이에요! 초성 힌트는 ㄱㄹ!",
+        "expl": "정답은 Giraffe, 기린이에요. 'tallest land animal'은 가장 키가 큰 육지 동물이에요.",
+        "accepted": ("giraffe", "지라프", "기린"),
+        "stories": [
+            "I am the tallest land animal on Earth with long legs and a patchy coat. My extremely long neck helps me reach sweet leaves at the treetops. What animal am I?",
+            "I have brown spots all over my yellow body and a long purple tongue. I can see enemies from far away because I am so tall. What animal am I?",
+        ],
+    },
+    {
+        "key": "monkey",
+        "en": "Monkey",
+        "ko": "원숭이",
+        "hint": "긴 팔과 꼬리로 나뭇가지를 타고 바나나를 좋아하는 동물이에요! 초성 힌트는 ㅇㅅㅇ!",
+        "expl": "정답은 Monkey, 원숭이예요. 'swing from branch to branch'는 가지를 건너다닌다는 뜻이에요.",
+        "accepted": ("monkey", "몽키", "원숭이"),
+        "stories": [
+            "I am a clever and playful creature with long arms and a flexible tail. I love to swing from branch to branch in the jungle and eat sweet bananas. What animal am I?",
+            "I live high in the green forest trees with my noisy family. I groom my friends' fur and make silly faces while chattering. What animal am I?",
+        ],
+    },
+    {
+        "key": "penguin",
+        "en": "Penguin",
+        "ko": "펭귄",
+        "hint": "하늘은 못 날지만 차가운 바다에서 수영을 잘하고 뒤뚱뒤뚱 걷는 새예요! 초성 힌트는 ㅍㄱ!",
+        "expl": "정답은 Penguin, 펭귄이에요. 'waddle'은 뒤뚱뒤뚱 걷다는 뜻이에요.",
+        "accepted": ("penguin", "펭귄", "팽귄"),
+        "stories": [
+            "I am a flightless bird wearing a natural black and white tuxedo. I waddle across the Antarctic ice and dive into freezing water to catch fish. What animal am I?",
+            "I have wings shaped like flippers that make me an incredible swimmer. I slide on my belly across the snow and stay warm in giant huddles. What animal am I?",
+        ],
+    },
+    {
+        "key": "dolphin",
+        "en": "Dolphin",
+        "ko": "돌고래",
+        "hint": "바다에서 뛰어오르고 소리로 대화하는 똑똑한 바다 동물이에요! 초성 힌트는 ㄷㄱㄹ!",
+        "expl": "정답은 Dolphin, 돌고래예요. 'blowhole'은 머리 위의 숨구멍이에요.",
+        "accepted": ("dolphin", "돌핀", "돌고래", "고래"),
+        "stories": [
+            "I am a friendly and intelligent marine mammal that breathes air through a blowhole. I jump gracefully through ocean waves and communicate with clicks and whistles. What animal am I?",
+            "I swim swiftly beside big boats and love playing with waves. I live with my family pod and help guide my friends through the deep blue sea. What animal am I?",
+        ],
+    },
+    {
+        "key": "whale",
+        "en": "Whale",
+        "ko": "고래",
+        "hint": "바다에서 가장 거대하고 등에서 물을 뿜어 올리는 동물이에요! 초성 힌트는 ㄱㄹ!",
+        "expl": "정답은 Whale, 고래예요. 'vast blue ocean'은 광활한 푸른 바다예요.",
+        "accepted": ("whale", "웨일", "고래"),
+        "stories": [
+            "I am the biggest creature living in the vast blue ocean. I sing mysterious songs across thousands of miles and shoot water high into the sky. What animal am I?",
+            "Even though I am enormous, I am very gentle. I take deep breaths at the ocean surface and dive into the deep dark waters. What animal am I?",
+        ],
+    },
+    {
+        "key": "kangaroo",
+        "en": "Kangaroo",
+        "ko": "캥거루",
+        "hint": "배에 아기 주머니가 있고 튼튼한 다리로 깡충깡충 뛰는 호주 동물이에요! 초성 힌트는 ㅋㄱㄹ!",
+        "expl": "정답은 Kangaroo, 캥거루예요. 'pouch'는 아기 주머니예요.",
+        "accepted": ("kangaroo", "캥거루"),
+        "stories": [
+            "I have powerful hind legs and a muscular tail to help me balance. Mother carries her tiny joey inside a warm pouch on her belly. What animal am I?",
+            "I hop across the Australian plains faster than a person can run. My big feet push me high into the air with every giant leap. What animal am I?",
+        ],
+    },
+    {
+        "key": "panda",
+        "en": "Panda",
+        "ko": "판다",
+        "hint": "검은색과 흰색 털을 가졌고 대나무를 맛있게 먹는 동물이에요! 초성 힌트는 ㅍㄷ!",
+        "expl": "정답은 Panda, 판다예요. 'bamboo'는 대나무를 뜻해요.",
+        "accepted": ("panda", "팬더", "판다"),
+        "stories": [
+            "I am a chubby bear with distinct black and white fur patches. I live in misty mountain bamboo forests and spend hours munching on green bamboo stalks. What animal am I?",
+            "I have black circles around my eyes that make me look like I am wearing glasses. I love climbing trees and rolling around in the green grass. What animal am I?",
+        ],
+    },
+    {
+        "key": "rabbit",
+        "en": "Rabbit",
+        "ko": "토끼",
+        "hint": "긴 귀와 몽실한 꼬리를 가졌고 깡충깡충 뛰며 당근을 좋아하는 동물이에요! 초성 힌트는 ㅌㄲ!",
+        "expl": "정답은 Rabbit, 토끼예요. 'twitching ears'는 쫑긋거리는 귀예요.",
+        "accepted": ("rabbit", "bunny", "래빗", "토끼", "버니"),
+        "stories": [
+            "I have long twitching ears, a soft fluffy tail, and strong back feet. I love hopping across grassy meadows and nibbling on fresh carrots. What animal am I?",
+            "I dig cozy burrows underground to sleep safely. When I get excited, I jump straight into the air and twist my body. What animal am I?",
+        ],
+    },
+    {
+        "key": "koala",
+        "en": "Koala",
+        "ko": "코알라",
+        "hint": "호주 나무에 매달려 하루 종일 잠을 자고 유칼립투스 잎을 먹는 동물이에요! 초성 힌트는 ㅋㅇㄹ!",
+        "expl": "정답은 Koala, 코알라예요. 'eucalyptus'는 유칼립투스 나뭇잎이에요.",
+        "accepted": ("koala", "코알라"),
+        "stories": [
+            "I am a cute marsupial that lives high in the trees of Australia. I spend nearly twenty hours a day sleeping and wake up to munch on eucalyptus leaves. What animal am I?",
+            "I hug tree trunks tightly with my sharp curved claws. I have large round fuzzy ears and a dark leathery nose. What animal am I?",
+        ],
+    },
+    {
+        "key": "zebra",
+        "en": "Zebra",
+        "ko": "얼룩말",
+        "hint": "온몸에 흑백 줄무늬가 있는 아프리카 초원의 동물이에요! 초성 힌트는 ㅇㄹㅁ!",
+        "expl": "정답은 Zebra, 얼룩말이에요. 'black and white stripes'는 흑백 줄무늬예요.",
+        "accepted": ("zebra", "지브라", "얼룩말"),
+        "stories": [
+            "I look like a wild horse, but my entire body is painted with black and white stripes. I run in large herds across the African grasslands to stay safe from predators. What animal am I?",
+            "No two animals in my family have the exact same striped pattern. I gallop together across the open plains under the sun. What animal am I?",
+        ],
+    },
+    {
+        "key": "bear",
+        "en": "Bear",
+        "ko": "곰",
+        "hint": "두꺼운 털과 날카로운 발톱을 가졌고 겨울잠을 자는 큰 동물이에요! 초성 힌트는 ㄱ!",
+        "expl": "정답은 Bear, 곰이에요. 'sharp claws'는 날카로운 발톱이에요.",
+        "accepted": ("bear", "베어", "곰"),
+        "stories": [
+            "I am a large animal with thick warm fur and sharp claws. In the autumn I eat berries and catch salmon in rivers before sleeping all through the cold winter. What animal am I?",
+            "I stand tall on my hind legs to look over tall bushes. I love sweet forest honey and swimming in cold mountain streams. What animal am I?",
+        ],
+    },
+    {
+        "key": "owl",
+        "en": "Owl",
+        "ko": "부엉이 / 올빼미",
+        "hint": "낮에는 자고 밤에 사냥하며, 고개를 홱 돌릴 수 있는 밤의 새예요! 초성 힌트는 ㅂㅇㅇ!",
+        "expl": "정답은 Owl, 부엉이(올빼미)예요. 'turn my head'는 고개를 돌린다는 뜻이에요.",
+        "accepted": ("owl", "아울", "부엉이", "올빼미"),
+        "stories": [
+            "I sleep silently during the day and hunt for mice in the dark night. I can turn my head almost all the way around and make a soft hooting sound. What animal am I?",
+            "I have huge round eyes that see clearly in total darkness. My soft feathers let me fly completely silently through the night air. What bird am I?",
+        ],
+    },
+    {
+        "key": "turtle",
+        "en": "Turtle",
+        "ko": "거북이",
+        "hint": "단단한 등껍질을 메고 천천히 걸으며 위험할 때 숨는 동물이에요! 초성 힌트는 ㄱㅂㅇ!",
+        "expl": "정답은 Turtle, 거북이예요. 'protective shell'은 단단한 등껍질이에요.",
+        "accepted": ("turtle", "tortoise", "터틀", "거북이", "거북"),
+        "stories": [
+            "I carry a hard protective shell on my back and move slowly across the ground. When danger approaches, I pull my head and legs safely inside my shell. What animal am I?",
+            "Some of my cousins swim thousands of miles in the ocean with flippers, while I walk peacefully on dry land. I can live for more than a hundred years. What animal am I?",
+        ],
+    },
+    {
+        "key": "frog",
+        "en": "Frog",
+        "ko": "개구리",
+        "hint": "올챙이에서 자라나 긴 다리로 점프하고 연못에 사는 동물이에요! 초성 힌트는 ㄱㄱㄹ!",
+        "expl": "정답은 Frog, 개구리예요. 'tadpole'은 올챙이를 뜻해요.",
+        "accepted": ("frog", "toad", "프로그", "개구리"),
+        "stories": [
+            "I begin my life as a tiny swimming tadpole in a freshwater pond. When I grow up, I leap around with long legs and catch flies with my sticky tongue. What animal am I?",
+            "I sit peacefully on a green lily pad in the summer pond. When the rain pours down, I puff up my throat and sing ribbit ribbit. What animal am I?",
+        ],
+    },
+    {
+        "key": "dog",
+        "en": "Dog",
+        "ko": "강아지 / 개",
+        "hint": "사람의 가장 친한 친구로, 꼬리를 흔들고 멍멍 짖는 동물이에요! 초성 힌트는 ㄱㅇㅈ!",
+        "expl": "정답은 Dog, 강아지(개)예요. 'wag tail'은 꼬리를 흔든다는 뜻이에요.",
+        "accepted": ("dog", "puppy", "도그", "퍼피", "개", "강아지", "댕댕이"),
+        "stories": [
+            "People call me human's best friend because I am loyal, playful, and loving. I wag my tail happily when you come home and bark when someone knocks on the door. What animal am I?",
+            "I love playing fetch in the park and chasing tennis balls across the grass. When I want a treat, I sit nicely and shake hands with my paw. What animal am I?",
+        ],
+    },
+    {
+        "key": "cat",
+        "en": "Cat",
+        "ko": "고양이",
+        "hint": "부드러운 발바닥과 수염을 가졌고 기분 좋을 때 골골송을 부르는 동물이에요! 초성 힌트는 ㄱㅇㅇ!",
+        "expl": "정답은 Cat, 고양이예요. 'purr'는 기분 좋을 때 나는 골골 소리예요.",
+        "accepted": ("cat", "kitten", "kitty", "캣", "고양이", "야옹이"),
+        "stories": [
+            "I have soft paws with retractable claws and long whiskers on my cheeks. I love curling up in warm sunshine and purr softly when you pet my fur. What animal am I?",
+            "I can leap silently from the floor to the top of tall bookshelves. When I am hungry, I rub gently against your leg and meow softly. What animal am I?",
+        ],
+    },
+    {
+        "key": "horse",
+        "en": "Horse",
+        "ko": "말",
+        "hint": "멋진 갈기와 단단한 말굽으로 초원을 빠르게 달리는 동물이에요! 초성 힌트는 ㅁ!",
+        "expl": "정답은 Horse, 말이에요. 'gallop'은 말이 질주한다는 뜻이에요.",
+        "accepted": ("horse", "호스", "말"),
+        "stories": [
+            "I have a flowing mane, a long tail, and hard hooves on my feet. People ride on my back as I gallop quickly across open green pastures. What animal am I?",
+            "I sleep standing up on my four strong legs and eat crisp apples and hay. I make a loud neighing sound to call my herd. What animal am I?",
+        ],
+    },
+    {
+        "key": "cow",
+        "en": "Cow",
+        "ko": "소 / 젖소",
+        "hint": "목장에서 풀을 뜯으며 음메 소리를 내고 신선한 우유를 주는 동물이에요! 초성 힌트는 ㅅ!",
+        "expl": "정답은 Cow, 젖소(소)예요. 'graze'는 풀을 뜯는다는 뜻이에요.",
+        "accepted": ("cow", "카우", "소", "젖소", "황소"),
+        "stories": [
+            "I graze peacefully on green clover in a farm pasture. I chew my cud, make a gentle moo sound, and give fresh white milk for people to drink. What animal am I?",
+            "I have a large gentle body, two ears with yellow tags, and a swishing tail. Farmers take care of me in the red barn every morning. What animal am I?",
+        ],
+    },
+    {
+        "key": "bee",
+        "en": "Bee",
+        "ko": "꿀벌 / 벌",
+        "hint": "꽃 사이를 날아다니며 꿀을 모으고 붕붕 소리를 내는 곤충이에요! 초성 힌트는 ㅂ!",
+        "expl": "정답은 Bee, 꿀벌(벌)이에요. 'sweet nectar'는 달콤한 꽃꿀이에요.",
+        "accepted": ("bee", "honeybee", "비", "벌", "꿀벌"),
+        "stories": [
+            "I buzz from blossom to blossom with tiny wings to collect pollen and sweet nectar. I live in a hive with my queen and make golden honey. What insect am I?",
+            "I do a special waggle dance to tell my sisters where the best flowers are blooming. My body has yellow and black stripes and I can sting if frightened. What insect am I?",
+        ],
+    },
+    {
+        "key": "butterfly",
+        "en": "Butterfly",
+        "ko": "나비",
+        "hint": "애벌레에서 번데기를 거쳐 알록달록한 날개로 꽃밭을 날아다니는 곤충이에요! 초성 힌트는 ㄴㅂ!",
+        "expl": "정답은 Butterfly, 나비예요. 'flutter'는 팔랑팔랑 난다는 뜻이에요.",
+        "accepted": ("butterfly", "버터플라이", "나비", "호랑나비"),
+        "stories": [
+            "I start my life as a crawling caterpillar that eats green leaves. Later I emerge from a cozy chrysalis with dazzling colorful wings to dance in the garden. What insect am I?",
+            "I flutter gently over garden flowers on warm sunny afternoons. I taste sweet nectar using my feet and drink with a curly straw-like tongue. What insect am I?",
+        ],
+    },
+    {
+        "key": "shark",
+        "en": "Shark",
+        "ko": "상어",
+        "hint": "뾰족한 등지느러미와 날카로운 이빨로 바다를 헤엄치는 사냥꾼이에요! 초성 힌트는 ㅅㅇ!",
+        "expl": "정답은 Shark, 상어예요. 'dorsal fin'은 뾰족한 등지느러미예요.",
+        "accepted": ("shark", "샤크", "상어"),
+        "stories": [
+            "I have rows of triangular sharp teeth and a pointed dorsal fin that cuts through the ocean surface. I am a top predator swimming swiftly through deep water. What animal am I?",
+            "My skeleton is made entirely of flexible cartilage instead of heavy bone. I have an amazing sense of smell that detects things in the ocean from miles away. What animal am I?",
+        ],
+    },
+    {
+        "key": "octopus",
+        "en": "Octopus",
+        "ko": "문어",
+        "hint": "다리가 8개 있고 먹물을 뿜으며 몸 색깔을 바꿀 수 있는 바다 생물이에요! 초성 힌트는 ㅁㅇ!",
+        "expl": "정답은 Octopus, 문어예요. 'eight arms'는 8개의 다리(팔)예요.",
+        "accepted": ("octopus", "옥토퍼스", "문어"),
+        "stories": [
+            "I am a clever sea creature with three hearts, blue blood, and eight flexible arms covered in suckers. I squirt dark ink to escape when an enemy comes near. What sea creature am I?",
+            "I can change my skin color and texture in less than a second to match coral rocks. I have no bones at all, so I can squeeze through tiny openings. What sea creature am I?",
+        ],
+    },
+]
+
+_FOOD_BLUEPRINTS: list[dict[str, Any]] = [
+    {
+        "key": "watermelon",
+        "en": "Watermelon",
+        "ko": "수박",
+        "hint": "겉은 초록색 줄무늬, 속은 빨갛고 시원한 여름 대표 과일이에요! 초성 힌트는 ㅅㅂ!",
+        "expl": "정답은 Watermelon, 수박이에요. 'thick green rind'는 두꺼운 초록 껍질이에요.",
+        "accepted": ("watermelon", "워터멜론", "수박"),
+        "stories": [
+            "I am a heavy round fruit with dark green stripes on my thick rind. When you slice me open on a hot summer afternoon, I am red, sweet, and full of refreshing juice. What fruit am I?",
+            "People love bringing me to beach picnics and summer barbecues. I have lots of tiny black seeds inside my crisp red fruit. What fruit am I?",
+        ],
+    },
+    {
+        "key": "banana",
+        "en": "Banana",
+        "ko": "바나나",
+        "hint": "노란 껍질을 벗겨 먹는 길쭉한 과일이고 원숭이가 좋아해요! 초성 힌트는 ㅂㄴㄴ!",
+        "expl": "정답은 Banana, 바나나예요. 'yellow peel'은 노란 껍질이에요.",
+        "accepted": ("banana", "바나나"),
+        "stories": [
+            "I grow in large bunches in tropical sunshine and start out bright green. When I am ripe and sweet, my skin turns yellow and you peel it off to eat me. What fruit am I?",
+            "I am a curved yellow fruit that is soft and delicious to bite. Monkeys love eating me high in the trees, and children pack me in lunchboxes. What fruit am I?",
+        ],
+    },
+    {
+        "key": "apple",
+        "en": "Apple",
+        "ko": "사과",
+        "hint": "빨갛고 아삭아삭한 과일로, 백설공주 이야기에도 나와요! 초성 힌트는 ㅅㄱ!",
+        "expl": "정답은 Apple, 사과예요. 'crunchy'는 아삭아삭하다는 뜻이에요.",
+        "accepted": ("apple", "애플", "사과"),
+        "stories": [
+            "I grow on orchard trees and turn bright red, green, or yellow in the autumn. I make a satisfying crunch when you take a bite, and doctors say eating one a day keeps them away. What fruit am I?",
+            "People bake me into warm pies with cinnamon or press me into sweet cider. I have a brown stem on top and tiny seeds in my core. What fruit am I?",
+        ],
+    },
+    {
+        "key": "strawberry",
+        "en": "Strawberry",
+        "ko": "딸기",
+        "hint": "하트 모양의 빨간 과일로, 겉에 작은 씨가 콕콕 박혀 있어요! 초성 힌트는 ㄸㄱ!",
+        "expl": "정답은 Strawberry, 딸기예요. 'heart-shaped'는 하트 모양이에요.",
+        "accepted": ("strawberry", "스트로베리", "딸기"),
+        "stories": [
+            "I am a heart-shaped bright red berry wearing a tiny green leafy cap. My outside is dotted with hundreds of tiny seeds, and I taste sweet on birthday cakes. What fruit am I?",
+            "Children love picking me in warm greenhouses during the spring. I am juicy, sweet, and make delicious pink ice cream and smoothies. What fruit am I?",
+        ],
+    },
+    {
+        "key": "carrot",
+        "en": "Carrot",
+        "ko": "당근",
+        "hint": "땅속에서 자라는 주황색 채소로 토끼가 아주 좋아해요! 초성 힌트는 ㄷㄱ!",
+        "expl": "정답은 Carrot, 당근이에요. 'grow underground'는 땅속에서 자란다는 뜻이에요.",
+        "accepted": ("carrot", "캐럿", "당근"),
+        "stories": [
+            "I am a crunchy orange root vegetable that grows hidden underground in the garden soil. Rabbits are famous for nibbling on me, and I help keep your eyesight sharp. What vegetable am I?",
+            "You can chop me into vegetable soup or use me to make a nose for a snowy winter snowman. I have bushy green leaves on top and a bright orange body. What vegetable am I?",
+        ],
+    },
+    {
+        "key": "pizza",
+        "en": "Pizza",
+        "ko": "피자",
+        "hint": "토마토 소스와 치즈를 올려 구운 삼각형 조각 음식이에요! 초성 힌트는 ㅍㅈ!",
+        "expl": "정답은 Pizza, 피자예요. 'melted cheese'는 녹아내린 치즈예요.",
+        "accepted": ("pizza", "피자"),
+        "stories": [
+            "I am baked in a blistering hot stone oven until my crust is crispy. I am topped with savory tomato sauce, melted stretchy cheese, and cut into triangular slices. What food am I?",
+            "Families love ordering me on Friday movie nights in a big square cardboard box. When you pull a warm slice away, the mozzarella cheese stretches out. What food am I?",
+        ],
+    },
+    {
+        "key": "ice_cream",
+        "en": "Ice cream",
+        "ko": "아이스크림",
+        "hint": "콘이나 컵에 담아 먹는 차갑고 달콤한 디저트로 햇볕에 녹아요! 초성 힌트는 ㅇㅇㅅㅋㄹ!",
+        "expl": "정답은 Ice cream, 아이스크림이에요. 'melt'는 녹는다는 뜻이에요.",
+        "accepted": ("ice cream", "icecream", "아이스크림"),
+        "stories": [
+            "I am a freezing, creamy dessert that comes in delicious flavors like chocolate, vanilla, and strawberry. If you don't eat me quickly on a sunny day, I melt into a sweet puddle. What food am I?",
+            "People enjoy licking me off a crispy waffle cone at the park. I am sweet, chilly, and make everyone smile on hot summer afternoons. What treat am I?",
+        ],
+    },
+    {
+        "key": "egg",
+        "en": "Egg",
+        "ko": "달걀 / 계란",
+        "hint": "단단한 껍질을 톡 깨면 노란 노른자가 나오는 아침 식사 단골 음식이에요! 초성 힌트는 ㄷㄱ!",
+        "expl": "정답은 Egg, 달걀(계란)이에요. 'crack open'은 톡 깨서 연다는 뜻이에요.",
+        "accepted": ("egg", "eggs", "에그", "달걀", "계란"),
+        "stories": [
+            "I have an oval shell that protects me until you crack me into a frying pan. Inside, I have clear egg whites and a bright golden yellow yolk. What food am I?",
+            "People boil, fry, or scramble me for a nutritious breakfast every morning. Hens lay me in soft nests inside the farm coop. What food am I?",
+        ],
+    },
+    {
+        "key": "honey",
+        "en": "Honey",
+        "ko": "꿀",
+        "hint": "꿀벌이 꽃에서 모은 달콤하고 끈적한 황금빛 음식이에요! 초성 힌트는 ㄲ!",
+        "expl": "정답은 Honey, 꿀이에요. 'sticky'는 끈적끈적하다는 뜻이에요.",
+        "accepted": ("honey", "허니", "꿀", "벌꿀"),
+        "stories": [
+            "Busy bees collect flower nectar all day long to craft me inside their hive. I am thick, golden, and sticky, and people drizzle me over warm toast or pancakes. What food am I?",
+            "I never spoil even after sitting in a glass jar for years. Bears love finding me in hollow trees, and people stir me into warm tea when they have a cold. What food am I?",
+        ],
+    },
+    {
+        "key": "milk",
+        "en": "Milk",
+        "ko": "우유",
+        "hint": "하얗고 고소한 음료로, 젖소에게서 얻고 시리얼에 부어 먹어요! 초성 힌트는 ㅇㅇ!",
+        "expl": "정답은 Milk, 우유예요. 'calcium'은 뼈를 튼튼하게 하는 칼슘이에요.",
+        "accepted": ("milk", "밀크", "우유"),
+        "stories": [
+            "I am a nutritious white liquid full of calcium that helps children build strong bones and teeth. People pour me over crunchy breakfast cereal every morning. What drink am I?",
+            "You keep me cold in the refrigerator door in a carton or glass bottle. Friendly dairy cows produce me on green pastures. What drink am I?",
+        ],
+    },
+    {
+        "key": "chocolate",
+        "en": "Chocolate",
+        "ko": "초콜릿",
+        "hint": "카카오로 만든 달콤한 갈색 간식으로 입안에서 사르르 녹아요! 초성 힌트는 ㅊㅋㄹ!",
+        "expl": "정답은 Chocolate, 초콜릿이에요. 'cocoa'는 카카오를 뜻해요.",
+        "accepted": ("chocolate", "초콜릿", "초콜렛", "초코"),
+        "stories": [
+            "I am made from roasted cacao beans harvested in tropical lands. I am a rich brown treat that melts smoothly on your tongue, and people gift me on Valentine's Day. What treat am I?",
+            "You can bake me into cookies, break me into sweet squares, or drink me hot with marshmallows on a winter evening. What sweet food am I?",
+        ],
+    },
+    {
+        "key": "bread",
+        "en": "Bread",
+        "ko": "빵",
+        "hint": "밀가루 반죽을 오븐에 구워 만들고 샌드위치를 만들 때 쓰는 음식이에요! 초성 힌트는 ㅃ!",
+        "expl": "정답은 Bread, 빵이에요. 'bakery'는 빵집이에요.",
+        "accepted": ("bread", "브레드", "빵"),
+        "stories": [
+            "Bakers mix flour, water, and yeast together and let the dough rise before sliding it into the oven. The whole bakery smells wonderful when fresh loaves come out with a golden crust. What food am I?",
+            "You slice two pieces of me to make a tasty ham and cheese sandwich for lunch. You can also pop me in a toaster until I am warm and crunchy. What food am I?",
+        ],
+    },
+]
+
+_FAMILY_SCHOOL_BLUEPRINTS: list[dict[str, Any]] = [
+    {
+        "key": "teacher",
+        "en": "Teacher",
+        "ko": "선생님 / 교사",
+        "hint": "교실에서 학생들에게 새로운 지식을 가르쳐 주시는 분이에요! 초성 힌트는 ㅅㅅㄴ!",
+        "expl": "정답은 Teacher, 선생님이에요. 'classroom'은 교실이에요.",
+        "accepted": ("teacher", "티처", "선생님", "선생", "교사"),
+        "stories": [
+            "I write lessons on the classroom whiteboard and hand out worksheets to curious students. I answer tricky questions and help children read, write, and learn every day. What is my job?",
+            "I greet my students with a smile at the classroom door every morning. I read storybooks aloud, organize fun science experiments, and grade homework. What is my job?",
+        ],
+    },
+    {
+        "key": "doctor",
+        "en": "Doctor",
+        "ko": "의사",
+        "hint": "병원에서 흰 가운을 입고 청진기로 환자를 진찰해 주는 분이에요! 초성 힌트는 ㅇㅅ!",
+        "expl": "정답은 Doctor, 의사예요. 'stethoscope'는 청진기예요.",
+        "accepted": ("doctor", "닥터", "의사", "의사선생님", "의사 선생님"),
+        "stories": [
+            "I wear a clean white lab coat and carry a stethoscope around my neck at the hospital. When you feel sick or have a fever, I examine your throat and prescribe medicine to help you heal. What is my job?",
+            "I listen to your heartbeat thump thump thump through my metal stethoscope. I help people stay healthy, recover from colds, and heal broken bones. What is my job?",
+        ],
+    },
+    {
+        "key": "firefighter",
+        "en": "Firefighter",
+        "ko": "소방관",
+        "hint": "빨간 소방차를 타고 출동해 불을 끄고 사람들을 구하는 용감한 분이에요! 초성 힌트는 ㅅㅂㄱ!",
+        "expl": "정답은 Firefighter, 소방관이에요. 'put out flames'는 불길을 끈다는 뜻이에요.",
+        "accepted": ("firefighter", "fireman", "파이어파이터", "소방관", "소방수"),
+        "stories": [
+            "When the loud emergency bell sounds at the station, I slide down the pole and put on my heavy yellow helmet. I ride a bright red truck and spray powerful water hoses to put out dangerous fires. What is my job?",
+            "I am brave and strong, always ready to rescue people and pets from burning buildings. I drive through the city with sirens blaring to help anyone in danger. What is my job?",
+        ],
+    },
+    {
+        "key": "police_officer",
+        "en": "Police officer",
+        "ko": "경찰관 / 경찰",
+        "hint": "순찰차를 타고 동네를 지키며 사람들을 안전하게 보호해 주는 분이에요! 초성 힌트는 ㄱㅊㄱ!",
+        "expl": "정답은 Police officer, 경찰관이에요. 'keep the neighborhood safe'는 동네를 안전하게 지킨다는 뜻이에요.",
+        "accepted": ("police officer", "police", "cop", "폴리스", "경찰", "경찰관"),
+        "stories": [
+            "I wear a neat blue uniform, a shiny metal badge, and patrol city streets in a black and white patrol car. I direct traffic when signals go out and keep our neighborhood peaceful and safe. What is my job?",
+            "If someone gets lost in a crowded park, they come to me for help. I help children cross busy crosswalks safely and protect everyone in the community. What is my job?",
+        ],
+    },
+    {
+        "key": "chef",
+        "en": "Chef / Cook",
+        "ko": "요리사 / 셰프",
+        "hint": "주방에서 칼과 프라이팬으로 맛있는 음식을 요리하는 분이에요! 초성 힌트는 ㅇㄹㅅ!",
+        "expl": "정답은 Chef, 요리사예요. 'tall white hat'은 셰프의 높은 모자예요.",
+        "accepted": ("chef", "cook", "셰프", "쉐프", "요리사"),
+        "stories": [
+            "I wear a tall white hat and work in a bustling restaurant kitchen filled with sizzles and steam. I chop fresh vegetables, season savory sauces, and cook gourmet meals for hungry guests. What is my job?",
+            "I taste my simmering soups with a silver spoon and flip hot pancakes in heavy pans. Guests come to my dining room to celebrate special dinners with delicious food. What is my job?",
+        ],
+    },
+    {
+        "key": "library",
+        "en": "Library",
+        "ko": "도서관",
+        "hint": "수많은 책이 꽂혀 있고 조용히 책을 읽거나 빌려 갈 수 있는 곳이에요! 초성 힌트는 ㄷㅅㄱ!",
+        "expl": "정답은 Library, 도서관이에요. 'borrow books'는 책을 대출한다는 뜻이에요.",
+        "accepted": ("library", "라이브러리", "도서관", "도서실"),
+        "stories": [
+            "This quiet building is packed with thousands of books on tall wooden shelves from floor to ceiling. You can sit peacefully at desks to study and use your card to borrow exciting novels for free. What place is this?",
+            "Everyone whispers softly inside this peaceful room so other people can concentrate on reading. You can find mystery stories, encyclopedias, and fairy tales here. What place is this?",
+        ],
+    },
+    {
+        "key": "hospital",
+        "en": "Hospital",
+        "ko": "병원",
+        "hint": "의사와 간호사가 있고 아픈 사람들을 치료해 주는 곳이에요! 초성 힌트는 ㅂㅇ!",
+        "expl": "정답은 Hospital, 병원이에요. 'ambulance'는 구급차예요.",
+        "accepted": ("hospital", "clinic", "호스피털", "병원"),
+        "stories": [
+            "Ambulances with flashing red lights bring injured people to this large medical building. Skilled doctors and kind nurses look after patients in comfortable beds until they feel better. What place is this?",
+            "You visit this clean place when you have a high fever or need a regular checkup. You can find x-ray machines, medicine, and warm care here. What place is this?",
+        ],
+    },
+    {
+        "key": "airport",
+        "en": "Airport",
+        "ko": "공항",
+        "hint": "여권을 챙기고 큰 비행기를 타러 가는 곳이에요! 초성 힌트는 ㄱㅎ!",
+        "expl": "정답은 Airport, 공항이에요. 'board an airplane'은 비행기에 탑승한다는 뜻이에요.",
+        "accepted": ("airport", "에어포트", "공항"),
+        "stories": [
+            "Travelers wheel their heavy suitcases through this busy terminal with their passports in hand. Giant airplanes land and take off on long concrete runways outside the windows. What place is this?",
+            "You check your flight departure board, walk to your gate, and walk down a ramp to board a big plane flying overseas. What place is this?",
+        ],
+    },
+    {
+        "key": "pencil",
+        "en": "Pencil",
+        "ko": "연필",
+        "hint": "나무 속에 흑연이 들어 있고 지우개로 지울 수 있는 필기도구예요! 초성 힌트는 ㅇㅍ!",
+        "expl": "정답은 Pencil, 연필이에요. 'lead'는 연필심이에요.",
+        "accepted": ("pencil", "펜슬", "연필"),
+        "stories": [
+            "I am made of cedar wood with dark graphite lead running through my center. Students sharpen my tip to write spelling words in notebooks, and I often have a pink rubber eraser on top. What am I?",
+            "When I get dull from writing lots of math problems, you twist me inside a pencil sharpener. You can erase my marks easily if you make a mistake. What am I?",
+        ],
+    },
+]
+
+_DAILY_BLUEPRINTS: list[dict[str, Any]] = [
+    {
+        "key": "umbrella",
+        "en": "Umbrella",
+        "ko": "우산",
+        "hint": "비가 올 때 머리 위에 펼쳐서 옷이 젖지 않게 해 주는 물건이에요! 초성 힌트는 ㅇㅅ!",
+        "expl": "정답은 Umbrella, 우산이에요. 'stay dry'는 젖지 않고 마른 상태를 유지한다는 뜻이에요.",
+        "accepted": ("umbrella", "엄브렐라", "우산"),
+        "stories": [
+            "Dark gray rainclouds gathered over the rooftops and heavy raindrops started tapping on the window. Before walking out the front door, Minho opened a colorful canopy over his head to stay dry. What did Minho use?",
+            "You press a small silver button on my handle and whoosh, I pop open like a mushroom shield. I protect your clothes and hair from stormy raindrops. What am I?",
+        ],
+    },
+    {
+        "key": "sleep",
+        "en": "Sleep / Go to bed",
+        "ko": "잠자기 / 잠",
+        "hint": "양치하고 잠옷을 입고 불을 끈 다음 이불 속에서 하는 행동이에요! 초성 힌트는 ㅈ!",
+        "expl": "정답은 Sleep, 잠자기예요. 'cozy blanket'은 포근한 이불이에요.",
+        "accepted": ("sleep", "go to sleep", "go to bed", "sleeping", "잠", "잠자기", "자다", "자요"),
+        "stories": [
+            "Sarah finished her bedtime story at nine o'clock and brushed her teeth with minty paste. She pulled up her cozy quilt, turned off the bedside lamp, and closed her heavy eyelids. What is Sarah going to do?",
+            "After a long exciting day at school, Leo felt very drowsy. He nestled into his soft pillow and shut his eyes to rest until morning sunshine arrived. What is Leo going to do?",
+        ],
+    },
+    {
+        "key": "birthday",
+        "en": "Birthday",
+        "ko": "생일",
+        "hint": "촛불을 켠 케이크와 함께 축하 노래를 부르고 소원을 비는 특별한 날이에요! 초성 힌트는 ㅅㅇ!",
+        "expl": "정답은 Birthday, 생일이에요. 'make a wish'는 소원을 빌다는 멋진 표현이에요.",
+        "accepted": ("birthday", "벌스데이", "생일", "생일파티"),
+        "stories": [
+            "Today is Chloe's favorite celebration of the whole year. Her friends gathered around a sweet strawberry cake with glowing candles and sang a cheerful song before she blew them out and made a wish. What special day is it?",
+            "You receive colorful wrapped gift boxes, wear a paper party cone hat, and eat sweet cake with family on the day you were born. What celebration is this?",
+        ],
+    },
+    {
+        "key": "snowman",
+        "en": "Snowman",
+        "ko": "눈사람",
+        "hint": "하얀 눈을 동그랗게 굴려 쌓고 당근으로 코를 만든 겨울 친구예요! 초성 힌트는 ㄴㅅㄹ!",
+        "expl": "정답은 Snowman, 눈사람이에요. 'roll snowballs'는 눈덩이를 굴린다는 뜻이에요.",
+        "accepted": ("snowman", "스노우맨", "스노맨", "눈사람"),
+        "stories": [
+            "After a massive winter blizzard covered the front yard in deep white powder, Yuna put on her thick mittens. She rolled two gigantic spheres of snow, stacked them up, and gave it an orange carrot nose and pebble eyes. What did Yuna build?",
+            "I stand still in the freezing cold yard with a wool scarf around my neck and tree twig arms. I smile at the chilly snowflakes and melt away when spring arrives. What am I?",
+        ],
+    },
+    {
+        "key": "beach",
+        "en": "Beach / Ocean",
+        "ko": "해변 / 바다",
+        "hint": "수영복과 선글라스를 챙겨 따뜻한 모래와 파도를 즐기러 가는 곳이에요! 초성 힌트는 ㅎㅂ!",
+        "expl": "정답은 Beach, 바닷가(해변)예요. 'sandy shore'는 모래사장이에요.",
+        "accepted": ("beach", "ocean", "sea", "비치", "해변", "바닷가", "바다"),
+        "stories": [
+            "On a sizzling hot July morning, the family packed towels, flip-flops, and sunscreen in the trunk. When they arrived, they ran barefoot on soft warm sand and splashed in the salty ocean waves. Where did they go?",
+            "You can build sandcastles with plastic buckets and collect shiny seashells along the shoreline while seagulls call out overhead. Where is this place?",
+        ],
+    },
+    {
+        "key": "hungry",
+        "en": "Hungry",
+        "ko": "배고픔 / 배고파요",
+        "hint": "신나게 운동하고 나서 배에서 꼬르륵 소리가 날 때 느끼는 기분이에요! 초성 힌트는 ㅂㄱㅍ!",
+        "expl": "정답은 Hungry, 배고파요예요. 'rumble'은 배에서 꼬르륵 소리가 나는 거예요.",
+        "accepted": ("hungry", "헝그리", "배고파", "배고파요", "배고픔", "배고프다"),
+        "stories": [
+            "Lucas played tag in the soccer field all afternoon without having any lunch. Suddenly his stomach made a loud rumbling growl and he thought of a giant bowl of pasta. How does Lucas feel right now?",
+            "Your tummy feels completely empty after a long hike in the woods. You cannot wait for dinner time to arrive so you can eat delicious food. How do you feel?",
+        ],
+    },
+]
+
+_RIDDLES_BLUEPRINTS: list[dict[str, Any]] = [
+    {
+        "key": "clock",
+        "en": "Clock / Watch",
+        "ko": "시계",
+        "hint": "1부터 12까지 숫자가 적혀 있고 바늘이 돌며 시간을 알려주는 물건이에요! 초성 힌트는 ㅅㄱ!",
+        "expl": "정답은 Clock, 시계예요. 'ticking hands'는 째깍거리는 시계 바늘이에요.",
+        "accepted": ("clock", "watch", "클락", "시계", "손목시계", "벽시계"),
+        "stories": [
+            "I hang high on the classroom wall with numbers from one to twelve arranged in a circle. My two slender hands never stop moving round and round so you always know when recess starts. What am I?",
+            "I make a gentle ticking sound second after second. You look at me to check if you are early or running late for the school bus. What am I?",
+        ],
+    },
+    {
+        "key": "mirror",
+        "en": "Mirror",
+        "ko": "거울",
+        "hint": "얼굴을 비춰보고 내가 웃으면 똑같이 웃어주는 유리 물건이에요! 초성 힌트는 ㄱㅇ!",
+        "expl": "정답은 Mirror, 거울이에요. 'reflection'은 거울에 비친 모습이에요.",
+        "accepted": ("mirror", "미러", "거울"),
+        "stories": [
+            "You stand in front of me in the bathroom every morning to brush your teeth and comb your tangled hair. Whenever you blink or make a funny face, I instantly copy you exactly. What am I?",
+            "I am made of smooth reflective glass hanging on the wall. I show you your own cheerful reflection whenever you look into me. What am I?",
+        ],
+    },
+    {
+        "key": "toothbrush",
+        "en": "Toothbrush",
+        "ko": "칫솔",
+        "hint": "치약을 묻혀 이를 닦을 때 쓰는 세면도구예요! 초성 힌트는 ㅊㅅ!",
+        "expl": "정답은 Toothbrush, 칫솔이에요. 'bristles'는 칫솔모예요.",
+        "accepted": ("toothbrush", "투스브러시", "칫솔"),
+        "stories": [
+            "I live in a small cup beside the bathroom sink with soft nylon bristles on my head. When paired with minty toothpaste, I scrub away germs and make your teeth sparkle white. What am I?",
+            "Dentists say you should visit me for two whole minutes after every meal. I have a slender handle and tiny bristles that clean your smile. What am I?",
+        ],
+    },
+    {
+        "key": "bicycle",
+        "en": "Bicycle / Bike",
+        "ko": "자전거",
+        "hint": "바퀴 2개와 페달이 있고 탈 때 헬멧을 써야 하는 탈것이에요! 초성 힌트는 ㅈㅈㄱ!",
+        "expl": "정답은 Bicycle, 자전거예요. 'pedal'은 페달이에요.",
+        "accepted": ("bicycle", "bike", "바이시클", "바이크", "자전거"),
+        "stories": [
+            "I have two rubber wheels, handlebars to steer, and two pedals for your sneakers to push. I don't use gasoline, and you should always buckle a helmet before riding me along the path. What am I?",
+            "When you pedal faster, my metal chain spins my back wheel and a bell rings on my handlebars. What two-wheeled vehicle am I?",
+        ],
+    },
+    {
+        "key": "book",
+        "en": "Book",
+        "ko": "책",
+        "hint": "표지 속에 종이 페이지가 가득하고 이야기를 읽을 수 있는 물건이에요! 초성 힌트는 ㅊ!",
+        "expl": "정답은 Book, 책이에요. 'pages'는 쪽(페이지)이에요.",
+        "accepted": ("book", "북", "책", "동화책"),
+        "stories": [
+            "I have a colorful front cover, hundreds of printed paper pages, and a spine holding them together. When you open me, you can travel to magical worlds, meet brave heroes, and learn interesting facts. What am I?",
+            "You turn my pages one by one as you read before falling asleep. You slip a thin bookmark between my pages when you take a break. What am I?",
+        ],
+    },
+    {
+        "key": "shoes",
+        "en": "Shoes",
+        "ko": "신발 / 운동화",
+        "hint": "외출할 때 발에 신고 끈을 묶는 물건이에요! 초성 힌트는 ㅅㅂ!",
+        "expl": "정답은 Shoes, 신발이에요. 'shoelaces'는 신발 끈이에요.",
+        "accepted": ("shoes", "shoe", "sneakers", "슈즈", "신발", "운동화"),
+        "stories": [
+            "We always travel as a matching pair, one for the left foot and one for the right foot. You tie our laces into a bow before running, skipping, and kicking soccer balls in the yard. What are we?",
+            "We wait patiently near the front entrance door until you slide your feet inside us. We protect your toes from sharp pebbles and hot pavement outside. What are we?",
+        ],
+    },
+]
+
+_NATURE_CELESTIAL_BLUEPRINTS: list[dict[str, Any]] = [
+    {
+        "key": "spring",
+        "en": "Spring",
+        "ko": "봄",
+        "hint": "추운 겨울이 지나고 벚꽃이 피며 따뜻한 바람이 부는 계절이에요! 초성 힌트는 ㅂ!",
+        "expl": "정답은 Spring, 봄이에요. 'cherry blossoms'는 벚꽃이에요.",
+        "accepted": ("spring", "스프링", "봄", "봄철"),
+        "stories": [
+            "In this fresh season, chilly winter frost melts away and gentle warm breezes return. Pink cherry blossoms bloom in parks and baby birds chirp happily in green trees. Which season is this?",
+            "Green grass sprouts in the fields and colorful tulips open up after winter. Hibernating animals wake from their long slumber to greet the warm sun. Which season is this?",
+        ],
+    },
+    {
+        "key": "summer",
+        "en": "Summer",
+        "ko": "여름",
+        "hint": "일 년 중 가장 덥고 수영장에서 물놀이를 하며 매미가 우는 계절이에요! 초성 힌트는 ㅇㄹ!",
+        "expl": "정답은 Summer, 여름이에요. 'hot and sunny'는 덥고 맑은 날씨예요.",
+        "accepted": ("summer", "썸머", "서머", "여름", "여름철"),
+        "stories": [
+            "The days grow long, hot, and sunny, and children splash in cool swimming pools. People eat juicy watermelon and listen to buzzing cicadas in the trees. Which season is this?",
+            "The blazing sun shines bright in blue skies as families head to the beach for summer vacation. People wear sunglasses, short sleeves, and eat cold ice cream. Which season is this?",
+        ],
+    },
+    {
+        "key": "autumn",
+        "en": "Autumn / Fall",
+        "ko": "가을",
+        "hint": "나뭇잎이 붉고 노랗게 물들고 곡식과 과일을 수확하는 계절이에요! 초성 힌트는 ㄱㅇ!",
+        "expl": "정답은 Autumn(Fall), 가을이에요. 'harvest'는 수확한다는 뜻이에요.",
+        "accepted": ("autumn", "fall", "어텀", "폴", "가을", "가을철"),
+        "stories": [
+            "Green leaves on mountain trees turn brilliant shades of red, orange, and gold before tumbling to the ground. Farmers harvest sweet apples and golden rice as crisp cool breezes blow. Which season is this?",
+            "Squirrels scurry across crunchy dry leaves gathering brown acorns for winter. The air becomes crisp and cool, and pumpkins ripen in farm patches. Which season is this?",
+        ],
+    },
+    {
+        "key": "winter",
+        "en": "Winter",
+        "ko": "겨울",
+        "hint": "일 년 중 가장 춥고 눈이 내리며 연못이 꽁꽁 어는 계절이에요! 초성 힌트는 ㄱㅇ!",
+        "expl": "정답은 Winter, 겨울이에요. 'freezing cold'는 꽁꽁 얼 듯 추운 날씨예요.",
+        "accepted": ("winter", "윈터", "겨울", "겨울철"),
+        "stories": [
+            "This is the coldest season of the year when ponds freeze into slippery ice. People put on thick puffer coats, wrap wool scarves, and catch white snowflakes on their gloves. Which season is this?",
+            "Branches are bare, breath turns into white puffs in the frosty air, and children build friendly snowmen in the backyard. Which season is this?",
+        ],
+    },
+    {
+        "key": "rainbow",
+        "en": "Rainbow",
+        "ko": "무지개",
+        "hint": "비가 그친 뒤 햇빛이 비칠 때 하늘에 뜨는 알록달록한 아치예요! 초성 힌트는 ㅁㅈㄱ!",
+        "expl": "정답은 Rainbow, 무지개예요. 'colorful arch'는 알록달록한 아치예요.",
+        "accepted": ("rainbow", "레인보우", "레인보", "무지개"),
+        "stories": [
+            "Right after a sudden afternoon rain shower, bright sunlight breaks through clearing clouds. A glorious arch of red, orange, yellow, green, blue, and violet curves across the sky. What appeared?",
+            "You only see me when both sunshine and rain share the sky at the same time. I make a colorful bridge in the air that delights everyone who spots me. What am I?",
+        ],
+    },
+    {
+        "key": "sun",
+        "en": "Sun",
+        "ko": "해 / 태양",
+        "hint": "매일 아침 동쪽에서 떠올라 지구를 밝고 따뜻하게 비춰주는 커다란 별이에요! 초성 힌트는 ㅌㅇ!",
+        "expl": "정답은 Sun, 태양(해)이에요. 'rise in the east'는 동쪽에서 뜬다는 뜻이에요.",
+        "accepted": ("sun", "the sun", "선", "썬", "해", "태양", "햇님", "해님"),
+        "stories": [
+            "I rise in the eastern sky every morning, bringing bright daylight and warmth to the whole world. Green plants need my golden rays to grow tall, and I set below the horizon in the west at dusk. What am I?",
+            "I am a giant blazing star at the center of our solar system. Earth orbits around me, and without my light, our planet would be dark and freezing cold. What am I?",
+        ],
+    },
+    {
+        "key": "moon",
+        "en": "Moon",
+        "ko": "달",
+        "hint": "밤하늘에 반짝이는 별들 사이로 뜨며 보름달이나 초승달로 변해요! 초성 힌트는 ㄷ!",
+        "expl": "정답은 Moon, 달이에요. 'crescent'는 초승달이에요.",
+        "accepted": ("moon", "the moon", "문", "달", "달님", "보름달", "초승달"),
+        "stories": [
+            "I glow softly in the dark night sky surrounded by twinkling stars. Sometimes I look like a round silver coin, and sometimes I look like a thin curved banana. What am I?",
+            "Astronauts flew across space in rockets and left footprints on my dusty gray surface. I orbit our Earth once every month and shine down through your bedroom window. What am I?",
+        ],
+    },
+]
+
+
+def _gen_math_question(rng: random.Random) -> QuizQuestion:
+    names = ["Minho", "Yuna", "Leo", "Chloe", "David", "Emma", "Tom", "Sarah", "Lucas", "Hana"]
+    items = [
+        ("sweet apple", "sweet apples", "사과"),
+        ("red strawberry", "red strawberries", "딸기"),
+        ("chocolate cookie", "chocolate cookies", "쿠키"),
+        ("colorful sticker", "colorful stickers", "스티커"),
+        ("wooden pencil", "wooden pencils", "연필"),
+        ("ripe orange", "ripe oranges", "오렌지"),
+        ("blue marble", "blue marbles", "구슬"),
+    ]
+    num_words = {
+        1: ("One", ("one", "1", "원", "하나", "한개", "한 개", "1개", "일")),
+        2: ("Two", ("two", "2", "투", "둘", "두개", "두 개", "2개", "이")),
+        3: ("Three", ("three", "3", "쓰리", "셋", "세개", "세 개", "3개", "삼")),
+        4: ("Four", ("four", "4", "포", "넷", "네개", "네 개", "4개", "사")),
+        5: ("Five", ("five", "5", "파이브", "다섯", "다섯개", "다섯 개", "5개", "오")),
+        6: ("Six", ("six", "6", "식스", "여섯", "여섯개", "여섯 개", "6개", "육")),
+        7: ("Seven", ("seven", "7", "세븐", "일곱", "일곱개", "일곱 개", "7개", "칠")),
+        8: ("Eight", ("eight", "8", "에이트", "여덟", "여덟개", "여덟 개", "8개", "팔")),
+        9: ("Nine", ("nine", "9", "나인", "아홉", "아홉개", "아홉 개", "9개", "구")),
+        10: ("Ten", ("ten", "10", "텐", "열", "열개", "열 개", "10개", "십")),
+        11: ("Eleven", ("eleven", "11", "일레븐", "열하나", "11개", "십일")),
+        12: ("Twelve", ("twelve", "12", "트웰브", "열둘", "12개", "십이")),
+    }
+
+    name = rng.choice(names)
+    s_item, p_item, item_ko = rng.choice(items)
+    mode = rng.choice(["subtraction", "addition", "legs"])
+
+    if mode == "subtraction":
+        a = rng.randint(3, 9)
+        b = rng.randint(1, a - 1)
+        res = a - b
+        word_en, accepted = num_words[res]
+        res_phrase = s_item if res == 1 else p_item
+        en_text = (
+            f"{name} had {a} {p_item} in a small bag. "
+            f"On the way home, {name} gave {b} of them to a good friend. "
+            f"How many {res_phrase} does {name} have left?"
+        )
+        ko_meaning = f"{word_en} ({res}개)"
+        hint = f"{a}개 중에서 {b}개를 친구에게 주었어요. {a} 빼기 {b}는 얼마일까요?"
+        expl = f"정답은 {word_en}, {res}개예요. '{a} minus {b} is {res}'예요!"
+        return QuizQuestion(
+            id=f"inf_math_sub_{rng.randint(1000, 9999)}",
+            category="colors_numbers",
+            kind="story_quiz",
+            english_text=en_text,
+            korean_meaning=ko_meaning,
+            accepted_answers=accepted,
+            hint_ko=hint,
+            explanation_ko=expl,
+        )
+    elif mode == "addition":
+        a = rng.randint(1, 5)
+        b = rng.randint(1, 5)
+        res = a + b
+        word_en, accepted = num_words[res]
+        a_phrase = f"1 {s_item}" if a == 1 else f"{a} {p_item}"
+        b_phrase = f"1 more {s_item}" if b == 1 else f"{b} more {p_item}"
+        res_phrase = s_item if res == 1 else p_item
+        en_text = (
+            f"In the morning, {name} collected {a_phrase}. "
+            f"In the afternoon, {name} found {b_phrase}. "
+            f"How many {res_phrase} did {name} collect altogether?"
+        )
+        ko_meaning = f"{word_en} ({res}개)"
+        hint = f"오전에 {a}개, 오후에 {b}개를 모았어요. {a} 더하기 {b}는 얼마일까요?"
+        expl = f"정답은 {word_en}, {res}개예요. '{a} plus {b} is {res}'예요!"
+        return QuizQuestion(
+            id=f"inf_math_add_{rng.randint(1000, 9999)}",
+            category="colors_numbers",
+            kind="story_quiz",
+            english_text=en_text,
+            korean_meaning=ko_meaning,
+            accepted_answers=accepted,
+            hint_ko=hint,
+            explanation_ko=expl,
+        )
+    else:
+        creatures = [
+            ("spider", 8, "거미"),
+            ("puppy", 4, "강아지"),
+            ("bird", 2, "새"),
+            ("ant", 6, "개미"),
+            ("cat", 4, "고양이"),
+            ("duck", 2, "오리"),
+        ]
+        c1, l1, k1 = rng.choice(creatures)
+        c2, l2, k2 = rng.choice([c for c in creatures if c[0] != c1])
+        res = l1 + l2
+        word_en, accepted = num_words[res]
+        en_text = (
+            f"In the garden, there is one {c1} and one {c2}. "
+            f"If you count carefully, how many legs do they have in total?"
+        )
+        ko_meaning = f"{word_en} ({res}개)"
+        hint = f"{k1} 다리 {l1}개와 {k2} 다리 {l2}개를 합치면 몇 개일까요?"
+        expl = f"정답은 {word_en}, {res}개예요. {l1} 더하기 {l2}는 {res}이죠!"
+        return QuizQuestion(
+            id=f"inf_math_legs_{rng.randint(1000, 9999)}",
+            category="colors_numbers",
+            kind="story_quiz",
+            english_text=en_text,
+            korean_meaning=ko_meaning,
+            accepted_answers=accepted,
+            hint_ko=hint,
+            explanation_ko=expl,
+        )
+
+
+def _gen_calendar_time_question(rng: random.Random) -> QuizQuestion:
+    mode = rng.choice(["days_after", "day_next", "clock"])
+    days = [
+        ("Monday", "월요일", "먼데이", ("monday", "먼데이", "월요일", "월")),
+        ("Tuesday", "화요일", "튜스데이", ("tuesday", "튜스데이", "화요일", "화")),
+        ("Wednesday", "수요일", "웬즈데이", ("wednesday", "웬즈데이", "수요일", "수")),
+        ("Thursday", "목요일", "썰스데이", ("thursday", "썰스데이", "써스데이", "목요일", "목")),
+        ("Friday", "금요일", "프라이데이", ("friday", "프라이데이", "금요일", "금")),
+        ("Saturday", "토요일", "새터데이", ("saturday", "새터데이", "세터데이", "토요일", "토")),
+        ("Sunday", "일요일", "선데이", ("sunday", "선데이", "일요일", "일")),
+    ]
+
+    if mode == "days_after":
+        idx = rng.randint(0, 6)
+        day_en, day_ko, _, _ = days[idx]
+        target_idx = (idx + 2) % 7
+        t_en, t_ko, _, t_acc = days[target_idx]
+        en_text = (
+            f"Every week has seven days in order. "
+            f"Suppose today is {day_en} and your class is visiting the aquarium exactly two days from now. "
+            f"What day of the week is the field trip?"
+        )
+        return QuizQuestion(
+            id=f"inf_day_after_{rng.randint(1000, 9999)}",
+            category="colors_numbers",
+            kind="story_quiz",
+            english_text=en_text,
+            korean_meaning=f"{t_en} ({t_ko})",
+            accepted_answers=t_acc,
+            hint_ko=f"오늘이 {day_ko}이면 이틀 뒤는 무슨 요일일까요? 초성 힌트는 {t_ko[0]}!",
+            explanation_ko=f"정답은 {t_en}, {t_ko}이에요! {day_en} 이틀 뒤는 {t_en}이죠.",
+        )
+    elif mode == "day_next":
+        idx = rng.randint(0, 6)
+        day_en, day_ko, _, _ = days[idx]
+        target_idx = (idx + 1) % 7
+        t_en, t_ko, _, t_acc = days[target_idx]
+        en_text = (
+            f"Think about the days of the week starting from Sunday to Saturday. "
+            f"If today is {day_en}, which day of the week comes right after today?"
+        )
+        return QuizQuestion(
+            id=f"inf_day_next_{rng.randint(1000, 9999)}",
+            category="colors_numbers",
+            kind="story_quiz",
+            english_text=en_text,
+            korean_meaning=f"{t_en} ({t_ko})",
+            accepted_answers=t_acc,
+            hint_ko=f"{day_ko} 바로 다음 요일은 무엇일까요? 초성 힌트는 {t_ko[0]}!",
+            explanation_ko=f"정답은 {t_en}, {t_ko}이에요! {day_en} 다음 날은 {t_en}이에요.",
+        )
+    else:
+        hours = [
+            (1, "one", "One", ("one", "1", "1시", "한시", "one o'clock")),
+            (2, "two", "Two", ("two", "2", "2시", "두시", "two o'clock")),
+            (3, "three", "Three", ("three", "3", "3시", "세시", "three o'clock")),
+            (4, "four", "Four", ("four", "4", "4시", "네시", "four o'clock")),
+            (5, "five", "Five", ("five", "5", "5시", "다섯시", "five o'clock")),
+            (6, "six", "Six", ("six", "6", "6시", "여섯시", "six o'clock")),
+            (7, "seven", "Seven", ("seven", "7", "7시", "일곱시", "seven o'clock")),
+            (8, "eight", "Eight", ("eight", "8", "8시", "여덟시", "eight o'clock")),
+            (9, "nine", "Nine", ("nine", "9", "9시", "아홉시", "nine o'clock")),
+            (10, "ten", "Ten", ("ten", "10", "10시", "열시", "ten o'clock")),
+            (11, "eleven", "Eleven", ("eleven", "11", "11시", "열한시", "eleven o'clock")),
+            (12, "twelve", "Twelve", ("twelve", "12", "12시", "열두시", "twelve o'clock")),
+        ]
+        h_num, h_word, h_cap, h_acc = rng.choice(hours)
+        en_text = (
+            f"The round clock on the wall has two hands. "
+            f"Its long minute hand points straight up at twelve, and its short hour hand points directly at {h_word}. "
+            f"What time is it?"
+        )
+        return QuizQuestion(
+            id=f"inf_clock_{rng.randint(1000, 9999)}",
+            category="colors_numbers",
+            kind="story_quiz",
+            english_text=en_text,
+            korean_meaning=f"{h_cap} o'clock ({h_num}시)",
+            accepted_answers=h_acc,
+            hint_ko=f"긴바늘이 12, 짧은바늘이 {h_num}을 가리키고 있어요! 몇 시일까요?",
+            explanation_ko=f"정답은 {h_cap} o'clock, {h_num}시예요! 짧은바늘(hour hand)이 시간을 알려줘요.",
+        )
+
+
+def _gen_from_blueprint(bp: dict[str, Any], category: str, rng: random.Random) -> QuizQuestion:
+    story = rng.choice(bp["stories"])
+    key = bp["key"]
+    qid = f"inf_{category[:3]}_{key}_{rng.randint(1000, 9999)}"
+    return QuizQuestion(
+        id=qid,
+        category=category,
+        kind="story_quiz",
+        english_text=story,
+        korean_meaning=f"{bp['en']} ({bp['ko']})",
+        accepted_answers=tuple(bp["accepted"]),
+        hint_ko=bp["hint"],
+        explanation_ko=bp["expl"],
+    )
+
+
+def generate_infinite_quiz_questions(
+    topic: str = "all",
+    count: int = 3,
+    exclude_texts: set[str] | list[str] | None = None,
+    rng: random.Random | None = None,
+) -> list[QuizQuestion]:
+    """Procedurally generate endless bilingual English listening questions without using a static database."""
+    r = rng or random.Random()
+    norm_topic = (topic or "all").strip().lower()
+    norm_exclude = {t.strip().lower() for t in (exclude_texts or []) if t and t.strip()}
+
+    categories = ["animals", "food", "colors_numbers", "family_school", "daily", "riddles"]
+    if norm_topic in categories:
+        target_cats = [norm_topic]
+    else:
+        target_cats = list(categories)
+        r.shuffle(target_cats)
+
+    results: list[QuizQuestion] = []
+    seen_texts: set[str] = set(norm_exclude)
+    attempts = 0
+    max_attempts = max(60, count * 35)
+
+    cat_cycle_idx = 0
+    while len(results) < count and attempts < max_attempts:
+        attempts += 1
+        current_cat = target_cats[cat_cycle_idx % len(target_cats)]
+        cat_cycle_idx += 1
+
+        cand: QuizQuestion | None = None
+        if current_cat == "animals":
+            cand = _gen_from_blueprint(r.choice(_ANIMALS_BLUEPRINTS), "animals", r)
+        elif current_cat == "food":
+            cand = _gen_from_blueprint(r.choice(_FOOD_BLUEPRINTS), "food", r)
+        elif current_cat == "family_school":
+            cand = _gen_from_blueprint(r.choice(_FAMILY_SCHOOL_BLUEPRINTS), "family_school", r)
+        elif current_cat == "daily":
+            cand = _gen_from_blueprint(r.choice(_DAILY_BLUEPRINTS), "daily", r)
+        elif current_cat == "riddles":
+            cand = _gen_from_blueprint(r.choice(_RIDDLES_BLUEPRINTS), "riddles", r)
+        elif current_cat == "colors_numbers":
+            sub_type = r.choice(["math", "calendar_time", "nature"])
+            if sub_type == "math":
+                cand = _gen_math_question(r)
+            elif sub_type == "calendar_time":
+                cand = _gen_calendar_time_question(r)
+            else:
+                cand = _gen_from_blueprint(r.choice(_NATURE_CELESTIAL_BLUEPRINTS), "colors_numbers", r)
+
+        if cand is None:
+            continue
+
+        clean_text = cand.english_text.strip().lower()
+        if clean_text in seen_texts:
+            continue
+
+        seen_texts.add(clean_text)
+        results.append(cand)
+
+    return results
+
+
 class EnglishQuizSession:
     """Thread-safe state machine for PocoBox's voice-conversational English Listening Quiz."""
 
@@ -1121,7 +2210,9 @@ class EnglishQuizSession:
         self.attempts_on_current: int = 0
         self.history: list[dict[str, Any]] = []
         self.last_feedback: str = ""
-        self._recent_ids: collections.deque[str] = collections.deque(maxlen=30)
+        self._recent_ids: collections.deque[str] = collections.deque(maxlen=60)
+        self._recent_english: collections.deque[str] = collections.deque(maxlen=60)
+        self.use_infinite_generation: bool = _env_bool("QUIZ_USE_INFINITE_GENERATION", True)
 
     def current_question(self) -> QuizQuestion | None:
         with self._lock:
@@ -1152,6 +2243,8 @@ class EnglishQuizSession:
 
     def recent_english_texts(self) -> list[str]:
         with self._lock:
+            if self._recent_english:
+                return list(self._recent_english)
             by_id = {q.id: q.english_text for q in BUILTIN_QUIZ_BANK}
             return [by_id[qid] for qid in self._recent_ids if qid in by_id]
 
@@ -1168,40 +2261,63 @@ class EnglishQuizSession:
                     if len(selected) >= count:
                         return selected[:count]
 
-        if topic in TOPIC_LABELS and topic != "all":
-            pool = [q for q in BUILTIN_QUIZ_BANK if q.category == topic]
-        else:
-            pool = list(BUILTIN_QUIZ_BANK)
+        needed = count - len(selected)
+        if needed <= 0:
+            return selected[:count]
 
-        fresh = [q for q in pool if q.id not in self._recent_ids]
-        stale = [q for q in pool if q.id in self._recent_ids]
-        self._rng.shuffle(fresh)
-        self._rng.shuffle(stale)
-        ordered = fresh + stale
+        # Use infinite dynamic question generation by default (never depends on static question bank)
+        if self.use_infinite_generation:
+            exclude = set(seen_en) | {t.strip().lower() for t in self.recent_english_texts()}
+            inf_qs = generate_infinite_quiz_questions(
+                topic=topic,
+                count=needed,
+                exclude_texts=exclude,
+                rng=self._rng,
+            )
+            for q in inf_qs:
+                key = q.english_text.strip().lower()
+                if key not in seen_en:
+                    seen_en.add(key)
+                    selected.append(q)
+                    if len(selected) >= count:
+                        return selected[:count]
 
-        # For "all", diversify across categories so consecutive questions feel fresh and varied
-        if topic == "all" and len(ordered) >= count:
-            by_cat: dict[str, list[QuizQuestion]] = {}
+        # Legacy fallback if infinite generation is disabled or underfilled
+        if len(selected) < count:
+            if topic in TOPIC_LABELS and topic != "all":
+                pool = [q for q in BUILTIN_QUIZ_BANK if q.category == topic]
+            else:
+                pool = list(BUILTIN_QUIZ_BANK)
+
+            fresh = [q for q in pool if q.id not in self._recent_ids]
+            stale = [q for q in pool if q.id in self._recent_ids]
+            self._rng.shuffle(fresh)
+            self._rng.shuffle(stale)
+            ordered = fresh + stale
+
+            # For "all", diversify across categories so consecutive questions feel fresh and varied
+            if topic == "all" and len(ordered) >= count:
+                by_cat: dict[str, list[QuizQuestion]] = {}
+                for q in ordered:
+                    by_cat.setdefault(q.category, []).append(q)
+                cat_keys = list(by_cat.keys())
+                self._rng.shuffle(cat_keys)
+                interleaved: list[QuizQuestion] = []
+                while len(interleaved) < count and any(by_cat.values()):
+                    for k in cat_keys:
+                        if by_cat.get(k):
+                            interleaved.append(by_cat[k].pop(0))
+                            if len(interleaved) >= count:
+                                break
+                ordered = interleaved + [q for q in ordered if q.id not in {x.id for x in interleaved}]
+
             for q in ordered:
-                by_cat.setdefault(q.category, []).append(q)
-            cat_keys = list(by_cat.keys())
-            self._rng.shuffle(cat_keys)
-            interleaved: list[QuizQuestion] = []
-            while len(interleaved) < count and any(by_cat.values()):
-                for k in cat_keys:
-                    if by_cat.get(k):
-                        interleaved.append(by_cat[k].pop(0))
-                        if len(interleaved) >= count:
-                            break
-            ordered = interleaved + [q for q in ordered if q.id not in {x.id for x in interleaved}]
-
-        for q in ordered:
-            key = q.english_text.strip().lower()
-            if key not in seen_en:
-                seen_en.add(key)
-                selected.append(q)
-                if len(selected) >= count:
-                    break
+                key = q.english_text.strip().lower()
+                if key not in seen_en:
+                    seen_en.add(key)
+                    selected.append(q)
+                    if len(selected) >= count:
+                        break
         return selected[:count]
 
     def _header(self, q_num: int | None = None) -> str:
@@ -1246,6 +2362,7 @@ class EnglishQuizSession:
             self.history = []
             for q in picked:
                 self._recent_ids.append(q.id)
+                self._recent_english.append(q.english_text)
 
             first = self.questions[0]
             intro_en = f"Let's start the English listening quiz! We have {len(picked)} questions. Answer after the chime."

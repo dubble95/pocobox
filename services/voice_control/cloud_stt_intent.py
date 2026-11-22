@@ -615,13 +615,21 @@ class HybridVoiceInterpreter:
         url = f"{self.local_llm_url}/v1/chat/completions"
         system_content = (
             "You are the voice intent parser for PocoBox music player. "
-            "Output JSON only: {\"action\": \"play_search\"|\"play_mix\"|\"now_playing\"|\"pause\"|\"resume\"|\"next\"|\"previous\"|\"volume_up\"|\"volume_down\"|\"answer_qa\"|\"unknown\", "
+            "Output JSON only: {\"action\": \"play_search\"|\"play_mix\"|\"now_playing\"|\"pause\"|\"resume\"|\"next\"|\"previous\"|\"volume_up\"|\"volume_down\"|\"weather\"|\"answer_qa\"|\"unknown\", "
             "\"query\": \"...\", \"answer\": \"...\"}.\n"
             "Rules:\n"
-            "- play_search: user asks to play music/song (~틀어줘, ~재생해, play ~, or corrections like 아니 ~).\n"
+            "- play_search: user asks to play music/song (clean title/artist only, strip ~틀어줘, ~재생해).\n"
+            "- play_mix: user asks to play continuous mix or playlist.\n"
             "- now_playing: user asks what song is playing (지금 무슨 노래야, 이 곡 뭐야).\n"
-            "- answer_qa: user asks a factual question (수도가 어디야, 날씨 어때).\n"
-            "- unknown: non-command statements, chat, or irrelevant speech."
+            "- weather: user asks about weather forecast (extract city name into query).\n"
+            "- answer_qa: user asks a factual question; provide a concise Korean spoken answer.\n"
+            "- unknown: non-command statements, chat, or irrelevant speech.\n"
+            "Examples:\n"
+            "User: 아이유 밤편지 틀어줘 -> {\"action\": \"play_search\", \"query\": \"아이유 밤편지\", \"answer\": \"\"}\n"
+            "User: 대한민국의 수도는 어디야? -> {\"action\": \"answer_qa\", \"query\": \"대한민국의 수도\", \"answer\": \"대한민국의 수도는 서울입니다.\"}\n"
+            "User: 오늘 서울 날씨 어때? -> {\"action\": \"weather\", \"query\": \"서울\", \"answer\": \"\"}\n"
+            "User: 지금 나오는 노래 뭐야 -> {\"action\": \"now_playing\", \"query\": \"\", \"answer\": \"\"}\n"
+            "User: 어 그래 밥 먹었어 -> {\"action\": \"unknown\", \"query\": \"\", \"answer\": \"\"}"
         )
         messages: list[dict[str, str]] = [{"role": "system", "content": system_content}]
         if context and context.is_active() and context.turns:
@@ -1142,7 +1150,7 @@ class HybridVoiceInterpreter:
         kind: str = "story_quiz",
     ) -> bool | None:
         """Strict semantic LLM grading fallback on a blind transcript when local matching did not match."""
-        if not user_text.strip() or self.provider == "local":
+        if not user_text.strip() or not (self.gemini_api_key or self.openai_api_key):
             return None
         prompt = (
             "You strictly grade a user's answer to an English listening quiz.\n"
@@ -1155,7 +1163,7 @@ class HybridVoiceInterpreter:
             'Return ONLY JSON: {"is_correct": true} or {"is_correct": false}'
         )
         try:
-            if self.provider == "gemini" and self.gemini_api_key:
+            if self.gemini_api_key and (self.provider == "gemini" or not self.openai_api_key):
                 allowed, reason = self.quota_tracker.can_call()
                 if not allowed:
                     log.warning("Gemini quiz grading blocked by quota (%s)", reason)
@@ -1169,7 +1177,7 @@ class HybridVoiceInterpreter:
                 self.quota_tracker.record_call()
                 parsed = _parse_json_response(data["candidates"][0]["content"]["parts"][0]["text"])
                 return bool(parsed.get("is_correct")) if isinstance(parsed.get("is_correct"), bool) else None
-            if self.provider == "openai" and self.openai_api_key:
+            if self.openai_api_key:
                 body = {
                     "model": self.openai_chat_model,
                     "temperature": 0.0,
@@ -1194,20 +1202,26 @@ class HybridVoiceInterpreter:
         exclude_english: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Optionally generate fresh kids/beginner English listening questions via Gemini/OpenAI."""
-        if self.provider == "local":
+        if not (self.gemini_api_key or self.openai_api_key):
             return []
         excluded = ", ".join((exclude_english or [])[:25]) or "none"
         prompt = (
-            f"Create {count} fun, engaging English listening quiz questions for Korean elementary/beginner-intermediate (A2) learners.\n"
+            f"You are a creative English listening quiz creator for Korean elementary/beginner learners (CEFR A1-A2).\n"
+            f"Generate {count} unique, engaging listening quiz questions.\n"
             f"Topic: {topic}\n"
-            f"Avoid these already-used English texts: {excluded}\n"
-            "Each 'english_text' MUST be 2 to 3 natural, vivid English sentences (a short mini-story, description, or riddle) ending with a clear question (e.g. 'What animal am I?', 'Where did he go?', 'What am I?').\n"
-            "Provide both English and Korean in 'korean_meaning' (e.g. 'Umbrella (우산)') and include both English and Korean variants in 'accepted_answers'.\n"
-            "Keep 'hint_ko' and 'explanation_ko' in warm, encouraging Korean (1-2 short sentences, no markdown).\n"
+            f"Already used questions to NEVER repeat: {excluded}\n"
+            "Requirements for EACH question:\n"
+            "1. 'kind': 'story_quiz'\n"
+            "2. 'category': one of 'animals', 'food', 'colors_numbers', 'family_school', 'daily', 'riddles'\n"
+            "3. 'english_text': 2 to 3 natural, vivid English sentences (a short mini-story, clue-filled description, riddle, or daily situation) ending with a clear question (e.g. 'What animal am I?', 'Where did they go?', 'What did Tom buy?', 'What am I?').\n"
+            "4. 'korean_meaning': English name followed by Korean translation in parentheses, e.g. 'Elephant (코끼리)', 'Umbrella (우산)'.\n"
+            "5. 'accepted_answers': list of 3-6 accepted words in both English and Korean, including phonetic Korean (e.g. ['elephant', '엘리펀트', '코끼리']).\n"
+            "6. 'hint_ko': friendly Korean clue for kids with Korean initial consonants (초성 힌트), e.g. '긴 코와 큰 귀를 가진 동물이에요! 초성 힌트는 ㅋㄲㄹ!'.\n"
+            "7. 'explanation_ko': warm 1-2 sentence Korean explanation teaching a key English word or phrase from the story.\n"
             'Return ONLY JSON: {"questions": [{"kind": "story_quiz", "category": "...", "english_text": "...", "korean_meaning": "...", "accepted_answers": ["..."], "hint_ko": "...", "explanation_ko": "..."}]}'
         )
         try:
-            if self.provider == "gemini" and self.gemini_api_key:
+            if self.gemini_api_key and (self.provider == "gemini" or not self.openai_api_key):
                 allowed, reason = self.quota_tracker.can_call()
                 if not allowed:
                     log.warning("Gemini quiz question generation blocked by quota (%s)", reason)
@@ -1215,17 +1229,17 @@ class HybridVoiceInterpreter:
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.gemini_model}:generateContent?key={self.gemini_api_key}"
                 body = {
                     "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                    "generationConfig": {"temperature": 0.7, "responseMimeType": "application/json"},
+                    "generationConfig": {"temperature": 0.85, "responseMimeType": "application/json"},
                 }
                 data = self._http_json(url, body)
                 self.quota_tracker.record_call()
                 parsed = _parse_json_response(data["candidates"][0]["content"]["parts"][0]["text"])
                 qs = parsed.get("questions")
                 return qs if isinstance(qs, list) else []
-            if self.provider == "openai" and self.openai_api_key:
+            if self.openai_api_key:
                 body = {
                     "model": self.openai_chat_model,
-                    "temperature": 0.7,
+                    "temperature": 0.85,
                     "response_format": {"type": "json_object"},
                     "messages": [{"role": "user", "content": prompt}],
                 }
@@ -1237,7 +1251,8 @@ class HybridVoiceInterpreter:
                 parsed = _parse_json_response(data["choices"][0]["message"]["content"])
                 qs = parsed.get("questions")
                 return qs if isinstance(qs, list) else []
-        except Exception:
+        except Exception as exc:
+            log.warning("Cloud STT/LLM quiz generation failed: %s", exc)
             return []
         return []
 

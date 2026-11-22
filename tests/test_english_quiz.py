@@ -541,7 +541,7 @@ class TestEnglishQuizDaemonIntegration(unittest.TestCase):
     def test_daily_quiz_systemd_timer_config(self) -> None:
         timer_txt = (REPO_ROOT / "infra" / "voice" / "pocobox-daily-quiz.timer").read_text(encoding="utf-8")
         svc_txt = (REPO_ROOT / "infra" / "voice" / "pocobox-daily-quiz.service").read_text(encoding="utf-8")
-        self.assertIn("Mon..Fri *-*-* 07:45:00 Asia/Seoul", timer_txt)
+        self.assertIn("Mon..Fri *-*-* 07:50:00 Asia/Seoul", timer_txt)
         self.assertIn("Sat,Sun *-*-* 09:00:00 Asia/Seoul", timer_txt)
         self.assertIn("Persistent=false", timer_txt)
         self.assertIn("pocobox-voice quiz daily", svc_txt)
@@ -557,6 +557,71 @@ class TestEnglishQuizDaemonIntegration(unittest.TestCase):
         self.assertEqual(kst_na, "-")
         self.assertEqual(rel_na, "-")
         self.assertIsNone(ep_na)
+
+    def test_infinite_procedural_generator(self) -> None:
+        from voice_control.english_quiz import (
+            BUILTIN_QUIZ_BANK,
+            EnglishQuizSession,
+            generate_infinite_quiz_questions,
+            is_local_answer_match,
+        )
+
+        builtin_ids = {q.id for q in BUILTIN_QUIZ_BANK}
+        qs = generate_infinite_quiz_questions(topic="all", count=10)
+        self.assertEqual(len(qs), 10)
+        # All questions must be dynamic with inf_ prefix and not from builtin bank
+        for q in qs:
+            self.assertTrue(q.id.startswith("inf_"))
+            self.assertNotIn(q.id, builtin_ids)
+            self.assertTrue(len(q.english_text) > 20)
+            self.assertTrue(len(q.accepted_answers) >= 1)
+            # Answer matching must work on accepted answers
+            first_ans = q.accepted_answers[0]
+            self.assertTrue(is_local_answer_match(first_ans, q))
+
+        # Test specific topics
+        for cat in ("animals", "food", "colors_numbers", "family_school", "daily", "riddles"):
+            cat_qs = generate_infinite_quiz_questions(topic=cat, count=3)
+            self.assertEqual(len(cat_qs), 3)
+            self.assertTrue(all(q.category == cat for q in cat_qs))
+
+        # Test exclusion
+        exclude_target = qs[0].english_text
+        qs_ex = generate_infinite_quiz_questions(topic="all", count=5, exclude_texts=[exclude_target])
+        self.assertTrue(all(q.english_text != exclude_target for q in qs_ex))
+
+    def test_session_uses_infinite_generation_by_default(self) -> None:
+        from voice_control.english_quiz import BUILTIN_QUIZ_BANK, EnglishQuizSession
+
+        builtin_ids = {q.id for q in BUILTIN_QUIZ_BANK}
+        session = EnglishQuizSession()
+        self.assertTrue(session.use_infinite_generation)
+
+        res = session.start(topic="all", count=4)
+        self.assertTrue(res.ok)
+        self.assertEqual(len(session.questions), 4)
+
+        # None of the session questions should be from the static BUILTIN_QUIZ_BANK
+        for q in session.questions:
+            self.assertNotIn(q.id, builtin_ids)
+            self.assertTrue(q.id.startswith("inf_"))
+
+        # Verify tracking of recent english texts
+        recent_en = session.recent_english_texts()
+        self.assertEqual(len(recent_en), 4)
+        self.assertEqual(recent_en, [q.english_text for q in session.questions])
+
+    def test_daemon_custom_quiz_questions_uses_infinite_generator(self) -> None:
+        from voice_control.english_quiz import BUILTIN_QUIZ_BANK
+
+        ctrl, _ = self._make_controller()
+        builtin_ids = {q.id for q in BUILTIN_QUIZ_BANK}
+        custom_qs = ctrl._maybe_generate_custom_quiz_questions(topic="all", count=3)
+        self.assertIsNotNone(custom_qs)
+        self.assertEqual(len(custom_qs), 3)
+        for q in custom_qs:
+            self.assertNotIn(q.id, builtin_ids)
+            self.assertTrue(q.id.startswith("inf_") or q.id.startswith("gen_"))
 
 
 if __name__ == "__main__":

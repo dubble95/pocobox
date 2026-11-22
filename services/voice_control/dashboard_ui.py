@@ -290,7 +290,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         </div>
       </div>
       <div class="kv" style="grid-template-columns: repeat(auto-fit, minmax(130px, 1fr))">
-        <div class="stat"><div class="label">예약 설정</div><div id="schedTime" class="val" style="font-size:12.5px">평일 07:45 / 주말 09:00</div></div>
+        <div class="stat"><div class="label">예약 설정</div><div id="schedTime" class="val" style="font-size:12.5px">평일 07:50 / 주말 09:00</div></div>
         <div class="stat"><div class="label">다음 실행 예정</div><div id="schedNext" class="val" style="font-size:13.5px">-</div></div>
         <div class="stat"><div class="label">최근 실행 결과</div><div id="schedLastResult" class="val" style="font-size:13.5px">-</div></div>
         <div class="stat"><div class="label">최근 실행 시각</div><div id="schedLastTime" class="val" style="font-size:13.5px">-</div></div>
