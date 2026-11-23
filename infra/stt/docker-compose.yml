@@ -17,5 +17,6 @@ services:
       - STT_USE_ITN=1
       - STT_THREADS=4
       - STT_MODEL_DIR=/models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17
+      - TTS_MODEL_DIR=/models/kokoro-int8-en-v0_19
     volumes:
       - /srv/pocobox/models:/models:ro

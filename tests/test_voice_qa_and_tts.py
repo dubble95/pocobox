@@ -494,6 +494,12 @@ class TestVoiceQAAndTTS(unittest.TestCase):
         ):
             self.assertEqual(resolve_bilingual_voices("ko-KR-SunHiNeural"), ("ko-KR-SunHiNeural", "en-US-GuyNeural"))
 
+        with mock.patch("voice_control.tts.edge_tts_available", return_value=True), mock.patch.dict(
+            os.environ, {"TTS_EN_VOICE": "kokoro-en"}, clear=False
+        ):
+            self.assertEqual(resolve_bilingual_voices("ko-KR-SunHiNeural"), ("ko-KR-SunHiNeural", "kokoro-en"))
+            self.assertEqual(resolve_bilingual_voices("kokoro-en"), ("ko-KR-SunHiNeural", "kokoro-en"))
+
         # Trim 200ms leading silence + 300ms trailing silence around 100ms tone at 24kHz s16le
         import struct
 
@@ -564,6 +570,33 @@ class TestVoiceQAAndTTS(unittest.TestCase):
             self.assertTrue(pcm_multi)
             self.assertEqual(len(calls), 1)
             self.assertEqual(calls[0][2], "ko-KR-HyunsuMultilingualNeural")
+
+    def test_kokoro_tts_synthesis_and_fallback(self) -> None:
+        import wave, io, struct
+        from voice_control.tts import synthesize_pcm, fetch_kokoro_tts_wav
+
+        # Create a valid 24kHz mono PCM16 WAV in memory
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(24000)
+            wf.writeframes(struct.pack("<h", 3000) * 240)
+        valid_wav = buf.getvalue()
+
+        # Success case: returns decoded raw PCM bytes
+        with mock.patch("voice_control.tts.fetch_kokoro_tts_wav", return_value=valid_wav) as mock_fetch:
+            pcm = synthesize_pcm("Hello world", lang="en", voice="kokoro-en", rate_pct=0, pitch_hz=0)
+            mock_fetch.assert_called_once_with("Hello world")
+            self.assertEqual(len(pcm), 240 * 2)
+
+        # Fallback case: when Kokoro fails, falls back to edge/google synthesis
+        with mock.patch("voice_control.tts.fetch_kokoro_tts_wav", side_effect=RuntimeError("Connection refused")), \
+             mock.patch("voice_control.tts._synthesize_chunk_mp3", return_value=b"fake-mp3"), \
+             mock.patch("subprocess.run") as mock_subp:
+            mock_subp.return_value.stdout = b"\x00\x10" * 100
+            pcm_fb = synthesize_pcm("Hello fallback", lang="en", voice="kokoro-en", rate_pct=0, pitch_hz=0)
+            self.assertEqual(pcm_fb, b"\x00\x10" * 100)
 
     def test_format_now_playing_response_and_controller_bilingual_pronunciation(self) -> None:
         self.assertEqual(

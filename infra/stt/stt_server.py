@@ -153,7 +153,85 @@ class SenseVoiceEngine:
         }
 
 
-def build_handler(engine: SenseVoiceEngine) -> type[BaseHTTPRequestHandler]:
+class KokoroTtsEngine:
+    """Thread-safe wrapper around sherpa-onnx Kokoro OfflineTts."""
+
+    def __init__(
+        self,
+        model_dir: str,
+        *,
+        num_threads: int = 4,
+    ) -> None:
+        self.model_dir = Path(model_dir)
+        self.num_threads = max(1, num_threads)
+        self._lock = threading.Lock()
+        self._tts: sherpa_onnx.OfflineTts | None = None
+        self.available = False
+        self.load_sec = 0.0
+
+        model_file = self.model_dir / "model.int8.onnx"
+        if not model_file.is_file():
+            model_file = self.model_dir / "model.onnx"
+        voices_file = self.model_dir / "voices.bin"
+        tokens_file = self.model_dir / "tokens.txt"
+        lexicon_file = self.model_dir / "lexicon-us-en.txt"
+        if not lexicon_file.is_file():
+            lexicon_file = self.model_dir / "lexicon-en-us.txt"
+
+        if not (model_file.is_file() and voices_file.is_file() and tokens_file.is_file() and lexicon_file.is_file()):
+            log.info("Kokoro TTS model assets not found in %s (TTS disabled)", self.model_dir)
+            return
+
+        try:
+            cfg = sherpa_onnx.OfflineTtsConfig(
+                model=sherpa_onnx.OfflineTtsModelConfig(
+                    kokoro=sherpa_onnx.OfflineTtsKokoroModelConfig(
+                        model=str(model_file),
+                        voices=str(voices_file),
+                        tokens=str(tokens_file),
+                        lexicon=str(lexicon_file),
+                        length_scale=1.0,
+                    ),
+                    num_threads=self.num_threads,
+                )
+            )
+            if not cfg.validate():
+                log.warning("Kokoro TTS config validation failed for %s", self.model_dir)
+                return
+
+            t0 = time.perf_counter()
+            self._tts = sherpa_onnx.OfflineTts(cfg)
+            self.load_sec = round(time.perf_counter() - t0, 3)
+            self.available = True
+            log.info(
+                "Loaded Kokoro TTS (%s, threads=%d) in %.2fs",
+                model_file.name,
+                self.num_threads,
+                self.load_sec,
+            )
+        except Exception as exc:
+            log.warning("Failed to initialize Kokoro TTS from %s: %s", self.model_dir, exc)
+
+    def generate_wav(self, text: str, *, sid: int = 0, speed: float = 1.0) -> bytes:
+        if not self.available or self._tts is None:
+            raise RuntimeError("Kokoro TTS engine is not available")
+        cleaned = text.strip()
+        if not cleaned:
+            return b""
+        with self._lock:
+            audio = self._tts.generate(cleaned, sid=sid, speed=speed)
+        samples = np.array(audio.samples, dtype=np.float32)
+        int16_samples = (np.clip(samples, -1.0, 1.0) * 32767.0).astype(np.int16)
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(audio.sample_rate)
+            wf.writeframes(int16_samples.tobytes())
+        return buf.getvalue()
+
+
+def build_handler(engine: SenseVoiceEngine, tts_engine: KokoroTtsEngine | None = None) -> type[BaseHTTPRequestHandler]:
     class STTHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -172,22 +250,52 @@ def build_handler(engine: SenseVoiceEngine) -> type[BaseHTTPRequestHandler]:
         def do_GET(self) -> None:  # noqa: N802
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path in ("/", "/health"):
-                self._send_json(
-                    200,
-                    {
-                        "ok": True,
-                        "engine": "sensevoice-int8",
-                        "model_dir": str(engine.model_dir),
-                        "default_language": engine.default_language,
-                        "num_threads": engine.num_threads,
-                        "load_sec": engine.load_sec,
-                    },
-                )
+                info: dict[str, Any] = {
+                    "ok": True,
+                    "engine": "sensevoice-int8",
+                    "model_dir": str(engine.model_dir),
+                    "default_language": engine.default_language,
+                    "num_threads": engine.num_threads,
+                    "load_sec": engine.load_sec,
+                    "tts_available": bool(tts_engine and tts_engine.available),
+                }
+                if tts_engine and tts_engine.available:
+                    info["tts_engine"] = "kokoro-int8-en-v0_19"
+                    info["tts_model_dir"] = str(tts_engine.model_dir)
+                    info["tts_load_sec"] = tts_engine.load_sec
+                self._send_json(200, info)
                 return
             self._send_json(404, {"ok": False, "error": "not found"})
 
         def do_POST(self) -> None:  # noqa: N802
             parsed = urllib.parse.urlparse(self.path)
+            if parsed.path == "/tts":
+                if not tts_engine or not tts_engine.available:
+                    self._send_json(503, {"ok": False, "error": "Kokoro TTS engine not available"})
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    raw_body = self.rfile.read(length) if length > 0 else b"{}"
+                    data = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+                    text = str(data.get("text", "")).strip()
+                    sid = int(data.get("sid", 0))
+                    speed = float(data.get("speed", 1.0))
+                    t0 = time.perf_counter()
+                    wav_bytes = tts_engine.generate_wav(text, sid=sid, speed=speed)
+                    gen_ms = round((time.perf_counter() - t0) * 1000.0, 1)
+                    log.info("Kokoro TTS (%.0fms, %d bytes) -> %r", gen_ms, len(wav_bytes), text[:40])
+                    self.send_response(200)
+                    self.send_header("Content-Type", "audio/wav")
+                    self.send_header("Content-Length", str(len(wav_bytes)))
+                    self.send_header("X-Latency-Ms", str(gen_ms))
+                    self.send_header("Connection", "keep-alive")
+                    self.end_headers()
+                    self.wfile.write(wav_bytes)
+                except Exception as exc:
+                    log.warning("Kokoro TTS error: %s", exc)
+                    self._send_json(400, {"ok": False, "error": str(exc)})
+                return
+
             if parsed.path != "/transcribe":
                 self._send_json(404, {"ok": False, "error": "not found"})
                 return
@@ -223,6 +331,7 @@ def main() -> None:
     language = os.environ.get("STT_LANG", "ko")
     use_itn = os.environ.get("STT_USE_ITN", "1").strip().lower() not in ("0", "false", "no")
     threads = int(os.environ.get("STT_THREADS", "4"))
+    tts_model_dir = os.environ.get("TTS_MODEL_DIR", "/models/kokoro-int8-en-v0_19")
 
     engine = SenseVoiceEngine(
         model_dir,
@@ -230,8 +339,9 @@ def main() -> None:
         use_itn=use_itn,
         num_threads=threads,
     )
-    server = ThreadingHTTPServer((host, port), build_handler(engine))
-    log.info("PocoBox SenseVoice local STT server listening on http://%s:%d", host, port)
+    tts_engine = KokoroTtsEngine(tts_model_dir, num_threads=threads)
+    server = ThreadingHTTPServer((host, port), build_handler(engine, tts_engine))
+    log.info("PocoBox SenseVoice local STT + Kokoro TTS server listening on http://%s:%d", host, port)
     server.serve_forever()
 
 

@@ -11,6 +11,8 @@ from __future__ import annotations
 import array
 import asyncio
 import concurrent.futures
+import io
+import json
 import logging
 import os
 import re
@@ -19,6 +21,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+import wave
 
 from .feedback import pulse_env, resolve_internal_speaker_sink
 
@@ -31,6 +34,7 @@ AVAILABLE_VOICES: tuple[dict[str, str], ...] = (
     {"id": "en-US-JennyNeural", "label": "Jenny (English Female)", "engine": "edge"},
     {"id": "en-US-GuyNeural", "label": "Guy (English Male)", "engine": "edge"},
     {"id": "google", "label": "Google 기본 TTS (한국어 여성)", "engine": "google"},
+    {"id": "kokoro-en", "label": "Kokoro (로컬 고음질 영어 · 오프라인)", "engine": "kokoro"},
 )
 
 VALID_VOICE_IDS: frozenset[str] = frozenset(v["id"] for v in AVAILABLE_VOICES)
@@ -61,17 +65,22 @@ def default_english_tts_voice() -> str:
 def resolve_bilingual_voices(voice: str | None = None, en_voice: str | None = None) -> tuple[str, str]:
     """Resolve paired (korean_voice, english_voice) for seamless mixed-language TTS."""
     base = voice if (voice in VALID_VOICE_IDS) else default_tts_voice()
+    explicit_en = en_voice if (en_voice in VALID_VOICE_IDS) else os.environ.get("TTS_EN_VOICE", "").strip()
+    if explicit_en not in VALID_VOICE_IDS:
+        explicit_en = ""
+
+    if explicit_en == "kokoro-en":
+        return (base if base != "kokoro-en" else default_tts_voice()), explicit_en
+    if base == "kokoro-en":
+        return default_tts_voice(), base
+
     if base == "google" or not edge_tts_available():
         return "google", "google"
     if base == "ko-KR-HyunsuMultilingualNeural":
         # Microsoft MultilingualNeural natively handles inline Korean/English code-switching
-        if en_voice in VALID_VOICE_IDS and en_voice != base:
-            return base, en_voice
+        if explicit_en and explicit_en != base:
+            return base, explicit_en
         return base, base
-
-    explicit_en = en_voice if (en_voice in VALID_VOICE_IDS) else os.environ.get("TTS_EN_VOICE", "").strip()
-    if explicit_en not in VALID_VOICE_IDS:
-        explicit_en = ""
 
     if base == "ko-KR-InJoonNeural":
         return base, (explicit_en or "en-US-GuyNeural")
@@ -453,6 +462,41 @@ def fetch_edge_tts_mp3(
     return asyncio.run(asyncio.wait_for(_synth(), timeout=timeout))
 
 
+def fetch_kokoro_tts_wav(
+    text: str,
+    *,
+    sid: int = 0,
+    speed: float = 1.0,
+    url: str | None = None,
+    timeout: float = 15.0,
+) -> bytes:
+    """Synthesize 24kHz mono PCM16 WAV audio via local Kokoro TTS microservice (127.0.0.1:8766/tts)."""
+    endpoint = url or os.environ.get("LOCAL_TTS_URL", "http://127.0.0.1:8766/tts")
+    payload = json.dumps({"text": text, "sid": sid, "speed": speed}).encode("utf-8")
+    req = urllib.request.Request(
+        endpoint,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        if resp.status != 200:
+            raise RuntimeError(f"Kokoro TTS HTTP {resp.status}")
+        return resp.read()
+
+
+def _decode_wav_pcm16_bytes(wav_bytes: bytes) -> bytes:
+    """Extract raw PCM bytes from a 24kHz mono PCM16 WAV container."""
+    if not wav_bytes:
+        return b""
+    try:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+            return wf.readframes(wf.getnframes())
+    except Exception as exc:
+        log.warning("Failed to decode Kokoro WAV container: %s", exc)
+        return b""
+
+
 def _synthesize_chunk_mp3(chunk: str, lang: str, voice: str, rate_pct: int, pitch_hz: int) -> bytes:
     if voice != "google" and edge_tts_available():
         try:
@@ -472,6 +516,20 @@ def synthesize_pcm(
     pitch_hz: int,
 ) -> bytes:
     """Synthesize text into 24kHz mono s16le PCM bytes (best-effort, returns b'' on failure)."""
+    if voice == "kokoro-en" or voice.startswith("kokoro"):
+        try:
+            wav_bytes = fetch_kokoro_tts_wav(text)
+            if wav_bytes:
+                pcm = _decode_wav_pcm16_bytes(wav_bytes)
+                if pcm:
+                    return pcm
+        except Exception as exc:
+            log.warning("Kokoro local TTS failed for %r, falling back to edge/google: %s", text[:30], exc)
+            fallback_voice = default_english_tts_voice() if lang == "en" else default_tts_voice()
+            if fallback_voice == "kokoro-en":
+                fallback_voice = "en-US-JennyNeural" if edge_tts_available() else "google"
+            return synthesize_pcm(text, lang, fallback_voice, rate_pct, pitch_hz)
+
     max_chars = 600 if (voice != "google" and edge_tts_available()) else 160
     chunks = split_tts_chunks(text, max_chars=max_chars)
     if not chunks:
