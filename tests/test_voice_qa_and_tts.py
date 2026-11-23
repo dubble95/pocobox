@@ -488,6 +488,7 @@ class TestVoiceQAAndTTS(unittest.TestCase):
             self.assertEqual(resolve_bilingual_voices("en-US-JennyNeural"), ("ko-KR-SunHiNeural", "en-US-JennyNeural"))
             self.assertEqual(resolve_bilingual_voices("en-US-GuyNeural"), ("ko-KR-InJoonNeural", "en-US-GuyNeural"))
             self.assertEqual(resolve_bilingual_voices("google"), ("google", "google"))
+            self.assertEqual(resolve_bilingual_voices("local-ko"), ("local-ko", "en-US-JennyNeural"))
 
         with mock.patch("voice_control.tts.edge_tts_available", return_value=True), mock.patch.dict(
             os.environ, {"TTS_EN_VOICE": "en-US-GuyNeural"}, clear=False
@@ -597,6 +598,20 @@ class TestVoiceQAAndTTS(unittest.TestCase):
             mock_subp.return_value.stdout = b"\x00\x10" * 100
             pcm_fb = synthesize_pcm("Hello fallback", lang="en", voice="kokoro-en", rate_pct=0, pitch_hz=0)
             self.assertEqual(pcm_fb, b"\x00\x10" * 100)
+
+        # Local Korean TTS case
+        with mock.patch("voice_control.tts.fetch_local_tts_wav", return_value=valid_wav) as mock_local:
+            pcm_ko = synthesize_pcm("안녕하세요", lang="ko", voice="local-ko", rate_pct=0, pitch_hz=0)
+            mock_local.assert_called_once_with("안녕하세요", lang="ko")
+            self.assertEqual(len(pcm_ko), 240 * 2)
+
+        # Local Korean TTS fallback case
+        with mock.patch("voice_control.tts.fetch_local_tts_wav", side_effect=RuntimeError("Connection refused")), \
+             mock.patch("voice_control.tts._synthesize_chunk_mp3", return_value=b"fake-mp3"), \
+             mock.patch("subprocess.run") as mock_subp:
+            mock_subp.return_value.stdout = b"\x00\x10" * 100
+            pcm_ko_fb = synthesize_pcm("안녕하세요 폴백", lang="ko", voice="local-ko", rate_pct=0, pitch_hz=0)
+            self.assertEqual(pcm_ko_fb, b"\x00\x10" * 100)
 
     def test_format_now_playing_response_and_controller_bilingual_pronunciation(self) -> None:
         self.assertEqual(
@@ -777,6 +792,16 @@ class TestVoiceQAAndTTS(unittest.TestCase):
             self.assertEqual(res.provider, "gemini-text")
             mock_slm.assert_called_once()
             mock_gem.assert_called_once()
+
+        # 3. Dynamic LOCAL_LLM_MODEL reporting in health check
+        with mock.patch.dict(os.environ, {"LOCAL_LLM_MODEL": "qwen2.5-1.5b-instruct"}), \
+             mock.patch("urllib.request.urlopen") as mock_url:
+            mock_resp = mock.MagicMock()
+            mock_resp.read.return_value = b'{"status": "ok"}'
+            mock_url.return_value.__enter__.return_value = mock_resp
+            health = interp.local_llm_health(force_refresh=True)
+            self.assertTrue(health["available"])
+            self.assertEqual(health["model"], "qwen2.5-1.5b-instruct")
 
 
 if __name__ == "__main__":

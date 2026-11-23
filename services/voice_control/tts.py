@@ -35,6 +35,7 @@ AVAILABLE_VOICES: tuple[dict[str, str], ...] = (
     {"id": "en-US-GuyNeural", "label": "Guy (English Male)", "engine": "edge"},
     {"id": "google", "label": "Google 기본 TTS (한국어 여성)", "engine": "google"},
     {"id": "kokoro-en", "label": "Kokoro (로컬 고음질 영어 · 오프라인)", "engine": "kokoro"},
+    {"id": "local-ko", "label": "Local VITS/Supertonic (로컬 한국어 · 오프라인)", "engine": "local"},
 )
 
 VALID_VOICE_IDS: frozenset[str] = frozenset(v["id"] for v in AVAILABLE_VOICES)
@@ -73,6 +74,8 @@ def resolve_bilingual_voices(voice: str | None = None, en_voice: str | None = No
         return (base if base != "kokoro-en" else default_tts_voice()), explicit_en
     if base == "kokoro-en":
         return default_tts_voice(), base
+    if base == "local-ko":
+        return base, (explicit_en or default_english_tts_voice())
 
     if base == "google" or not edge_tts_available():
         return "google", "google"
@@ -462,17 +465,18 @@ def fetch_edge_tts_mp3(
     return asyncio.run(asyncio.wait_for(_synth(), timeout=timeout))
 
 
-def fetch_kokoro_tts_wav(
+def fetch_local_tts_wav(
     text: str,
     *,
     sid: int = 0,
     speed: float = 1.0,
+    lang: str = "en",
     url: str | None = None,
     timeout: float = 15.0,
 ) -> bytes:
-    """Synthesize 24kHz mono PCM16 WAV audio via local Kokoro TTS microservice (127.0.0.1:8766/tts)."""
+    """Synthesize 24kHz mono PCM16 WAV audio via local TTS microservice (127.0.0.1:8766/tts)."""
     endpoint = url or os.environ.get("LOCAL_TTS_URL", "http://127.0.0.1:8766/tts")
-    payload = json.dumps({"text": text, "sid": sid, "speed": speed}).encode("utf-8")
+    payload = json.dumps({"text": text, "sid": sid, "speed": speed, "lang": lang}).encode("utf-8")
     req = urllib.request.Request(
         endpoint,
         data=payload,
@@ -481,8 +485,20 @@ def fetch_kokoro_tts_wav(
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         if resp.status != 200:
-            raise RuntimeError(f"Kokoro TTS HTTP {resp.status}")
+            raise RuntimeError(f"Local TTS HTTP {resp.status}")
         return resp.read()
+
+
+def fetch_kokoro_tts_wav(
+    text: str,
+    *,
+    sid: int = 0,
+    speed: float = 1.0,
+    url: str | None = None,
+    timeout: float = 15.0,
+) -> bytes:
+    """Synthesize 24kHz mono PCM16 WAV audio via local Kokoro TTS microservice (backward-compatible)."""
+    return fetch_local_tts_wav(text, sid=sid, speed=speed, lang="en", url=url, timeout=timeout)
 
 
 def _decode_wav_pcm16_bytes(wav_bytes: bytes) -> bytes:
@@ -528,6 +544,20 @@ def synthesize_pcm(
             fallback_voice = default_english_tts_voice() if lang == "en" else default_tts_voice()
             if fallback_voice == "kokoro-en":
                 fallback_voice = "en-US-JennyNeural" if edge_tts_available() else "google"
+            return synthesize_pcm(text, lang, fallback_voice, rate_pct, pitch_hz)
+
+    if voice == "local-ko" or voice.startswith("local-"):
+        try:
+            wav_bytes = fetch_local_tts_wav(text, lang="ko")
+            if wav_bytes:
+                pcm = _decode_wav_pcm16_bytes(wav_bytes)
+                if pcm:
+                    return pcm
+        except Exception as exc:
+            log.warning("Local Korean TTS failed for %r, falling back to edge/google: %s", text[:30], exc)
+            fallback_voice = default_tts_voice()
+            if fallback_voice == "local-ko":
+                fallback_voice = "ko-KR-SunHiNeural" if edge_tts_available() else "google"
             return synthesize_pcm(text, lang, fallback_voice, rate_pct, pitch_hz)
 
     max_chars = 600 if (voice != "google" and edge_tts_available()) else 160

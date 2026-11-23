@@ -1,12 +1,28 @@
 [Unit]
-Description=PocoBox Local SLM Service (llama-server Qwen2.5-0.5B)
+Description=PocoBox Local SLM Service (llama-server Sub-2B on SD845 Kryo Gold)
 After=network.target
 
 [Service]
 Type=simple
 User=user
 Group=user
+# Pin to Snapdragon 845 Big Cores (Kryo Gold 2.65GHz)
 CPUAffinity=4-7
+
+# Model Profiles on PocoBox (5.4GB RAM / 3.5GB Available):
+# 1. Profile Default (Ultra-fast Intent & QA, ~0.6-1.1s, RAM ~550MB):
+#    MemoryMax=800M
+#    ExecStart=/usr/bin/llama-server -m /srv/pocobox/models/qwen2.5-0.5b-instruct-q4_k_m.gguf --device none --no-op-offload --host 127.0.0.1 --port 8767 -c 1024 -t 4 --parallel 1 --temp 0.0 --no-warmup
+# 2. Profile Quality (Enhanced Bilingual Korean/English Fluency, ~1.8-2.6s, RAM ~1.3GB):
+#    MemoryMax=1500M
+#    ExecStart=/usr/bin/llama-server -m /srv/pocobox/models/qwen2.5-1.5b-instruct-q4_k_m.gguf --device none --no-op-offload --host 127.0.0.1 --port 8767 -c 1024 -t 4 --parallel 1 --temp 0.0 --no-warmup
+# 3. Profile Korean-Specialized (LG EXAONE 3.5, Best Korean Nuance, ~2.8-3.5s, RAM ~1.9GB):
+#    MemoryMax=2200M
+#    ExecStart=/usr/bin/llama-server -m /srv/pocobox/models/EXAONE-3.5-2.4B-Instruct-Q4_K_M.gguf --device none --no-op-offload --host 127.0.0.1 --port 8767 -c 1024 -t 4 --parallel 1 --temp 0.0 --no-warmup
+# 4. Profile Ultra-Light (SmolLM2-360M, Instant Command Classification, ~0.4s, RAM ~350MB):
+#    MemoryMax=500M
+#    ExecStart=/usr/bin/llama-server -m /srv/pocobox/models/SmolLM2-360M-Instruct-Q4_K_M.gguf --device none --no-op-offload --host 127.0.0.1 --port 8767 -c 1024 -t 4 --parallel 1 --temp 0.0 --no-warmup
+
 MemoryMax=800M
 ExecStart=/usr/bin/llama-server -m /srv/pocobox/models/qwen2.5-0.5b-instruct-q4_k_m.gguf --device none --no-op-offload --host 127.0.0.1 --port 8767 -c 1024 -t 4 --parallel 1 --temp 0.0 --no-warmup
 Restart=always

@@ -590,19 +590,20 @@ class HybridVoiceInterpreter:
         if not force_refresh and self._local_llm_health_cache is not None and (now - self._local_llm_health_cache[0]) < 10.0:
             return self._local_llm_health_cache[1]
         url = f"{self.local_llm_url}/health"
-        info: dict[str, Any] = {"configured": True, "available": False, "url": self.local_llm_url}
+        active_model = os.environ.get("LOCAL_LLM_MODEL", "qwen2.5-0.5b-instruct").strip()
+        info: dict[str, Any] = {"configured": True, "available": False, "url": self.local_llm_url, "model": active_model}
         try:
             if self._session is not None:
                 resp = self._session.get(url, timeout=1.2)
                 if resp.status_code == 200:
                     data = resp.json()
                     info["available"] = (data.get("status") == "ok" or bool(data.get("ok", True)))
-                    info["model"] = "qwen2.5-0.5b-instruct"
+                    info["model"] = active_model
             else:
                 with urllib.request.urlopen(url, timeout=1.2) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
                     info["available"] = (data.get("status") == "ok" or bool(data.get("ok", True)))
-                    info["model"] = "qwen2.5-0.5b-instruct"
+                    info["model"] = active_model
         except Exception:
             info["available"] = False
         self._local_llm_health_cache = (now, info)
@@ -661,7 +662,9 @@ class HybridVoiceInterpreter:
                 return None
             content = choices[0]["message"]["content"]
             parsed = _parse_json_response(content)
-            intent = _intent_from_llm_payload(parsed, provider="local-slm-qwen0.5b", raw_fallback=text, context=context)
+            raw_model = os.environ.get("LOCAL_LLM_MODEL", "").strip()
+            provider_tag = f"local-slm-{raw_model}" if raw_model else "local-slm-qwen0.5b"
+            intent = _intent_from_llm_payload(parsed, provider=provider_tag, raw_fallback=text, context=context)
             if intent.action != IntentAction.UNKNOWN:
                 return intent
         except Exception as exc:
