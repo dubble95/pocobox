@@ -1943,6 +1943,10 @@ def _gen_math_question(rng: random.Random) -> QuizQuestion:
         10: ("Ten", ("ten", "10", "텐", "열", "열개", "열 개", "10개", "십")),
         11: ("Eleven", ("eleven", "11", "일레븐", "열하나", "11개", "십일")),
         12: ("Twelve", ("twelve", "12", "트웰브", "열둘", "12개", "십이")),
+        13: ("Thirteen", ("thirteen", "13", "서틴", "열셋", "13개", "십삼")),
+        14: ("Fourteen", ("fourteen", "14", "포틴", "열넷", "14개", "십사")),
+        15: ("Fifteen", ("fifteen", "15", "피프틴", "열다섯", "15개", "십오")),
+        16: ("Sixteen", ("sixteen", "16", "식스틴", "열여섯", "16개", "십육")),
     }
 
     name = rng.choice(names)
