@@ -29,6 +29,8 @@ scp "${REPO_DIR}/infra/voice/pocobox-voice.desktop" "${HOST}:/tmp/pocobox-deploy
 scp "${REPO_DIR}/infra/system/99-pocobox-no-powersave.conf" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/system/99-pocobox-nosuspend.conf" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/system/55_pocobox.nft" "${HOST}:/tmp/pocobox-deploy/"
+scp "${REPO_DIR}/infra/display/pocobox_cage_touch.c" "${HOST}:/tmp/pocobox-deploy/"
+scp "${REPO_DIR}/infra/display/build-cage-touch.sh" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/display/greetd-kiosk.toml" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/display/display.env" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/display/pocobox-kiosk-start.sh" "${HOST}:/tmp/pocobox-deploy/"
@@ -60,6 +62,8 @@ install -m 0644 \$SRC/pocobox_aec3.cpp /srv/pocobox/bin/pocobox_aec3.cpp
 install -m 0755 \$SRC/build-aec3.sh /srv/pocobox/bin/build-aec3.sh
 install -m 0755 \$SRC/patch-usb-host-dtb.sh /srv/pocobox/bin/patch-usb-host-dtb.sh
 install -m 0755 \$SRC/restore-usb-peripheral-dtb.sh /srv/pocobox/bin/restore-usb-peripheral-dtb.sh
+install -m 0644 \$SRC/pocobox_cage_touch.c /srv/pocobox/bin/pocobox_cage_touch.c
+install -m 0755 \$SRC/build-cage-touch.sh /srv/pocobox/bin/build-cage-touch.sh
 install -m 0755 \$SRC/pocobox-kiosk-start.sh /srv/pocobox/bin/pocobox-kiosk-start.sh
 install -m 0755 \$SRC/pocobox-autorotate.py /srv/pocobox/bin/pocobox-autorotate.py
 install -m 0755 \$SRC/pocobox-backlight.py /srv/pocobox/bin/pocobox-backlight.py
@@ -124,6 +128,9 @@ fi
 
 if [ ! -f /usr/local/lib/libpocobox_aec3.so ] || [ /srv/pocobox/bin/pocobox_aec3.cpp -nt /usr/local/lib/libpocobox_aec3.so ]; then
   /srv/pocobox/bin/build-aec3.sh || echo WARN_libpocobox_aec3_build_skipped
+fi
+if [ ! -f /usr/local/lib/libpocobox_cage_touch.so ] || [ /srv/pocobox/bin/pocobox_cage_touch.c -nt /usr/local/lib/libpocobox_cage_touch.so ]; then
+  /srv/pocobox/bin/build-cage-touch.sh || echo WARN_libpocobox_cage_touch_build_skipped
 fi
 if [ -x /usr/local/bin/squeezelite ] && ! /usr/local/bin/squeezelite -? 2>&1 | grep -qi visexport; then
   /srv/pocobox/bin/build-squeezelite.sh || echo WARN_squeezelite_VISEXPORT_rebuild_skipped

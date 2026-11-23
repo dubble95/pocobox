@@ -68,7 +68,7 @@ class DisplayUITests(unittest.TestCase):
         _check_js_syntax(js)
 
     def test_display_is_fullscreen_without_persistent_bars(self) -> None:
-        self.assertEqual(UI_VERSION, "12")
+        self.assertEqual(UI_VERSION, "13")
         self.assertIn('viewport-fit=cover', DISPLAY_HTML)
         self.assertIn('apple-mobile-web-app-capable', DISPLAY_HTML)
         self.assertIn('apple-mobile-web-app-status-bar-style', DISPLAY_HTML)
@@ -99,6 +99,14 @@ class DisplayUITests(unittest.TestCase):
     def test_kiosk_touch_and_udev_rules(self) -> None:
         kiosk_sh = (REPO_ROOT / "infra" / "display" / "pocobox-kiosk-start.sh").read_text(encoding="utf-8")
         self.assertIn('user_pref("dom.w3c_touch_events.enabled", 1);', kiosk_sh)
+        self.assertIn('libpocobox_cage_touch.so', kiosk_sh)
+
+        cage_touch_c = REPO_ROOT / "infra" / "display" / "pocobox_cage_touch.c"
+        self.assertTrue(cage_touch_c.exists())
+        self.assertIn("wlr_cursor_map_input_to_output", cage_touch_c.read_text(encoding="utf-8"))
+
+        build_sh = REPO_ROOT / "infra" / "display" / "build-cage-touch.sh"
+        self.assertTrue(build_sh.exists())
 
         rules_path = REPO_ROOT / "infra" / "display" / "95-pocobox-touchscreen.rules"
         self.assertTrue(rules_path.exists())

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-UI_VERSION = "12"
+UI_VERSION = "13"
 
 DISPLAY_MANIFEST = json.dumps(
     {

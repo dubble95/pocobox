@@ -58,5 +58,8 @@ done
 export MOZ_ENABLE_WAYLAND=1
 export XDG_CURRENT_DESKTOP=cage
 export WLR_LIBINPUT_NO_DEVICES=1
+if [ -f /usr/local/lib/libpocobox_cage_touch.so ]; then
+  export LD_PRELOAD="/usr/local/lib/libpocobox_cage_touch.so${LD_PRELOAD:+:$LD_PRELOAD}"
+fi
 
 exec cage -s -- firefox-esr --kiosk --no-remote --profile "${PROFILE_DIR}" "${URL}"
