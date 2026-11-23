@@ -1,11 +1,12 @@
 """Background verifier that re-analyzes saved command audio clips to detect
-recognition errors after the fact.
+recognition errors after the fact and feeds corrections back into the ASR
+normalization table for continuous improvement.
 
 Scans the command_clips directory for WAV + JSON metadata pairs, re-interprets
 each WAV through the HybridVoiceInterpreter, and compares the re-interpreted
-action against the originally recorded action. Mismatches are logged as
-``command_verification_mismatch`` telemetry events so the dashboard can surface
-recognition errors that were not caught in real time.
+action against the originally recorded action. When a mismatch is detected and
+the re-interpretation is confident, the misheard transcript is recorded as a
+correction in the Korean adaptive learner so future recognitions are improved.
 
 Designed to run as a low-priority background thread on the PocoBox device so it
 does not interfere with real-time voice handling.
@@ -16,11 +17,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
+from .adaptive_learning import KoreanAdaptiveLearner
 from .cloud_stt_intent import HybridVoiceInterpreter
 from .intent_schema import IntentAction
 from .telemetry import VoiceTelemetryLogger
@@ -30,16 +33,23 @@ log = logging.getLogger("pocobox-voice.bg-verifier")
 DEFAULT_SCAN_INTERVAL_SEC = 60.0
 DEFAULT_MAX_CLIPS_PER_SCAN = 20
 DEFAULT_MIN_AGE_SEC = 30.0  # Don't re-verify clips still being written
+DEFAULT_LEARNING_PATH = "/srv/pocobox/learning/korean_corrections.json"
+# Only record corrections when re-interpretation confidence is at least this high
+MIN_REINTERP_CONFIDENCE = 0.90
+# Only record corrections when transcripts are meaningfully different
+MIN_TRANSCRIPT_DIFF_RATIO = 0.3
 
 
 class BackgroundVerifier:
-    """Periodically re-verifies saved command clips for recognition accuracy."""
+    """Periodically re-verifies saved command clips and feeds corrections back
+    into the ASR normalization table for continuous recognition improvement."""
 
     def __init__(
         self,
         interpreter: HybridVoiceInterpreter,
         telemetry: VoiceTelemetryLogger | None = None,
         clips_dir: str | Path | None = None,
+        learning_path: str | Path | None = None,
         scan_interval_sec: float = DEFAULT_SCAN_INTERVAL_SEC,
         max_clips_per_scan: int = DEFAULT_MAX_CLIPS_PER_SCAN,
         min_age_sec: float = DEFAULT_MIN_AGE_SEC,
@@ -55,6 +65,10 @@ class BackgroundVerifier:
             self.clips_dir = Path(
                 os.environ.get("VOICE_COMMAND_CLIP_DIR", "/srv/pocobox/logs/command_clips")
             )
+        self.learning_path = Path(
+            learning_path or os.environ.get("VOICE_LEARNING_PATH", DEFAULT_LEARNING_PATH)
+        )
+        self.learner = KoreanAdaptiveLearner(path=self.learning_path)
         self.scan_interval_sec = scan_interval_sec
         self.max_clips_per_scan = max_clips_per_scan
         self.min_age_sec = min_age_sec
@@ -73,6 +87,7 @@ class BackgroundVerifier:
             "scans": 0,
             "clips_verified": 0,
             "mismatches": 0,
+            "corrections_recorded": 0,
             "skipped_recent": 0,
             "errors": 0,
         }
@@ -91,11 +106,12 @@ class BackgroundVerifier:
         self._thread = threading.Thread(target=self._run_loop, name="bg-verifier", daemon=True)
         self._thread.start()
         log.info(
-            "Background verifier started (interval=%.0fs, max_clips=%d, min_age=%.0fs, dir=%s)",
+            "Background verifier started (interval=%.0fs, max_clips=%d, min_age=%.0fs, dir=%s, learning=%s)",
             self.scan_interval_sec,
             self.max_clips_per_scan,
             self.min_age_sec,
             self.clips_dir,
+            self.learning_path,
         )
 
     def stop(self) -> None:
@@ -113,10 +129,39 @@ class BackgroundVerifier:
                     self.stats["errors"] += 1
             self._stop.wait(self.scan_interval_sec)
 
+    def _should_record_correction(
+        self,
+        recorded_transcript: str,
+        re_transcript: str,
+        re_confidence: float,
+        re_ok: bool,
+        recorded_ok: bool,
+    ) -> bool:
+        """Decide whether a mismatch warrants recording an ASR correction."""
+        if not re_ok or re_confidence < MIN_REINTERP_CONFIDENCE:
+            return False
+        if not recorded_transcript or not re_transcript:
+            return False
+        if recorded_transcript.strip().lower() == re_transcript.strip().lower():
+            return False
+        # Avoid recording trivial differences (punctuation, spacing)
+        r_clean = re.sub(r"[^\w\s]", "", recorded_transcript).strip().lower()
+        re_clean = re.sub(r"[^\w\s]", "", re_transcript).strip().lower()
+        if r_clean == re_clean:
+            return False
+        # Require meaningful difference (not just a trailing particle)
+        max_len = max(len(r_clean), len(re_clean))
+        if max_len == 0:
+            return False
+        diff_ratio = abs(len(r_clean) - len(re_clean)) / max_len
+        if diff_ratio < MIN_TRANSCRIPT_DIFF_RATIO:
+            return False
+        return True
+
     def scan_once(self) -> dict[str, int]:
         """Run one verification scan over recent command clips."""
         if not self.clips_dir.exists():
-            return {"scanned": 0, "verified": 0, "mismatches": 0}
+            return {"scanned": 0, "verified": 0, "mismatches": 0, "corrections_recorded": 0}
 
         now = time.time()
         cutoff = now - self.min_age_sec
@@ -129,11 +174,12 @@ class BackgroundVerifier:
                 reverse=True,
             )
         except OSError:
-            return {"scanned": 0, "verified": 0, "mismatches": 0}
+            return {"scanned": 0, "verified": 0, "mismatches": 0, "corrections_recorded": 0}
 
         scanned = 0
         verified = 0
         mismatches = 0
+        corrections_recorded = 0
         skipped_recent = 0
 
         for jf in json_files:
@@ -187,6 +233,7 @@ class BackgroundVerifier:
             re_ok = intent.action != IntentAction.UNKNOWN
             re_confidence = intent.confidence
             re_provider = intent.provider
+            re_transcript = intent.raw_text or ""
 
             is_mismatch = (
                 recorded_action != re_action
@@ -203,6 +250,23 @@ class BackgroundVerifier:
                 mismatches += 1
                 with self._lock:
                     self.stats["mismatches"] += 1
+
+                # Record correction for feedback loop when re-interpretation is confident
+                if self._should_record_correction(
+                    recorded_transcript, re_transcript, re_confidence, re_ok, recorded_ok
+                ):
+                    status = self.learner.record_correction(recorded_transcript, re_transcript)
+                    if status in ("active", "pending"):
+                        corrections_recorded += 1
+                        with self._lock:
+                            self.stats["corrections_recorded"] += 1
+                        log.info(
+                            "Feedback correction recorded: %r -> %r (status=%s)",
+                            recorded_transcript,
+                            re_transcript,
+                            status,
+                        )
+
                 if self.telemetry is not None:
                     self.telemetry.record(
                         "command_verification_mismatch",
@@ -214,7 +278,7 @@ class BackgroundVerifier:
                         re_confidence=round(re_confidence, 4),
                         re_provider=re_provider,
                         recorded_transcript=recorded_transcript,
-                        re_transcript=intent.raw_text,
+                        re_transcript=re_transcript,
                         music_playing=bool(meta.get("music_playing", False)),
                         verified_at=round(now, 3),
                     )
@@ -235,17 +299,25 @@ class BackgroundVerifier:
             self.stats["skipped_recent"] += skipped_recent
 
         log.debug(
-            "Verification scan: scanned=%d verified=%d mismatches=%d skipped_recent=%d",
+            "Verification scan: scanned=%d verified=%d mismatches=%d corrections=%d skipped_recent=%d",
             scanned,
             verified,
             mismatches,
+            corrections_recorded,
             skipped_recent,
         )
-        return {"scanned": scanned, "verified": verified, "mismatches": mismatches}
+        return {
+            "scanned": scanned,
+            "verified": verified,
+            "mismatches": mismatches,
+            "corrections_recorded": corrections_recorded,
+        }
 
     def stats_dict(self) -> dict[str, Any]:
         with self._lock:
-            return dict(self.stats)
+            stats = dict(self.stats)
+        stats["learner"] = self.learner.stats()
+        return stats
 
 
 def _cli() -> int:
@@ -256,6 +328,7 @@ def _cli() -> int:
 
     parser = argparse.ArgumentParser(description="Run PocoBox background verifier once")
     parser.add_argument("--clips-dir", default=None)
+    parser.add_argument("--learning-path", default=None)
     parser.add_argument("--max-clips", type=int, default=DEFAULT_MAX_CLIPS_PER_SCAN)
     args = parser.parse_args()
 
@@ -265,6 +338,7 @@ def _cli() -> int:
         interpreter=interp,
         telemetry=tel,
         clips_dir=args.clips_dir,
+        learning_path=args.learning_path,
         max_clips_per_scan=args.max_clips,
     )
     result = verifier.scan_once()
