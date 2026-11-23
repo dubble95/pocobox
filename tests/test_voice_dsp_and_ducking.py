@@ -286,18 +286,23 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
         self.assertIsNone(spotter.accept_pcm16k(chunk, music_playing=True))
         self.assertEqual(spotter.accept_pcm16k(chunk, music_playing=True), "poco ya")
 
-        # Stricter 3-chunk requirement for vocal-prone 'hey poco' during music playback
-        spotter.reset()
-        spotter._rec = _FakeRec([
+        # Stricter 4-chunk requirement for vocal-prone 'hey poco' during music playback
+        spotter2 = VoskWakeWordSpotter(music_confirm_chunks=3, music_min_confidence=0.70)
+        spotter2.available = True
+        spotter2._last_trigger_time = 0.0  # Reset anti-spam cooldown for test
+        spotter2._rec = _FakeRec([
+            (False, {"partial": "hey poco"}),
             (False, {"partial": "hey poco"}),
             (False, {"partial": "hey poco"}),
             (False, {"partial": "hey poco"}),
         ])
-        self.assertIsNone(spotter.accept_pcm16k(chunk, music_playing=True))
-        self.assertIsNone(spotter.accept_pcm16k(chunk, music_playing=True))
-        self.assertEqual(spotter.accept_pcm16k(chunk, music_playing=True), "hey poco")
+        self.assertIsNone(spotter2.accept_pcm16k(chunk, music_playing=True))
+        self.assertIsNone(spotter2.accept_pcm16k(chunk, music_playing=True))
+        self.assertIsNone(spotter2.accept_pcm16k(chunk, music_playing=True))
+        self.assertEqual(spotter2.accept_pcm16k(chunk, music_playing=True), "hey poco")
 
         # Low-confidence final result rejected during music; high-confidence accepted
+        spotter._last_trigger_time = 0.0
         spotter._rec = _FakeRec([
             (True, {"text": "poco ya", "result": [{"word": "poco", "conf": 0.3}, {"word": "ya", "conf": 0.4}]}),
             (True, {"text": "poco ya", "result": [{"word": "poco", "conf": 0.9}, {"word": "ya", "conf": 0.85}]}),
@@ -376,7 +381,7 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
             os.environ.pop("VOICE_WAKE_MUSIC_MIN_CONF", None)
             os.environ.pop("VOICE_WAKE_MIN_CONF", None)
             spotter = VoskWakeWordSpotter()
-        self.assertEqual(spotter.music_min_confidence, 0.55)
+        self.assertEqual(spotter.music_min_confidence, 0.70)
         self.assertEqual(spotter.quiet_min_confidence, 0.60)
 
         with mock.patch.dict(os.environ, {"VOICE_WAKE_ENGINE": "off", "VOICE_WAKE_MIN_CONF": "0.65"}):
@@ -548,9 +553,9 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
         res = ctrl.update_runtime_config({"reset_defaults": True})
         self.assertTrue(res["ok"])
         self.assertTrue(res["reset"])
-        self.assertEqual(ctrl.continuous_listener.wake_snr_ratio, 1.01)
-        self.assertEqual(ctrl.continuous_listener.wake_spotter.music_confirm_chunks, 2)
-        self.assertEqual(ctrl.continuous_listener.wake_spotter.music_min_confidence, 0.55)
+        self.assertEqual(ctrl.continuous_listener.wake_snr_ratio, 1.05)
+        self.assertEqual(ctrl.continuous_listener.wake_spotter.music_confirm_chunks, 3)
+        self.assertEqual(ctrl.continuous_listener.wake_spotter.music_min_confidence, 0.70)
         self.assertEqual(ctrl.vad_threshold, 40.0)
         self.assertEqual(ctrl.duck_volume, 18)
         self.assertTrue(ctrl.duck_enabled)

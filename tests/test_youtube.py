@@ -331,12 +331,22 @@ class TestYouTubeExecutorIntegration(unittest.TestCase):
 
     def test_executor_delegates_to_youtube_handler_when_active(self) -> None:
         mock_lms = mock.MagicMock()
-        mock_lms.resolve_player_id.return_value = "02:70:6f:63:6f:01"
         yt_active = True
         handled_actions = []
 
-        def mock_yt_handler(intent: VoiceIntent, dry_run: bool) -> ExecutionResult:
+        def fake_resolve_player_id(name="pocobox", timeout=2.5):
+            # If YouTube is active, Squeezelite is stopped, so LMS has no players connected
+            if yt_active:
+                raise RuntimeError("No LMS players connected (waited up to 2.5s).")
+            return "02:70:6f:63:6f:01"
+
+        mock_lms.resolve_player_id.side_effect = fake_resolve_player_id
+
+        def mock_yt_handler(intent: VoiceIntent, dry_run: bool = False) -> ExecutionResult:
+            nonlocal yt_active
             handled_actions.append(intent.action)
+            if intent.action == IntentAction.STOP_YOUTUBE:
+                yt_active = False
             return ExecutionResult(ok=True, action=intent.action, message="handled_by_yt")
 
         executor = VoiceExecutor(
@@ -360,11 +370,41 @@ class TestYouTubeExecutorIntegration(unittest.TestCase):
         self.assertTrue(res_np.ok)
         self.assertIn(IntentAction.NOW_PLAYING, handled_actions)
 
-        # PLAY_SEARCH arrives while YouTube active -> stops YouTube, then plays LMS!
+        # PLAY_SEARCH arrives while YouTube active -> stops YouTube FIRST (which restores Squeezelite), then plays LMS!
         mock_lms.tidal_search_and_play.return_value = {"ok": True, "category": "songs", "title": "Celebrity"}
-        executor.execute(VoiceIntent(action=IntentAction.PLAY_SEARCH, query="아이유 Celebrity"))
+        res_play = executor.execute(VoiceIntent(action=IntentAction.PLAY_SEARCH, query="아이유 Celebrity"))
+        self.assertTrue(res_play.ok)
         self.assertIn(IntentAction.STOP_YOUTUBE, handled_actions)
         mock_lms.tidal_search_and_play.assert_called_once()
+
+    def test_executor_recovers_squeezelite_when_player_not_connected(self) -> None:
+        mock_lms = mock.MagicMock()
+        calls = []
+
+        def fake_resolve(name="pocobox", timeout=2.5):
+            calls.append("resolve")
+            if len(calls) == 1:
+                raise RuntimeError("No LMS players connected (waited up to 2.5s).")
+            return "02:70:6f:63:6f:01"
+
+        mock_lms.resolve_player_id.side_effect = fake_resolve
+        recovered = False
+
+        def mock_ensure():
+            nonlocal recovered
+            recovered = True
+            return True
+
+        executor = VoiceExecutor(
+            mock_lms,
+            ensure_player_running_fn=mock_ensure,
+            is_youtube_active_fn=lambda: False,
+        )
+        mock_lms.tidal_search_and_play.return_value = {"ok": True, "category": "songs", "title": "Good Day"}
+        res = executor.execute(VoiceIntent(action=IntentAction.PLAY_SEARCH, query="아이유 좋은 날"))
+        self.assertTrue(res.ok)
+        self.assertTrue(recovered)
+        self.assertEqual(len(calls), 2)
 
 
 class TestDaemonYouTubeEndpointsAndState(unittest.TestCase):

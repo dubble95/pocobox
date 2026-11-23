@@ -201,6 +201,7 @@ class VoiceExecutor:
         youtube_handler: Callable[[VoiceIntent, bool], ExecutionResult] | None = None,
         is_youtube_active_fn: Callable[[], bool] | None = None,
         switch_output_handler: Callable[[VoiceIntent, bool], ExecutionResult] | None = None,
+        ensure_player_running_fn: Callable[[], bool] | None = None,
     ) -> None:
         self.lms = lms
         self.player_name = player_name
@@ -211,6 +212,7 @@ class VoiceExecutor:
         self.youtube_handler = youtube_handler
         self.is_youtube_active_fn = is_youtube_active_fn or (lambda: False)
         self.switch_output_handler = switch_output_handler
+        self.ensure_player_running_fn = ensure_player_running_fn
         self._radio_lock = threading.Lock()
         self._radio_gen = 0
 
@@ -353,20 +355,48 @@ class VoiceExecutor:
             if self.youtube_handler is not None:
                 return self.youtube_handler(intent, dry_run)
 
+        # If user requests LMS playback (search, mix, favorite) while YouTube is active, stop YouTube first
+        # so Squeezelite audio output can be restored and registered with LMS.
+        if intent.action in (IntentAction.PLAY_SEARCH, IntentAction.PLAY_MIX, IntentAction.PLAY_FAVORITE):
+            if not dry_run and self.is_youtube_active_fn() and self.youtube_handler is not None:
+                try:
+                    self.youtube_handler(VoiceIntent(action=IntentAction.STOP_YOUTUBE), dry_run=False)
+                except Exception as exc:
+                    log.warning("Failed to stop YouTube before LMS playback: %s", exc)
+
+        # In DAC mode, volume is hardware-fixed at 100%; handle immediately without requiring LMS player
+        if intent.action in (
+            IntentAction.VOLUME_SET,
+            IntentAction.VOLUME_UP,
+            IntentAction.VOLUME_DOWN,
+            IntentAction.MUTE,
+            IntentAction.UNMUTE,
+        ) and self.is_dac_mode_fn():
+            msg = (
+                "DAC 모드에서는 고음질 출력을 위해 볼륨이 100%로 고정되어 있습니다. "
+                "앰프나 스피커에서 볼륨을 조절해 주세요."
+            ) if not dry_run else "DAC 모드에서는 볼륨이 100%로 고정되어 있습니다 (dry-run)."
+            return done(
+                True,
+                msg,
+                {"fixed_volume": 100, "dac_mode": True, "volume_disabled": True, "spoken": True},
+            )
+
         try:
             player_id = self.lms.resolve_player_id(self.player_name)
         except Exception as exc:
-            return done(False, f"LMS 플레이어 연결을 찾지 못했습니다: {exc}")
+            if not dry_run and self.ensure_player_running_fn is not None:
+                try:
+                    log.info("LMS player '%s' not connected (%s); ensuring Squeezelite is running...", self.player_name, exc)
+                    self.ensure_player_running_fn()
+                    player_id = self.lms.resolve_player_id(self.player_name, timeout=3.5)
+                except Exception as retry_exc:
+                    return done(False, f"LMS 플레이어 연결을 찾지 못했습니다: {retry_exc}")
+            else:
+                return done(False, f"LMS 플레이어 연결을 찾지 못했습니다: {exc}")
 
         try:
             act = intent.action
-
-            if act in (IntentAction.PLAY_SEARCH, IntentAction.PLAY_MIX, IntentAction.PLAY_FAVORITE):
-                if not dry_run and self.is_youtube_active_fn() and self.youtube_handler is not None:
-                    try:
-                        self.youtube_handler(VoiceIntent(action=IntentAction.STOP_YOUTUBE), dry_run=False)
-                    except Exception:
-                        pass
 
             if act == IntentAction.PLAY_SEARCH:
                 queries = intent.all_queries()

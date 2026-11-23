@@ -347,6 +347,7 @@ class VoiceController:
             youtube_handler=self.handle_youtube_intent,
             is_youtube_active_fn=lambda: self.youtube.active,
             switch_output_handler=self.handle_switch_output,
+            ensure_player_running_fn=self._ensure_squeezelite_running,
         )
         self.telemetry = VoiceTelemetryLogger()
         self.interpreter = HybridVoiceInterpreter(telemetry=self.telemetry)
@@ -428,14 +429,16 @@ class VoiceController:
             "duck_enabled": self.duck_enabled,
             "duck_volume": self.duck_volume,
             "quiet_threshold": self.vad_threshold,
+            "wake_min_rms": self.continuous_listener.wake_min_rms if self.continuous_listener else float(os.environ.get("VOICE_WAKE_MIN_RMS", "35.0")),
             "playing_threshold": self.continuous_listener.playing_min_threshold if self.continuous_listener else float(os.environ.get("VOICE_PLAYING_VAD_THRESHOLD", "180.0")),
             "speech_multiplier": self.continuous_listener.speech_multiplier if self.continuous_listener else float(os.environ.get("VOICE_VAD_MULTIPLIER", "3.0")),
             "playing_multiplier": self.continuous_listener.playing_multiplier if self.continuous_listener else float(os.environ.get("VOICE_PLAYING_MULTIPLIER", "2.1")),
             "rms_fallback_during_music": self.continuous_listener.rms_fallback_during_music if self.continuous_listener else _env_bool("VOICE_RMS_FALLBACK_DURING_MUSIC", False),
             "aec3_delay_ms": (self.continuous_listener.aec3.delay_ms if (self.continuous_listener and self.continuous_listener.aec3) else int(os.environ.get("VOICE_AEC3_DELAY_MS", "150"))),
-            "wake_snr_ratio": self.continuous_listener.wake_snr_ratio if self.continuous_listener else float(os.environ.get("VOICE_WAKE_SNR_RATIO", "1.01")),
+            "wake_snr_ratio": self.continuous_listener.wake_snr_ratio if self.continuous_listener else float(os.environ.get("VOICE_WAKE_SNR_RATIO", "1.05")),
             "wake_delta_rms": self.continuous_listener.wake_delta_rms if self.continuous_listener else float(os.environ.get("VOICE_WAKE_DELTA_RMS", "8.0")),
             "wake_music_reset_sec": self.continuous_listener.wake_music_reset_sec if self.continuous_listener else float(os.environ.get("VOICE_WAKE_MUSIC_RESET_SEC", "3.0")),
+            "wake_trigger_cooldown_sec": self.continuous_listener.wake_trigger_cooldown_sec if self.continuous_listener else float(os.environ.get("VOICE_WAKE_TRIGGER_COOLDOWN_SEC", "3.0")),
             "music_confirm_chunks": (self.continuous_listener.wake_spotter.music_confirm_chunks if (self.continuous_listener and self.continuous_listener.wake_spotter) else int(os.environ.get("VOICE_WAKE_CONFIRM_CHUNKS", "2"))),
             "music_min_conf": (self.continuous_listener.wake_spotter.music_min_confidence if (self.continuous_listener and self.continuous_listener.wake_spotter) else float(os.environ.get("VOICE_WAKE_MIN_CONF", "0.65"))),
         }
@@ -1610,6 +1613,8 @@ class VoiceController:
                     self.continuous_listener.wake_delta_rms = float(d["wake_delta_rms"])
                 if "wake_music_reset_sec" in d:
                     self.continuous_listener.wake_music_reset_sec = float(d["wake_music_reset_sec"])
+                if "wake_trigger_cooldown_sec" in d:
+                    self.continuous_listener.wake_trigger_cooldown_sec = float(d["wake_trigger_cooldown_sec"])
                 if "music_confirm_chunks" in d and self.continuous_listener.wake_spotter:
                     self.continuous_listener.wake_spotter.music_confirm_chunks = int(d["music_confirm_chunks"])
                 if "music_min_conf" in d and self.continuous_listener.wake_spotter:
@@ -1665,6 +1670,8 @@ class VoiceController:
             self.duck_enabled = bool(data["duck_enabled"])
         if "duck_volume" in data:
             self.duck_volume = max(5, min(60, int(float(data["duck_volume"]))))
+        if "wake_min_rms" in data and self.continuous_listener:
+            self.continuous_listener.wake_min_rms = max(10.0, min(200.0, float(data["wake_min_rms"])))
         if "quiet_threshold" in data:
             val = max(5.0, min(500.0, float(data["quiet_threshold"])))
             self.vad_threshold = val
@@ -1686,6 +1693,8 @@ class VoiceController:
             self.continuous_listener.wake_delta_rms = max(0.0, min(100.0, float(data["wake_delta_rms"])))
         if "wake_music_reset_sec" in data and self.continuous_listener:
             self.continuous_listener.wake_music_reset_sec = max(1.0, min(30.0, float(data["wake_music_reset_sec"])))
+        if "wake_trigger_cooldown_sec" in data and self.continuous_listener:
+            self.continuous_listener.wake_trigger_cooldown_sec = max(0.0, min(10.0, float(data["wake_trigger_cooldown_sec"])))
         if "music_confirm_chunks" in data and self.continuous_listener and self.continuous_listener.wake_spotter:
             self.continuous_listener.wake_spotter.music_confirm_chunks = max(1, min(5, int(float(data["music_confirm_chunks"]))))
         if "music_min_conf" in data and self.continuous_listener and self.continuous_listener.wake_spotter:
@@ -1754,6 +1763,18 @@ class VoiceController:
         if ok:
             log.info("Released USB DAC from PulseAudio back to direct ALSA for Squeezelite")
         return ok
+
+    def _ensure_squeezelite_running(self) -> bool:
+        """Ensure Squeezelite audio service is running and PulseAudio DAC profile is released."""
+        try:
+            if self.youtube.active:
+                self.youtube.stop()
+            ok = release_usb_dac_pulseaudio()
+            log.info("Ensured Squeezelite running (release_usb_dac_pulseaudio result: %s)", ok)
+            return ok
+        except Exception as exc:
+            log.warning("Failed to ensure Squeezelite running: %s", exc)
+            return False
 
     def handle_switch_output(self, intent: VoiceIntent, dry_run: bool = False) -> ExecutionResult:
         """Handle switching current audio output between USB DAC and internal speaker."""

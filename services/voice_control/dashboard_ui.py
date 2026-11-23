@@ -163,6 +163,36 @@ DASHBOARD_HTML = r"""<!doctype html>
         <input id="musicWakeOnlyCheck" type="checkbox" checked onchange="saveCfg()" />
         <span>음악 재생 중 RMS 오발동 차단 (로컬 호출어 전용)</span>
       </label>
+      <div style="margin-bottom:6px">
+        <div style="display:flex; justify-content:space-between; font-size:13px">
+          <span>호출 최소 RMS</span><strong id="wmrVal">35</strong>
+        </div>
+        <input id="wmrSlider" type="range" min="10" max="100" step="1" value="35" oninput="wmrVal.textContent=this.value" onchange="saveCfg()" />
+      </div>
+      <div style="margin-bottom:6px">
+        <div style="display:flex; justify-content:space-between; font-size:13px">
+          <span>호출 SNR 비율 (음악 중)</span><strong id="wsrVal">1.05</strong>
+        </div>
+        <input id="wsrSlider" type="range" min="1.0" max="2.0" step="0.01" value="1.05" oninput="wsrVal.textContent=Number(this.value).toFixed(2)" onchange="saveCfg()" />
+      </div>
+      <div style="margin-bottom:6px">
+        <div style="display:flex; justify-content:space-between; font-size:13px">
+          <span>호출 간 쿨다운 (초)</span><strong id="wtcVal">3</strong>
+        </div>
+        <input id="wtcSlider" type="range" min="0" max="10" step="0.5" value="3" oninput="wtcVal.textContent=this.value" onchange="saveCfg()" />
+      </div>
+      <div style="margin-bottom:6px">
+        <div style="display:flex; justify-content:space-between; font-size:13px">
+          <span>음악 중 확인 청크 수</span><strong id="wmcVal">3</strong>
+        </div>
+        <input id="wmcSlider" type="range" min="1" max="5" step="1" value="3" oninput="wmcVal.textContent=this.value" onchange="saveCfg()" />
+      </div>
+      <div style="margin-bottom:6px">
+        <div style="display:flex; justify-content:space-between; font-size:13px">
+          <span>음악 중 최소 신뢰도</span><strong id="wmcConfVal">0.70</strong>
+        </div>
+        <input id="wmcConfSlider" type="range" min="0.5" max="0.95" step="0.05" value="0.70" oninput="wmcConfVal.textContent=Number(this.value).toFixed(2)" onchange="saveCfg()" />
+      </div>
     </div>
 
     <div class="card">
@@ -511,6 +541,11 @@ DASHBOARD_HTML = r"""<!doctype html>
     if (v.enable_chime !== undefined) { chimeCheck.checked = Boolean(v.enable_chime); }
     if (v.enable_tts !== undefined) { ttsCheck.checked = Boolean(v.enable_tts); }
     if (v.enable_command_ack !== undefined) { cmdAckCheck.checked = Boolean(v.enable_command_ack); }
+    if (v.wake_min_rms !== undefined) { wmrSlider.value = v.wake_min_rms; wmrVal.textContent = v.wake_min_rms; }
+    if (v.wake_snr_ratio !== undefined) { wsrSlider.value = v.wake_snr_ratio; wsrVal.textContent = Number(v.wake_snr_ratio).toFixed(2); }
+    if (v.wake_trigger_cooldown_sec !== undefined) { wtcSlider.value = v.wake_trigger_cooldown_sec; wtcVal.textContent = v.wake_trigger_cooldown_sec; }
+    if (v.music_confirm_chunks !== undefined) { wmcSlider.value = v.music_confirm_chunks; wmcVal.textContent = v.music_confirm_chunks; }
+    if (v.music_min_conf !== undefined) { wmcConfSlider.value = v.music_min_conf; wmcConfVal.textContent = Number(v.music_min_conf).toFixed(2); }
   }
 
   async function saveSpeakerCfg() {
@@ -557,13 +592,18 @@ DASHBOARD_HTML = r"""<!doctype html>
       duck_volume: Number(dSlider.value),
       duck_enabled: duckCheck.checked,
       require_wake_word: wakeCheck.checked,
-      rms_fallback_during_music: !musicWakeOnlyCheck.checked
+      rms_fallback_during_music: !musicWakeOnlyCheck.checked,
+      wake_min_rms: Number(wmrSlider.value),
+      wake_snr_ratio: Number(wsrSlider.value),
+      wake_trigger_cooldown_sec: Number(wtcSlider.value),
+      music_confirm_chunks: Number(wmcSlider.value),
+      music_min_conf: Number(wmcConfSlider.value),
     };
     const r = await fetch("/dashboard/config", {
       method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)
     });
     const j = await r.json();
-    if (j.ok) addLog("CONFIG", `quiet=${body.quiet_threshold} playing=${body.playing_threshold} mult=${body.multiplier} duck=${body.duck_enabled ? body.duck_volume + '%' : 'off'} wake=${body.require_wake_word}`, "b-ok");
+    if (j.ok) addLog("CONFIG", `quiet=${body.quiet_threshold} playing=${body.playing_threshold} mult=${body.multiplier} wake_min_rms=${body.wake_min_rms} wake_snr=${body.wake_snr_ratio} cooldown=${body.wake_trigger_cooldown_sec}s music_conf=${body.music_confirm_chunks}/${body.music_min_conf}`, "b-ok");
   }
 
   async function resetCfg() {

@@ -89,6 +89,37 @@ DEFAULT_DECOY_PHRASES: tuple[str, ...] = (
     "two",
     "three",
     "thank you",
+    # TV / movie / common speech decoys that sound like wake phrases
+    "little",
+    "little bit",
+    "poco a poco",
+    "un poco",
+    "poco loco",
+    "crazy",
+    "loco",
+    "hello there",
+    "hey there",
+    "hey man",
+    "hey dude",
+    "hey bro",
+    "hey girl",
+    "hey boy",
+    "hey baby",
+    "hey lady",
+    "hey baby",
+    "poco a poco",
+    "poca",
+    "poka",
+    "poco",
+    "poco mas",
+    "poco menos",
+    "poco tiempo",
+    "poco a poco",
+    "un poquito",
+    "poquito",
+    "poco a poco",
+    "poco a poco",
+    "poco a poco",
     "[unk]",
 )
 
@@ -171,7 +202,7 @@ class VoskWakeWordSpotter:
         self.music_confirm_chunks = (
             music_confirm_chunks
             if music_confirm_chunks is not None
-            else max(1, int(os.environ.get("VOICE_WAKE_CONFIRM_CHUNKS", "2")))
+            else max(1, int(os.environ.get("VOICE_WAKE_CONFIRM_CHUNKS", "3")))
         )
         self.quiet_confirm_chunks = (
             quiet_confirm_chunks
@@ -182,7 +213,7 @@ class VoskWakeWordSpotter:
             music_min_confidence
             if music_min_confidence is not None
             else float(
-                os.environ.get("VOICE_WAKE_MUSIC_MIN_CONF", os.environ.get("VOICE_WAKE_MIN_CONF", "0.55"))
+                os.environ.get("VOICE_WAKE_MUSIC_MIN_CONF", os.environ.get("VOICE_WAKE_MIN_CONF", "0.70"))
             )
         )
         self.quiet_min_confidence = (
@@ -199,6 +230,12 @@ class VoskWakeWordSpotter:
         self._partial_streak: int = 0
         self._has_active_partial: bool = False
         self.last_event: dict | None = None
+        # Anti-spam: minimum seconds between wake triggers to prevent TV/music
+        # from rapidly re-triggering on the same audio segment.
+        self.min_trigger_interval_sec = float(
+            os.environ.get("VOICE_WAKE_MIN_TRIGGER_INTERVAL_SEC", "3.0")
+        )
+        self._last_trigger_time: float = 0.0
 
         if os.environ.get("VOICE_WAKE_ENGINE", "vosk").strip().lower() in ("0", "off", "none", "rms"):
             log.info("Local Vosk wake-word engine disabled via VOICE_WAKE_ENGINE")
@@ -378,6 +415,19 @@ class VoskWakeWordSpotter:
                     }
                     log.debug("Rejected low-confidence wake hit '%s' (conf=%s music=%s)", hit, avg_conf, music_playing)
                     return None
+                # Anti-spam: prevent rapid re-triggering from TV/music audio
+                if now - self._last_trigger_time < self.min_trigger_interval_sec:
+                    self.last_event = {
+                        "status": "rejected_spam",
+                        "phrase": hit,
+                        "is_final": True,
+                        "confidence": avg_conf,
+                        "min_word_conf": min_w_conf,
+                        "text": text,
+                    }
+                    log.debug("Rejected wake spam hit '%s' (too soon after last trigger)", hit)
+                    return None
+                self._last_trigger_time = now
                 self.last_event = {
                     "status": "triggered",
                     "phrase": hit,
@@ -397,6 +447,10 @@ class VoskWakeWordSpotter:
             return None
 
         if confirm_needed <= 1:
+            # Anti-spam: prevent rapid re-triggering from TV/music audio
+            if now - self._last_trigger_time < self.min_trigger_interval_sec:
+                return None
+            self._last_trigger_time = now
             self.last_event = {
                 "status": "triggered",
                 "phrase": hit,
@@ -414,6 +468,10 @@ class VoskWakeWordSpotter:
             self._partial_streak = 1
 
         if self._partial_streak >= confirm_needed:
+            # Anti-spam: prevent rapid re-triggering from TV/music audio
+            if now - self._last_trigger_time < self.min_trigger_interval_sec:
+                return None
+            self._last_trigger_time = now
             self.last_event = {
                 "status": "triggered",
                 "phrase": hit,

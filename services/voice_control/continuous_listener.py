@@ -86,14 +86,20 @@ class ContinuousVoiceListener:
         self.use_bandpass = _env_bool("VOICE_USE_BANDPASS", True)
         self.use_aec3 = _env_bool("VOICE_USE_AEC3", True)
         self.rms_fallback_during_music = _env_bool("VOICE_RMS_FALLBACK_DURING_MUSIC", False)
-        self.wake_min_rms = float(os.environ.get("VOICE_WAKE_MIN_RMS", "25.0"))
-        self.wake_snr_ratio = float(os.environ.get("VOICE_WAKE_SNR_RATIO", "1.01"))
+        self.wake_min_rms = float(os.environ.get("VOICE_WAKE_MIN_RMS", "35.0"))
+        self.wake_snr_ratio = float(os.environ.get("VOICE_WAKE_SNR_RATIO", "1.05"))
         self.wake_delta_rms = float(os.environ.get("VOICE_WAKE_DELTA_RMS", "8.0"))
         # Force Vosk recognizer reset every N seconds during music playback so
         # continuous music audio does not corrupt the recognizer state and
         # prevent wake-word matches.
         self.wake_music_reset_sec = float(os.environ.get("VOICE_WAKE_MUSIC_RESET_SEC", "3.0"))
         self._wake_music_reset_at: float | None = None
+        # Anti-spam cooldown at listener level: ignore wake triggers that happen
+        # too soon after a previous one (TV/music can cause rapid re-triggers).
+        self.wake_trigger_cooldown_sec = float(
+            os.environ.get("VOICE_WAKE_TRIGGER_COOLDOWN_SEC", "3.0")
+        )
+        self._last_wake_trigger_time: float = 0.0
 
         self.bandpass_low_hz = float(os.environ.get("VOICE_BANDPASS_LOW_HZ", "150.0"))
         self.bandpass_high_hz = float(os.environ.get("VOICE_BANDPASS_HIGH_HZ", "6000.0"))
@@ -273,6 +279,7 @@ class ContinuousVoiceListener:
             "wake_delta_rms": round(self.wake_delta_rms, 1),
             "wake_min_rms": round(self.wake_min_rms, 1),
             "wake_music_reset_sec": self.wake_music_reset_sec,
+            "wake_trigger_cooldown_sec": self.wake_trigger_cooldown_sec,
             "music_confirm_chunks": self.wake_spotter.music_confirm_chunks if self.wake_spotter else 2,
             "music_min_conf": round(self.wake_spotter.music_min_confidence, 2) if self.wake_spotter else 0.65,
             "last_wake_phrase": self.last_wake_phrase,
@@ -531,7 +538,17 @@ class ContinuousVoiceListener:
                                 self.telemetry.record("wake_rejected_conf", clip_path=clip_path, **meta)
 
                         if hit and self.on_wake_utterance is not None:
-                            if not self.passes_wake_energy_gate(recent_peak):
+                            # Anti-spam cooldown: ignore wake triggers too soon after
+                            # a previous one (TV/music can cause rapid re-triggers).
+                            if now - self._last_wake_trigger_time < self.wake_trigger_cooldown_sec:
+                                self.false_wake_rejected_count += 1
+                                log.info(
+                                    "Rejected wake spam cooldown '%s' (%.1fs since last trigger)",
+                                    hit,
+                                    now - self._last_wake_trigger_time,
+                                )
+                                hit = None
+                            elif not self.passes_wake_energy_gate(recent_peak):
                                 self.false_wake_rejected_count += 1
                                 log.info(
                                     "Rejected weak wake false-positive '%s' (peak=%.1f wake_amb=%.1f music=%s)",
@@ -565,6 +582,7 @@ class ContinuousVoiceListener:
                             )
                             self.last_wake_phrase = hit
                             self.last_speech_at = time.time()
+                            self._last_wake_trigger_time = now
                             wake_phrase = hit
                             wake_mode = True
                             recording = True
