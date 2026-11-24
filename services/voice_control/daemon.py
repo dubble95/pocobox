@@ -436,6 +436,12 @@ class VoiceController:
             "aec3_delay_ms": (self.continuous_listener.aec3.delay_ms if (self.continuous_listener and self.continuous_listener.aec3) else int(os.environ.get("VOICE_AEC3_DELAY_MS", "150"))),
         }
 
+    @property
+    def rolling_recorder(self):
+        if self.continuous_listener:
+            return self.continuous_listener.rolling_recorder
+        return None
+
     def _load_voice_prefs(self) -> None:
         if not self._prefs_path.exists():
             return
@@ -1678,6 +1684,58 @@ class VoiceController:
             self.continuous_listener.ambient_rms = 10.0
         return {"ok": True, "voice": self.display_state()["voice"]}
 
+    def replay_audio_history(self, seconds: float = 30.0, channel: str = "clean") -> dict[str, Any]:
+        """Replay recent audio through VoskWakeWordSpotter and SenseVoice STT for debugging."""
+        rec = self.rolling_recorder
+        if rec is None:
+            return {"ok": False, "error": "Rolling audio recorder not available"}
+        wav_bytes = rec.get_recent_wav(seconds=seconds, channel=channel)
+        if not wav_bytes or len(wav_bytes) <= 44:
+            return {"ok": False, "error": "No recent audio captured in buffer"}
+
+        wake_hits: list[dict[str, Any]] = []
+        if self.continuous_listener and self.continuous_listener.wake_spotter:
+            from .wakeword import VoskWakeWordSpotter
+
+            spotter = VoskWakeWordSpotter()
+            pcm = wav_bytes[44:]
+            for offset in range(0, len(pcm), 3200):
+                chunk = pcm[offset : offset + 3200]
+                if len(chunk) < 3200:
+                    continue
+                hit = spotter.accept_pcm16k(chunk, is_silent=False, music_playing=self._is_music_playing())
+                if hit:
+                    wake_hits.append(
+                        {
+                            "offset_sec": round(offset / 32000.0, 2),
+                            "hit": hit,
+                            "event": spotter.last_event,
+                        }
+                    )
+
+        transcript = ""
+        stt_ms = 0.0
+        intent = None
+        if self.interpreter:
+            try:
+                t0 = time.monotonic()
+                intent = self.interpreter.interpret_audio(wav_bytes)
+                stt_ms = round((time.monotonic() - t0) * 1000.0, 1)
+                transcript = intent.raw_text
+            except Exception as exc:
+                transcript = f"STT error: {exc}"
+
+        return {
+            "ok": True,
+            "duration_sec": seconds,
+            "channel": channel,
+            "wake_hits": wake_hits,
+            "transcript": transcript,
+            "intent_action": intent.action.value if intent else None,
+            "stt_ms": stt_ms,
+            "size_bytes": len(wav_bytes),
+        }
+
     def display_control(self, action: str) -> dict[str, Any]:
         log.info("Display control action='%s'", action)
         if self.youtube.active:
@@ -2485,6 +2543,38 @@ def make_handler(controller: VoiceController) -> type[BaseHTTPRequestHandler]:
                     return
                 self._send_bytes(200, art[0], art[1])
                 return
+
+            if path == "/debug/audio_history":
+                rec = controller.rolling_recorder
+                if rec is None:
+                    self._send_json(200, {"ok": False, "message": "Rolling audio recorder not available."})
+                else:
+                    self._send_json(200, rec.status_dict())
+                return
+
+            if path == "/debug/audio_history/recent.wav":
+                rec = controller.rolling_recorder
+                if rec is None:
+                    self._send_json(404, {"ok": False, "error": "Rolling audio recorder not available."})
+                    return
+                import urllib.parse
+
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                try:
+                    secs = float(qs.get("seconds", ["60"])[0])
+                except ValueError:
+                    secs = 60.0
+                channel = qs.get("channel", ["both"])[0]
+                wav_data = rec.get_recent_wav(seconds=secs, channel=channel)
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/wav")
+                self.send_header("Content-Length", str(len(wav_data)))
+                self.send_header("Content-Disposition", 'inline; filename="pocobox_recent_audio.wav"')
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(wav_data)
+                return
+
             self._send_json(404, {"ok": False, "error": "Not found"})
 
         def do_POST(self) -> None:  # noqa: N802
@@ -2721,6 +2811,17 @@ def make_handler(controller: VoiceController) -> type[BaseHTTPRequestHandler]:
                     data = {}
                 res = controller.stop_quiz(dry_run=bool(data.get("dry_run", False)))
                 self._send_json(200, res.to_dict())
+                return
+
+            if path == "/debug/audio_history/replay":
+                try:
+                    data = json.loads(body.decode("utf-8")) if body else {}
+                except json.JSONDecodeError:
+                    data = {}
+                secs = float(data.get("seconds", 30.0))
+                channel = str(data.get("channel", "clean"))
+                res = controller.replay_audio_history(seconds=secs, channel=channel)
+                self._send_json(200 if res.get("ok") else 400, res)
                 return
 
             self._send_json(404, {"ok": False, "error": "Not found"})

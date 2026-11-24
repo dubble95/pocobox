@@ -26,6 +26,15 @@ def _request(url: str, data: bytes | None = None, content_type: str = "applicati
             return exc.code, {"ok": False, "error": body}
 
 
+def _download_binary(url: str, timeout: float = 30.0) -> tuple[int, bytes]:
+    req = urllib.request.Request(url)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read()
+
+
 def main() -> int:
     default_port = os.environ.get("VOICE_HTTP_PORT", "8765")
     parser = argparse.ArgumentParser(description="PocoBox Voice Control CLI")
@@ -71,6 +80,17 @@ def main() -> int:
     l_sub.add_parser("list", help="List confirmed learned corrections")
     l_forget = l_sub.add_parser("forget", help="Remove a learned correction rule")
     l_forget.add_argument("source", help="Source misrecognized phrase to remove")
+
+    p_hist = sub.add_parser("history", help="Inspect and replay 10-minute tmpfs rolling audio history")
+    h_sub = p_hist.add_subparsers(dest="history_cmd", required=True)
+    h_sub.add_parser("status", help="Show rolling recorder status and segments in tmpfs")
+    h_save = h_sub.add_parser("save", help="Save recent audio history as WAV file")
+    h_save.add_argument("path", help="Output file path (e.g. recent.wav)")
+    h_save.add_argument("--seconds", type=int, default=60, help="Seconds of history (1-600, default 60)")
+    h_save.add_argument("--channel", choices=["both", "raw", "clean"], default="both", help="Channel: both (stereo), raw (mono), clean (mono AEC3)")
+    h_replay = h_sub.add_parser("replay", help="Replay recent audio through Vosk and STT for debugging")
+    h_replay.add_argument("--seconds", type=int, default=30, help="Seconds of history to replay (1-300, default 30)")
+    h_replay.add_argument("--channel", choices=["clean", "raw"], default="clean", help="Channel to replay: clean (default) or raw")
 
     args = parser.parse_args()
     base = args.url.rstrip("/")
@@ -133,6 +153,32 @@ def main() -> int:
             code, res = _request(f"{base}/learning/forget", data=payload)
         else:
             parser.error(f"Unknown learning command: {args.learning_cmd}")
+    elif args.cmd == "history":
+        if args.history_cmd == "status":
+            code, res = _request(f"{base}/debug/audio_history")
+        elif args.history_cmd == "save":
+            code, data = _download_binary(f"{base}/debug/audio_history/recent.wav?seconds={args.seconds}&channel={args.channel}")
+            if code == 200:
+                out_p = Path(args.path)
+                out_p.parent.mkdir(parents=True, exist_ok=True)
+                out_p.write_bytes(data)
+                res = {
+                    "ok": True,
+                    "path": str(out_p.resolve()),
+                    "bytes": len(data),
+                    "seconds": args.seconds,
+                    "channel": args.channel,
+                }
+            else:
+                try:
+                    res = json.loads(data.decode("utf-8"))
+                except Exception:
+                    res = {"ok": False, "status": code, "error": data.decode("utf-8", errors="replace")}
+        elif args.history_cmd == "replay":
+            payload = json.dumps({"seconds": args.seconds, "channel": args.channel}).encode("utf-8")
+            code, res = _request(f"{base}/debug/audio_history/replay", data=payload)
+        else:
+            parser.error(f"Unknown history command: {args.history_cmd}")
     else:
         parser.error(f"Unknown command: {args.cmd}")
 

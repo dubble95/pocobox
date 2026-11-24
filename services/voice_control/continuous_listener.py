@@ -21,6 +21,7 @@ from .audio_dsp import (
     extract_mono_channel,
     measure_pcm_peak_and_clip,
 )
+from .rolling_recorder import RollingAudioRecorder
 from .telemetry import VoiceTelemetryLogger
 from .wakeword import VoskWakeWordSpotter
 
@@ -114,6 +115,9 @@ class ContinuousVoiceListener:
         self.aec3 = WebRTCAEC3Processor(sample_rate=SAMPLE_RATE) if self.use_aec3 else None
         self.vis_client = SqueezeliteVisClient(target_rate=SAMPLE_RATE) if self.use_aec3 else None
         self.wake_spotter = VoskWakeWordSpotter(sample_rate=SAMPLE_RATE)
+        self.rolling_recorder = (
+            RollingAudioRecorder() if _env_bool("VOICE_ROLLING_RECORDER", True) else None
+        )
 
         self.state: str = "stopped"  # stopped | waiting | wake | recording | processing | paused
         self.ambient_rms: float = 20.0
@@ -180,6 +184,8 @@ class ContinuousVoiceListener:
     def stop(self) -> None:
         self._stop_event.set()
         self._set_state("stopped")
+        if self.rolling_recorder is not None:
+            self.rolling_recorder.close()
         if self.vis_client is not None:
             self.vis_client.close()
         if self.aec3 is not None:
@@ -279,6 +285,7 @@ class ContinuousVoiceListener:
             "music_min_conf": round(self.wake_spotter.music_min_confidence, 2) if self.wake_spotter else 0.65,
             "last_wake_phrase": self.last_wake_phrase,
             "last_speech_at": self.last_speech_at,
+            "rolling_recorder": self.rolling_recorder.status_dict() if self.rolling_recorder else None,
         }
 
     def _refresh_music_state(self, now: float) -> None:
@@ -320,18 +327,19 @@ class ContinuousVoiceListener:
             buf.extend(part)
         return bytes(buf)
 
-    def _read_clean_16k_chunk(self, proc: subprocess.Popen) -> tuple[bytes, bytes]:
-        """Read 100ms of audio in 20ms sub-chunks and return (wake_pcm16, stt_pcm16)."""
+    def _read_clean_16k_chunk(self, proc: subprocess.Popen) -> tuple[bytes, bytes, bytes]:
+        """Read 100ms of audio in 20ms sub-chunks and return (raw_pcm16, wake_pcm16, stt_pcm16)."""
         assert proc.stdout is not None
         if not self._use_48k_stereo:
             raw = self._read_exact(proc.stdout, CHUNK_BYTES)
             if not raw:
-                return b"", b""
+                return b"", b"", b""
             peak, clip_ratio = measure_pcm_peak_and_clip(raw)
             self._update_peak_stats(peak, clip_ratio)
             out = self.wake_bandpass.process_pcm(raw) if self.wake_bandpass is not None else raw
-            return out, out
+            return raw, out, out
 
+        raw_parts: list[bytes] = []
         wake_parts: list[bytes] = []
         stt_parts: list[bytes] = []
         max_peak = 0
@@ -340,7 +348,7 @@ class ContinuousVoiceListener:
         for _ in range(SUBCHUNKS_PER_CHUNK):
             raw_sub = self._read_exact(proc.stdout, SUBCHUNK_48K_STEREO_BYTES)
             if not raw_sub:
-                return b"", b""
+                return b"", b"", b""
 
             mono48 = extract_mono_channel(raw_sub, self.mic_channel)
             peak, clip_ratio = measure_pcm_peak_and_clip(mono48)
@@ -351,6 +359,7 @@ class ContinuousVoiceListener:
 
             # Anti-aliased 48k -> 16k decimation BEFORE bandpass & AEC3
             clean16 = self.decimator_wake.process_48k_to_16k(mono48)
+            raw_parts.append(clean16)
 
             # Decoupled WebRTC AEC3 using Squeezelite VISEXPORT shm reference (zero DAC impact)
             ref_stereo = (
@@ -381,7 +390,7 @@ class ContinuousVoiceListener:
             stt_parts.append(stt_sub)
 
         self._update_peak_stats(max_peak, max_clip)
-        return b"".join(wake_parts), b"".join(stt_parts)
+        return b"".join(raw_parts), b"".join(wake_parts), b"".join(stt_parts)
 
     def _update_peak_stats(self, peak: int, clip_ratio: float) -> None:
         self.raw_peak = peak
@@ -454,9 +463,17 @@ class ContinuousVoiceListener:
 
             try:
                 while not self._stop_event.is_set():
-                    wake_data, stt_data = self._read_clean_16k_chunk(proc)
+                    raw_data, wake_data, stt_data = self._read_clean_16k_chunk(proc)
                     if not wake_data:
                         break
+
+                    if self.rolling_recorder is not None and self.rolling_recorder.enabled:
+                        self.rolling_recorder.feed(
+                            raw_data,
+                            wake_data,
+                            is_music_playing=self.music_playing,
+                            aec3_db=self.aec3.echo_reduction_db if self.aec3 else 0.0,
+                        )
 
                     if self.is_paused_fn():
                         self._set_state("paused")
