@@ -36,16 +36,16 @@ SUBCHUNKS_PER_CHUNK = max(1, CHUNK_MS // SUBCHUNK_MS)  # 5 x 20ms = 100ms
 SUBCHUNK_48K_STEREO_BYTES = (RNNOISE_SAMPLE_RATE * SUBCHUNK_MS // 1000) * 4  # 3840 bytes
 SUBCHUNK_16K_FRAMES = SAMPLE_RATE * SUBCHUNK_MS // 1000  # 320 frames
 
-# Flexible Korean phonetic pattern for '포코야' / 'poco ya' variants
-# Syllable 1 (optional): [포코뽀보모뭐카파바호도두토버부덥덕복폭법밥톱독돌동]
-# Syllable 2 (required): [코꼬고구꾸쿠]
-# Syllable 3 (required): [야요양향아유]
+# Clean Korean phonetic pattern for '포코야' / 'poco ya'
+# Syllable 1 (optional): [포코뽀보]
+# Syllable 2 (required): [코고]
+# Syllable 3 (required): [야요아향양]
 _KOREAN_POCO_REGEX = re.compile(
     r"(?:^|[\s.,!?~:;\-_])"
     r"(?:"
-    r"(?:포|코|뽀|보|모|뭐|카|파|바|호|도|두|토|버|부|덥|덕|복|폭|법|밥|톱|독|돌|동)?"
-    r"[코꼬고구꾸쿠]"
-    r"[야요양향아유]"
+    r"(?:포|코|뽀|보)?"
+    r"[코고]"
+    r"[야요아향양]"
     r"|"
     r"(?:헤이|오케이|안녕)\s*(?:포코|코코|뽀코|보코)"
     r"|"
@@ -267,7 +267,8 @@ class ContinuousVoiceListener:
         self.source = os.environ.get("VOICE_PULSE_SOURCE") or None
 
         # DSP, decoupled AEC3 & local wake-word configuration
-        self.mic_channel = os.environ.get("VOICE_MIC_CHANNEL", "right").strip().lower()
+        # Default to primary bottom talk microphone ('left', DEC0 104) with +16dB voice pickup
+        self.mic_channel = os.environ.get("VOICE_MIC_CHANNEL", "left").strip().lower()
         self.use_rnnoise = _env_bool("VOICE_USE_RNNOISE", True)
         self.rnnoise_on_wake = _env_bool("VOICE_RNNOISE_ON_WAKE", False)
         self.use_bandpass = _env_bool("VOICE_USE_BANDPASS", True)
@@ -804,9 +805,10 @@ class ContinuousVoiceListener:
                                     self._silence_streak += 1
 
                             # An utterance burst typically lasts 2 to 12 chunks (200ms - 1.2s).
-                            # When speech pauses for 2 chunks (200ms) or reaches max streak (12 chunks):
+                            # Slicing with generous leading preroll (+10 chunks = 1.0s) ensures the
+                            # initial plosive burst of '포' [pʰ] is never clipped at the boundary.
                             if self._speech_streak >= 2 and (self._silence_streak >= 2 or self._speech_streak >= 12):
-                                slice_len = min(len(self._stt_ring), self._speech_streak + 6)
+                                slice_len = min(len(self._stt_ring), self._speech_streak + 10)
                                 raw_slice = b"".join(list(self._stt_ring)[-slice_len:])
                                 wake_slice = b"".join(list(self._wake_clip_ring)[-slice_len:])
                                 self.local_wake_verifier.submit(raw_slice, wake_slice, self._candidate_peak, self.wake_ambient_rms)
