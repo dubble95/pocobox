@@ -35,7 +35,8 @@ AVAILABLE_VOICES: tuple[dict[str, str], ...] = (
     {"id": "en-US-GuyNeural", "label": "Guy (English Male)", "engine": "edge"},
     {"id": "google", "label": "Google 기본 TTS (한국어 여성)", "engine": "google"},
     {"id": "kokoro-en", "label": "Kokoro (로컬 고음질 영어 · 오프라인)", "engine": "kokoro"},
-    {"id": "local-ko", "label": "Local VITS/Supertonic (로컬 한국어 · 오프라인)", "engine": "local"},
+    {"id": "supertonic-ko", "label": "Supertonic-3 (로컬 고음질 한국어 · 오프라인)", "engine": "supertonic"},
+    {"id": "local-ko", "label": "Local TTS (로컬 한국어 · 오프라인)", "engine": "local"},
 )
 
 VALID_VOICE_IDS: frozenset[str] = frozenset(v["id"] for v in AVAILABLE_VOICES)
@@ -546,7 +547,7 @@ def synthesize_pcm(
                 fallback_voice = "en-US-JennyNeural" if edge_tts_available() else "google"
             return synthesize_pcm(text, lang, fallback_voice, rate_pct, pitch_hz)
 
-    if voice == "local-ko" or voice.startswith("local-"):
+    if voice in ("local-ko", "supertonic-ko") or voice.startswith("local-") or voice.startswith("supertonic"):
         try:
             wav_bytes = fetch_local_tts_wav(text, lang="ko")
             if wav_bytes:
@@ -556,7 +557,7 @@ def synthesize_pcm(
         except Exception as exc:
             log.warning("Local Korean TTS failed for %r, falling back to edge/google: %s", text[:30], exc)
             fallback_voice = default_tts_voice()
-            if fallback_voice == "local-ko":
+            if fallback_voice in ("local-ko", "supertonic-ko"):
                 fallback_voice = "ko-KR-SunHiNeural" if edge_tts_available() else "google"
             return synthesize_pcm(text, lang, fallback_voice, rate_pct, pitch_hz)
 

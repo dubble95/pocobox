@@ -186,13 +186,45 @@ class SherpaTtsEngine:
         if not lexicon_file.is_file():
             lexicon_file = self.model_dir / "lexicon.txt"
 
-        if not (model_file.is_file() and tokens_file.is_file()):
-            log.info("TTS model/tokens not found in %s (TTS disabled)", self.model_dir)
-            return
-
         try:
-            if voices_file.is_file():
+            if (self.model_dir / "tts.json").is_file() and (self.model_dir / "unicode_indexer.bin").is_file():
+                # Supertonic model architecture (multilingual including Korean)
+                dur_file = self.model_dir / "duration_predictor.int8.onnx"
+                if not dur_file.is_file():
+                    dur_file = self.model_dir / "duration_predictor.onnx"
+                enc_file = self.model_dir / "text_encoder.int8.onnx"
+                if not enc_file.is_file():
+                    enc_file = self.model_dir / "text_encoder.onnx"
+                vec_file = self.model_dir / "vector_estimator.int8.onnx"
+                if not vec_file.is_file():
+                    vec_file = self.model_dir / "vector_estimator.onnx"
+                voc_file = self.model_dir / "vocoder.int8.onnx"
+                if not voc_file.is_file():
+                    voc_file = self.model_dir / "vocoder.onnx"
+                voice_file = self.model_dir / "voice.bin"
+
+                st_cfg = sherpa_onnx.OfflineTtsSupertonicModelConfig(
+                    duration_predictor=str(dur_file),
+                    text_encoder=str(enc_file),
+                    vector_estimator=str(vec_file),
+                    vocoder=str(voc_file),
+                    tts_json=str(self.model_dir / "tts.json"),
+                    unicode_indexer=str(self.model_dir / "unicode_indexer.bin"),
+                    voice_style=str(voice_file) if voice_file.is_file() else "",
+                )
+                cfg = sherpa_onnx.OfflineTtsConfig(
+                    model=sherpa_onnx.OfflineTtsModelConfig(
+                        supertonic=st_cfg,
+                        num_threads=self.num_threads,
+                    )
+                )
+                self.engine_type = engine_name or "supertonic"
+                model_desc = "supertonic-int8"
+            elif voices_file.is_file():
                 # Kokoro model architecture
+                if not (model_file.is_file() and tokens_file.is_file()):
+                    log.info("TTS model/tokens not found in %s (TTS disabled)", self.model_dir)
+                    return
                 cfg = sherpa_onnx.OfflineTtsConfig(
                     model=sherpa_onnx.OfflineTtsModelConfig(
                         kokoro=sherpa_onnx.OfflineTtsKokoroModelConfig(
@@ -206,8 +238,12 @@ class SherpaTtsEngine:
                     )
                 )
                 self.engine_type = engine_name or "kokoro"
+                model_desc = model_file.name
             else:
                 # VITS / Piper-compatible architecture
+                if not (model_file.is_file() and tokens_file.is_file()):
+                    log.info("TTS model/tokens not found in %s (TTS disabled)", self.model_dir)
+                    return
                 vits_kwargs: dict[str, Any] = {
                     "model": str(model_file),
                     "tokens": str(tokens_file),
@@ -226,6 +262,7 @@ class SherpaTtsEngine:
                     )
                 )
                 self.engine_type = engine_name or "vits"
+                model_desc = model_file.name
 
             if not cfg.validate():
                 log.warning("TTS config validation failed for %s", self.model_dir)
@@ -238,14 +275,21 @@ class SherpaTtsEngine:
             log.info(
                 "Loaded %s TTS (%s, threads=%d) in %.2fs",
                 self.engine_type,
-                model_file.name,
+                model_desc,
                 self.num_threads,
                 self.load_sec,
             )
         except Exception as exc:
             log.warning("Failed to initialize TTS from %s: %s", self.model_dir, exc)
 
-    def generate_wav(self, text: str, *, sid: int = 0, speed: float = 1.0) -> bytes:
+    def generate_wav(
+        self,
+        text: str,
+        *,
+        sid: int = 0,
+        speed: float = 1.0,
+        target_sample_rate: int = 24000,
+    ) -> bytes:
         if not self.available or self._tts is None:
             raise RuntimeError(f"{self.engine_type} TTS engine is not available")
         cleaned = text.strip()
@@ -254,12 +298,21 @@ class SherpaTtsEngine:
         with self._lock:
             audio = self._tts.generate(cleaned, sid=sid, speed=speed)
         samples = np.array(audio.samples, dtype=np.float32)
+        sr = int(getattr(audio, "sample_rate", 24000))
+        if target_sample_rate > 0 and sr != target_sample_rate and len(samples) > 0:
+            target_len = int(round(len(samples) * float(target_sample_rate) / float(sr)))
+            samples = np.interp(
+                np.linspace(0, len(samples) - 1, target_len),
+                np.arange(len(samples)),
+                samples,
+            ).astype(np.float32)
+            sr = target_sample_rate
         int16_samples = (np.clip(samples, -1.0, 1.0) * 32767.0).astype(np.int16)
         buf = io.BytesIO()
         with wave.open(buf, "wb") as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)
-            wf.setframerate(audio.sample_rate)
+            wf.setframerate(sr)
             wf.writeframes(int16_samples.tobytes())
         return buf.getvalue()
 
@@ -382,7 +435,10 @@ def main() -> None:
     use_itn = os.environ.get("STT_USE_ITN", "1").strip().lower() not in ("0", "false", "no")
     threads = int(os.environ.get("STT_THREADS", "4"))
     tts_model_dir = os.environ.get("TTS_MODEL_DIR", "/models/kokoro-int8-en-v0_19")
-    tts_ko_model_dir = os.environ.get("TTS_KO_MODEL_DIR", "/models/vits-mimic3-ko_KO-kss_low")
+    tts_ko_model_dir = os.environ.get(
+        "TTS_KO_MODEL_DIR",
+        "/models/sherpa-onnx-supertonic-3-tts-int8-2026-05-11",
+    )
 
     engine = SenseVoiceEngine(
         model_dir,
@@ -392,14 +448,12 @@ def main() -> None:
     )
     tts_engine = SherpaTtsEngine(tts_model_dir, num_threads=threads, engine_name="kokoro-int8-en")
     tts_ko_engine = (
-        SherpaTtsEngine(tts_ko_model_dir, num_threads=threads, engine_name="vits-korean")
+        SherpaTtsEngine(tts_ko_model_dir, num_threads=threads, engine_name="supertonic-ko")
         if Path(tts_ko_model_dir).is_dir()
         else None
     )
     server = ThreadingHTTPServer((host, port), build_handler(engine, tts_engine, tts_ko_engine))
     log.info("PocoBox SenseVoice local STT + Sherpa TTS server listening on http://%s:%d", host, port)
-    server.serve_forever()
-    log.info("PocoBox SenseVoice local STT + Kokoro TTS server listening on http://%s:%d", host, port)
     server.serve_forever()
 
 
