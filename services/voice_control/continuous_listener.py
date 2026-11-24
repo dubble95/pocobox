@@ -138,7 +138,7 @@ class LocalWakeVerifier:
                     headers={"Content-Type": "audio/wav"},
                 )
                 t0 = time.monotonic()
-                with urllib.request.urlopen(req, timeout=1.8) as resp:
+                with urllib.request.urlopen(req, timeout=2.5) as resp:
                     res = json.loads(resp.read().decode("utf-8"))
                 stt_ms = (time.monotonic() - t0) * 1000.0
                 text = str(res.get("text", "")).strip()
@@ -677,7 +677,7 @@ class ContinuousVoiceListener:
                         if self._pending_stt_wake is not None and self.on_wake_utterance is not None:
                             w_info = self._pending_stt_wake
                             self._pending_stt_wake = None
-                            if (now - w_info["time"]) < 1.8:
+                            if (now - w_info["time"]) < 2.5:
                                 hit = w_info["phrase"]
                                 transcript = w_info["transcript"]
                                 recent_peak = w_info.get("peak", rms)
