@@ -37,15 +37,15 @@ SUBCHUNK_48K_STEREO_BYTES = (RNNOISE_SAMPLE_RATE * SUBCHUNK_MS // 1000) * 4  # 3
 SUBCHUNK_16K_FRAMES = SAMPLE_RATE * SUBCHUNK_MS // 1000  # 320 frames
 
 # Flexible Korean phonetic pattern for '포코야' / 'poco ya' variants
-# Syllable 1 (optional): [포코뽀보모뭐카파바호]
+# Syllable 1 (optional): [포코뽀보모뭐카파바호도두토버부덥덕복폭법밥톱독돌동]
 # Syllable 2 (required): [코꼬고구꾸쿠]
-# Syllable 3 (required): [야요양향아]
+# Syllable 3 (required): [야요양향아유]
 _KOREAN_POCO_REGEX = re.compile(
     r"(?:^|[\s.,!?~:;\-_])"
     r"(?:"
-    r"(?:포|코|뽀|보|모|뭐|카|파|바|호)?"
+    r"(?:포|코|뽀|보|모|뭐|카|파|바|호|도|두|토|버|부|덥|덕|복|폭|법|밥|톱|독|돌|동)?"
     r"[코꼬고구꾸쿠]"
-    r"[야요양향아]"
+    r"[야요양향아유]"
     r"|"
     r"(?:헤이|오케이|안녕)\s*(?:포코|코코|뽀코|보코)"
     r"|"
@@ -97,7 +97,17 @@ class LocalWakeVerifier:
     def match_wake_phrase(cls, text: str) -> str | None:
         if not text:
             return None
-        stripped = re.sub(r"^(?:그|어|아|응|음|네)\s+", "", text.strip())
+        # Normalize multilingual SenseVoice character leaks (e.g. Chinese modal particle 呀 -> 야, 啊 -> 아)
+        norm = (
+            text.replace("呀", "야")
+            .replace("啊", "아")
+            .replace("風", "향")
+            .replace("风", "향")
+            .replace("噢", "오")
+            .replace("哦", "오")
+            .replace("耶", "야")
+        )
+        stripped = re.sub(r"^(?:그|어|아|응|음|네)[,.\s]+\s*", "", norm.strip())
         if _KOREAN_POCO_REGEX.search(stripped):
             return "poco ya"
         return None

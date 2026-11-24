@@ -30,6 +30,12 @@ WAKE_PREFIXES: tuple[str, ...] = (
     "바꾸요",
     "바꼬요",
     "파고야",
+    "덥구야",
+    "덥구呀",
+    "덥고요",
+    "덕구야",
+    "도코야",
+    "복구야",
     "포코",
     "포고",
     "고야",
@@ -58,6 +64,12 @@ ASR_NORMALIZATIONS: tuple[tuple[str, str], ...] = (
     ("바꾸요", "포코야"),
     ("바꼬요", "포코야"),
     ("파고야", "포코야"),
+    ("덥구야", "포코야"),
+    ("덥구呀", "포코야"),
+    ("덥고요", "포코야"),
+    ("덕구야", "포코야"),
+    ("도코야", "포코야"),
+    ("복구야", "포코야"),
     ("아 이유", "아이유"),
     ("아이 유", "아이유"),
     ("밤 편지", "밤편지"),
@@ -693,18 +705,34 @@ def parse_korean_number(text: str) -> int | None:
 
 def normalize_asr_text(text: str) -> str:
     cleaned = re.sub(r"\s+", " ", text.strip())
+    # Normalize multilingual SenseVoice character leaks (e.g. 呀 -> 야, 啊 -> 아)
+    cleaned = (
+        cleaned.replace("呀", "야")
+        .replace("啊", "아")
+        .replace("風", "향")
+        .replace("风", "향")
+        .replace("噢", "오")
+        .replace("哦", "오")
+        .replace("耶", "야")
+    )
     for src, dst in ASR_NORMALIZATIONS:
         cleaned = re.sub(re.escape(src), dst, cleaned, flags=re.IGNORECASE)
     return cleaned
 
 
 def strip_wake_prefix(text: str) -> tuple[str, bool]:
-    lowered = text.strip().lower()
+    clean = (
+        text.replace("呀", "야")
+        .replace("啊", "아")
+        .replace("風", "향")
+        .replace("风", "향")
+    )
+    lowered = clean.strip().lower()
     for prefix in sorted(WAKE_PREFIXES, key=len, reverse=True):
         if lowered.startswith(prefix):
-            rest = text.strip()[len(prefix):].lstrip(" ,.!?:;~")
+            rest = clean.strip()[len(prefix):].lstrip(" ,.!?:;~")
             return rest, True
-    return text.strip(), False
+    return clean.strip(), False
 
 
 def _translate_classical_terms(text: str) -> str:
