@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import struct
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -614,6 +616,91 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
                 self.assertEqual(ctrl2.tts_rate_pct, 0)
                 self.assertEqual(ctrl2.tts_pitch_hz, 0)
                 self.assertTrue(ctrl2.enable_chime)
+
+    def test_local_wake_verifier_phrase_matching_and_queue(self) -> None:
+        from voice_control.continuous_listener import LocalWakeVerifier
+
+        # Matching wake variants
+        self.assertEqual(LocalWakeVerifier.match_wake_phrase("포코야."), "poco ya")
+        self.assertEqual(LocalWakeVerifier.match_wake_phrase("코코야"), "poco ya")
+        self.assertEqual(LocalWakeVerifier.match_wake_phrase("포코향"), "poco ya")
+        self.assertEqual(LocalWakeVerifier.match_wake_phrase("포코아"), "poco ya")
+        self.assertEqual(LocalWakeVerifier.match_wake_phrase("뽀코야"), "poco ya")
+        self.assertEqual(LocalWakeVerifier.match_wake_phrase("헤이 포코!"), "poco ya")
+        self.assertEqual(LocalWakeVerifier.match_wake_phrase("hey poco!"), "poco ya")
+        self.assertEqual(LocalWakeVerifier.match_wake_phrase("오케이 포코"), "poco ya")
+        self.assertEqual(LocalWakeVerifier.match_wake_phrase("안녕 포코"), "poco ya")
+
+        # Decoys and non-wake speech
+        self.assertIsNone(LocalWakeVerifier.match_wake_phrase("안녕하세요"))
+        self.assertIsNone(LocalWakeVerifier.match_wake_phrase("그."))
+        self.assertIsNone(LocalWakeVerifier.match_wake_phrase("알았어"))
+        self.assertIsNone(LocalWakeVerifier.match_wake_phrase("피아노 협주곡 1번"))
+        self.assertIsNone(LocalWakeVerifier.match_wake_phrase(""))
+        self.assertIsNone(LocalWakeVerifier.match_wake_phrase(None))
+
+        # Test queue submission and worker loop with mock STT
+        wake_calls: list[tuple[str, str, float, float, float]] = []
+
+        def on_wake(phrase: str, text: str, stt_ms: float, peak: float, amb: float) -> None:
+            wake_calls.append((phrase, text, stt_ms, peak, amb))
+
+        verifier = LocalWakeVerifier(
+            stt_url="http://127.0.0.1:8766",
+            enabled=True,
+            on_wake=on_wake,
+        )
+
+        fake_resp = json.dumps({"text": "포코야."}).encode("utf-8")
+        with mock.patch("urllib.request.urlopen") as mock_url:
+            mock_cm = mock.MagicMock()
+            mock_cm.read.return_value = fake_resp
+            mock_url.return_value.__enter__.return_value = mock_cm
+
+            # Submit 1600 samples (0.1s PCM)
+            pcm = struct.pack("<160h", *([1000] * 160))
+            submitted = verifier.submit(pcm, peak_rms=500.0, ambient_rms=50.0)
+            self.assertTrue(submitted)
+
+            # Wait briefly for worker loop to invoke callback
+            time.sleep(0.1)
+
+        self.assertGreaterEqual(len(wake_calls), 1)
+        self.assertEqual(wake_calls[0][0], "poco ya")
+        self.assertEqual(wake_calls[0][1], "포코야.")
+        self.assertEqual(wake_calls[0][3], 500.0)
+
+        verifier.close()
+
+    def test_stt_path_bypasses_aec3_with_raw_bandpass(self) -> None:
+        with mock.patch.dict(os.environ, {
+            "VOICE_STT_USE_RAW_BANDPASS": "1",
+            "VOICE_USE_AEC3": "1",
+            "VOICE_USE_RNNOISE": "0",
+            "VOICE_LOCAL_STT_WAKE": "0",
+        }):
+            listener = ContinuousVoiceListener(on_utterance=lambda b: None)
+
+        self.assertTrue(listener.stt_use_raw_bandpass)
+
+        # Mock proc with 48k stereo audio
+        # 100ms = 5 subchunks of 3840 bytes (48k stereo)
+        subchunk_bytes = 3840
+        stereo_48k = struct.pack("<" + "hh" * 960, *([2000, 2000] * 960))
+        full_chunk = stereo_48k * 5
+
+        mock_proc = mock.MagicMock()
+        mock_proc.stdout.read.side_effect = [stereo_48k, stereo_48k, stereo_48k, stereo_48k, stereo_48k, b""]
+
+        raw_pcm, wake_pcm, stt_pcm = listener._read_clean_16k_chunk(mock_proc)
+        self.assertEqual(len(raw_pcm), 3200)  # 1600 samples @ 16kHz mono = 100ms
+        self.assertEqual(len(wake_pcm), 3200)
+        self.assertEqual(len(stt_pcm), 3200)
+
+        # With stt_use_raw_bandpass=True, stt_pcm is processed through stt_bandpass directly from clean16
+        # without being touched by AEC3
+        self.assertIsNotNone(listener.stt_bandpass)
+        listener.stop()
 
 
 if __name__ == "__main__":

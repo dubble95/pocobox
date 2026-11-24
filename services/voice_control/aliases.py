@@ -14,6 +14,11 @@ WAKE_PREFIXES: tuple[str, ...] = (
     "오케이 포코",
     "안녕 포코",
     "포코야",
+    "코코야",
+    "포코향",
+    "포코아",
+    "뽀코야",
+    "뽀코",
     "포코",
     "hey pocobox",
     "ok pocobox",
@@ -24,6 +29,11 @@ WAKE_PREFIXES: tuple[str, ...] = (
 
 # Common ASR mis-hearings / spacing fixes for Korean music terms
 ASR_NORMALIZATIONS: tuple[tuple[str, str], ...] = (
+    ("코코야", "포코야"),
+    ("포코향", "포코야"),
+    ("포코아", "포코야"),
+    ("뽀코야", "포코야"),
+    ("뽀코", "포코"),
     ("아 이유", "아이유"),
     ("아이 유", "아이유"),
     ("밤 편지", "밤편지"),

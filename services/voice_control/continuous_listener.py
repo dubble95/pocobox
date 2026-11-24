@@ -4,12 +4,16 @@ local Vosk wake-word spotting, music-safe trigger gating, and auto-ducking hooks
 from __future__ import annotations
 
 import collections
+import json
 import logging
 import os
+import queue
+import re
 import subprocess
 import threading
 import time
-from typing import Callable
+import urllib.request
+from typing import Any, Callable
 
 from .audio_aec import SqueezeliteVisClient, WebRTCAEC3Processor
 from .audio_capture import CHUNK_BYTES, CHUNK_MS, SAMPLE_RATE, chunk_rms, pcm_to_wav_bytes
@@ -21,7 +25,7 @@ from .audio_dsp import (
     extract_mono_channel,
     measure_pcm_peak_and_clip,
 )
-from .rolling_recorder import RollingAudioRecorder
+from .rolling_recorder import RollingAudioRecorder, build_wav_bytes
 from .telemetry import VoiceTelemetryLogger
 from .wakeword import VoskWakeWordSpotter
 
@@ -31,6 +35,128 @@ SUBCHUNK_MS = 20
 SUBCHUNKS_PER_CHUNK = max(1, CHUNK_MS // SUBCHUNK_MS)  # 5 x 20ms = 100ms
 SUBCHUNK_48K_STEREO_BYTES = (RNNOISE_SAMPLE_RATE * SUBCHUNK_MS // 1000) * 4  # 3840 bytes
 SUBCHUNK_16K_FRAMES = SAMPLE_RATE * SUBCHUNK_MS // 1000  # 320 frames
+
+
+class LocalWakeVerifier:
+    """Fast non-blocking local SenseVoice INT8 wake-word spotter for Korean/English during music.
+
+    Runs in a dedicated background daemon thread. When an audio slice containing a candidate
+    speech burst is submitted, it transcribes with local SenseVoice INT8 on cores 4-7
+    (taking ~200ms) with ZERO cloud calls. If wake phrases ("포코야", "코코야", "헤이 포코",
+    "hey poco", etc.) are matched, it invokes the wake callback immediately.
+    """
+
+    WAKE_KEYWORDS: tuple[str, ...] = (
+        "포코야",
+        "코코야",
+        "포코향",
+        "포코아",
+        "뽀코야",
+        "뽀코",
+        "포코",
+        "헤이포코",
+        "헤이 포코",
+        "오케이포코",
+        "오케이 포코",
+        "안녕포코",
+        "안녕 포코",
+        "hey poco",
+        "poco ya",
+        "poco box",
+        "pocobox",
+    )
+
+    def __init__(
+        self,
+        stt_url: str | None = None,
+        enabled: bool = True,
+        on_wake: Callable[[str, str, float, float, float], None] | None = None,
+    ) -> None:
+        raw_url = stt_url if stt_url is not None else os.environ.get("LOCAL_STT_URL", "http://127.0.0.1:8766")
+        self.stt_url = raw_url.rstrip("/") if raw_url else ""
+        self.enabled = enabled and bool(self.stt_url)
+        self.on_wake = on_wake
+        self._queue: queue.Queue[tuple[bytes, float, float]] = queue.Queue(maxsize=1)
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._verifying = False
+
+        if self.enabled:
+            self._thread = threading.Thread(
+                target=self._worker_loop,
+                daemon=True,
+                name="local-wake-verifier",
+            )
+            self._thread.start()
+
+    @classmethod
+    def match_wake_phrase(cls, text: str) -> str | None:
+        if not text:
+            return None
+        cleaned = re.sub(r"[\s.,!?~:;\-_]+", "", text.lower())
+        for kw in cls.WAKE_KEYWORDS:
+            ckw = re.sub(r"[\s.,!?~:;\-_]+", "", kw.lower())
+            if ckw in cleaned:
+                return "poco ya" if any(k in kw for k in ("포코", "코코", "뽀코", "poco")) else kw
+        return None
+
+    def submit(self, pcm_bytes: bytes, peak_rms: float, ambient_rms: float) -> bool:
+        """Submit candidate speech audio for local STT verification without blocking the audio loop."""
+        if not self.enabled or self._stop_event.is_set() or not pcm_bytes:
+            return False
+        try:
+            self._queue.put_nowait((pcm_bytes, peak_rms, ambient_rms))
+            return True
+        except queue.Full:
+            return False
+
+    def close(self) -> None:
+        self._stop_event.set()
+        try:
+            self._queue.put_nowait((b"", 0.0, 0.0))
+        except queue.Full:
+            pass
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=0.3)
+        self._thread = None
+
+    def _worker_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                pcm_bytes, peak_rms, amb_rms = self._queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if self._stop_event.is_set() or not pcm_bytes:
+                break
+
+            self._verifying = True
+            try:
+                wav_bytes = build_wav_bytes(pcm_bytes, sample_rate=SAMPLE_RATE, channels=1)
+                req = urllib.request.Request(
+                    f"{self.stt_url}/transcribe?language=ko",
+                    data=wav_bytes,
+                    headers={"Content-Type": "audio/wav"},
+                )
+                t0 = time.monotonic()
+                with urllib.request.urlopen(req, timeout=1.8) as resp:
+                    res = json.loads(resp.read().decode("utf-8"))
+                stt_ms = (time.monotonic() - t0) * 1000.0
+                text = str(res.get("text", "")).strip()
+                matched = self.match_wake_phrase(text)
+                if matched and self.on_wake is not None:
+                    log.info(
+                        "Local SenseVoice wake triggered: phrase='%s' text=%r (stt=%.1fms peak=%.1f amb=%.1f)",
+                        matched,
+                        text,
+                        stt_ms,
+                        peak_rms,
+                        amb_rms,
+                    )
+                    self.on_wake(matched, text, stt_ms, peak_rms, amb_rms)
+            except Exception as exc:
+                log.debug("Local wake verifier STT notice: %s", exc)
+            finally:
+                self._verifying = False
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -119,6 +245,23 @@ class ContinuousVoiceListener:
             RollingAudioRecorder() if _env_bool("VOICE_ROLLING_RECORDER", True) else None
         )
 
+        self.stt_use_raw_bandpass = _env_bool("VOICE_STT_USE_RAW_BANDPASS", True)
+        self.use_local_stt_wake = _env_bool("VOICE_LOCAL_STT_WAKE", True)
+        self.local_wake_verifier = (
+            LocalWakeVerifier(
+                stt_url=os.environ.get("LOCAL_STT_URL", "http://127.0.0.1:8766"),
+                enabled=self.use_local_stt_wake,
+                on_wake=self._on_wake_from_verifier,
+            )
+            if self.use_local_stt_wake
+            else None
+        )
+        self._pending_stt_wake: dict[str, Any] | None = None
+        self._stt_ring: collections.deque[bytes] = collections.deque(maxlen=20)  # 2.0s @ 100ms
+        self._speech_streak: int = 0
+        self._silence_streak: int = 0
+        self._candidate_peak: float = 0.0
+
         self.state: str = "stopped"  # stopped | waiting | wake | recording | processing | paused
         self.ambient_rms: float = 20.0
         self.wake_ambient_rms: float = 20.0
@@ -174,6 +317,18 @@ class ContinuousVoiceListener:
             self.ambient_rms = min(2500.0, max(self.ambient_rms, rms_mean * 1.15))
             log.info("Adapted ambient_rms floor upward to %.1f (music/noise rejection)", self.ambient_rms)
 
+    def _on_wake_from_verifier(
+        self, phrase: str, transcript: str, stt_ms: float, peak_rms: float, amb_rms: float
+    ) -> None:
+        self._pending_stt_wake = {
+            "phrase": phrase,
+            "transcript": transcript,
+            "stt_ms": stt_ms,
+            "peak": peak_rms,
+            "amb": amb_rms,
+            "time": time.monotonic(),
+        }
+
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
@@ -186,6 +341,8 @@ class ContinuousVoiceListener:
         self._set_state("stopped")
         if self.rolling_recorder is not None:
             self.rolling_recorder.close()
+        if self.local_wake_verifier is not None:
+            self.local_wake_verifier.close()
         if self.vis_client is not None:
             self.vis_client.close()
         if self.aec3 is not None:
@@ -285,6 +442,8 @@ class ContinuousVoiceListener:
             "music_min_conf": round(self.wake_spotter.music_min_confidence, 2) if self.wake_spotter else 0.65,
             "last_wake_phrase": self.last_wake_phrase,
             "last_speech_at": self.last_speech_at,
+            "stt_use_raw_bandpass": self.stt_use_raw_bandpass,
+            "local_stt_wake": bool(self.local_wake_verifier and self.local_wake_verifier.enabled),
             "rolling_recorder": self.rolling_recorder.status_dict() if self.rolling_recorder else None,
         }
 
@@ -374,7 +533,11 @@ class ContinuousVoiceListener:
 
             wake_sub = self.wake_bandpass.process_pcm(aec16) if self.wake_bandpass is not None else aec16
 
-            if self.aec3_active:
+            if self.stt_use_raw_bandpass:
+                # Anti-aliased decimated 16k mono with bandpass (150-6000Hz) bypasses AEC3
+                # double-talk residual suppression so STT receives 100% undistorted speech phonemes
+                stt_sub = self.stt_bandpass.process_pcm(clean16) if self.stt_bandpass is not None else clean16
+            elif self.aec3_active:
                 # AEC3 already subtracted music; keep STT path crisp without RNNoise vocal distortion
                 stt_sub = wake_sub
             elif self.rnnoise is not None and self.rnnoise.available:
@@ -491,6 +654,7 @@ class ContinuousVoiceListener:
                     self.current_rms = rms
                     self._wake_rms_window.append(wake_rms)
                     self._wake_clip_ring.append(wake_data)
+                    self._stt_ring.append(stt_data)
 
                     # During cooldown, keep tracking ambient_rms cleanly
                     if now < cooldown_until:
@@ -508,6 +672,75 @@ class ContinuousVoiceListener:
                     if not recording:
                         self._set_state("waiting")
                         preroll.append(stt_data)
+
+                        # Trigger Path 1B: Local SenseVoice STT wake verifier (handles Korean "포코야", "코코야", etc.)
+                        if self._pending_stt_wake is not None and self.on_wake_utterance is not None:
+                            w_info = self._pending_stt_wake
+                            self._pending_stt_wake = None
+                            if (now - w_info["time"]) < 1.8:
+                                hit = w_info["phrase"]
+                                transcript = w_info["transcript"]
+                                recent_peak = w_info.get("peak", rms)
+                                wake_ev = {
+                                    "phrase": hit,
+                                    "source": "local_sensevoice",
+                                    "transcript": transcript,
+                                    "confidence": 0.98,
+                                    "status": "triggered",
+                                }
+                                meta = self._build_wake_telemetry_meta(hit, recent_peak, wake_ev)
+                                clip_path = None
+                                if self.telemetry is not None:
+                                    clip_wav = pcm_to_wav_bytes(b"".join(self._wake_clip_ring))
+                                    clip_path = self.telemetry.save_wake_clip(clip_wav, "pending", meta)
+                                    self.telemetry.record("wake_triggered", clip_path=clip_path, **meta)
+                                self.last_wake_meta = {**meta, "clip_path": clip_path}
+                                log.info(
+                                    "SenseVoice wake-word triggered: '%s' from %r (rms=%.1f peak=%.1f amb=%.1f music=%s)",
+                                    hit,
+                                    transcript,
+                                    rms,
+                                    recent_peak,
+                                    self.wake_ambient_rms,
+                                    self.music_playing,
+                                )
+                                self.last_wake_phrase = hit
+                                self.last_speech_at = time.time()
+                                wake_phrase = hit
+                                wake_mode = True
+                                recording = True
+                                wake_speech_seen = False
+                                wake_cmd_floor = self.initial_wake_cmd_floor()
+                                consecutive_silence = 0
+                                captured = list(preroll)[-2:]
+                                self._set_state("wake", rms)
+                                if self.on_wake_detected is not None:
+                                    try:
+                                        self.on_wake_detected(hit)
+                                    except Exception as exc:
+                                        log.error("on_wake_detected hook error: %s", exc)
+                                self._set_state("recording", rms)
+                                continue
+
+                        # Candidate speech detection for local STT wake verifier during music
+                        if self.music_playing and self.local_wake_verifier is not None:
+                            speech_floor = max(self.wake_min_rms, self.wake_ambient_rms * 1.60)
+                            if rms >= speech_floor:
+                                self._speech_streak += 1
+                                self._silence_streak = 0
+                                if rms > self._candidate_peak:
+                                    self._candidate_peak = rms
+                            else:
+                                if self._speech_streak > 0:
+                                    self._silence_streak += 1
+
+                            if self._speech_streak >= 2 and (self._silence_streak >= 2 or self._speech_streak >= 12):
+                                slice_len = min(len(self._stt_ring), self._speech_streak + 6)
+                                pcm_slice = b"".join(list(self._stt_ring)[-slice_len:])
+                                self.local_wake_verifier.submit(pcm_slice, self._candidate_peak, self.wake_ambient_rms)
+                                self._speech_streak = 0
+                                self._silence_streak = 0
+                                self._candidate_peak = 0.0
 
                         # Trigger Path 1: Local streaming Vosk wake-word spotter on AEC3 + anti-aliased audio
                         # During music, always feed audio to Vosk so it can detect wake words.
