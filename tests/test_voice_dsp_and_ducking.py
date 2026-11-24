@@ -448,6 +448,9 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
         # Legitimate wake phrases still match
         self.assertEqual(spotter._match_text("poco ya", music_playing=True), "poco ya")
         self.assertEqual(spotter._match_text("hey poco", music_playing=True), "hey poco")
+        # Korean '포코야' / '포코아' transcribed as 'poco a' matches 'poco ya', while 'poco a poco' remains a decoy
+        self.assertEqual(spotter._match_text("poco a", music_playing=True), "poco ya")
+        self.assertIsNone(spotter._match_text("poco a poco", music_playing=True))
 
         # Energy/SNR gate blocks weak residual music
         with mock.patch.dict(os.environ, {"VOICE_WAKE_ENGINE": "off", "VOICE_USE_AEC3": "0", "VOICE_USE_RNNOISE": "0"}):
@@ -458,11 +461,11 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
         self.assertFalse(listener.passes_wake_energy_gate(315.0))  # 315 < 300 * 1.08 = 324 and diff=15 < 25
         self.assertTrue(listener.passes_wake_energy_gate(450.0))
 
-        # AEC3-active music playback loosens the gate further because echo is already cancelled
+        # AEC3-active music playback loosens the gate further because echo is already cancelled (even at 2.0 dB)
         class _FakeAec:
             available = True
             active = True
-            echo_reduction_db = 12.0
+            echo_reduction_db = 2.0
 
         listener.aec3 = _FakeAec()  # type: ignore[assignment]
         self.assertTrue(listener.passes_wake_energy_gate(320.0))  # >= 300 * 1.01 = 303 with AEC

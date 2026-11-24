@@ -86,12 +86,12 @@ class ContinuousVoiceListener:
         self.use_bandpass = _env_bool("VOICE_USE_BANDPASS", True)
         self.use_aec3 = _env_bool("VOICE_USE_AEC3", True)
         self.rms_fallback_during_music = _env_bool("VOICE_RMS_FALLBACK_DURING_MUSIC", False)
-        self.wake_min_rms = float(os.environ.get("VOICE_WAKE_MIN_RMS", "45.0"))
+        self.wake_min_rms = float(os.environ.get("VOICE_WAKE_MIN_RMS", "35.0"))
         self.wake_snr_ratio = float(os.environ.get("VOICE_WAKE_SNR_RATIO", "1.08"))
         self.wake_delta_rms = float(os.environ.get("VOICE_WAKE_DELTA_RMS", "25.0"))
-        # Force Vosk recognizer reset every N seconds during music playback so
+        # Periodic Vosk recognizer reset interval during music playback so
         # continuous music audio does not corrupt the recognizer state.
-        self.wake_music_reset_sec = float(os.environ.get("VOICE_WAKE_MUSIC_RESET_SEC", "3.0"))
+        self.wake_music_reset_sec = float(os.environ.get("VOICE_WAKE_MUSIC_RESET_SEC", "8.0"))
         self._wake_music_reset_at: float | None = None
 
         self.bandpass_low_hz = float(os.environ.get("VOICE_BANDPASS_LOW_HZ", "150.0"))
@@ -220,7 +220,10 @@ class ContinuousVoiceListener:
 
     def passes_wake_energy_gate(self, recent_peak_rms: float) -> bool:
         """Reject faint reverb/music false wake hits that do not rise above floor energy."""
-        if recent_peak_rms < self.wake_min_rms:
+        effective_min_rms = self.wake_min_rms
+        if self.music_playing and self.aec3_active and self.aec3.echo_reduction_db >= 1.5:
+            effective_min_rms = min(self.wake_min_rms, 25.0)
+        if recent_peak_rms < effective_min_rms:
             return False
         if self.music_playing:
             # During loud playback, speech adds non-coherent power to the music floor.
@@ -230,7 +233,7 @@ class ContinuousVoiceListener:
             # music floor in the wake path is already suppressed.
             snr_req = self.wake_snr_ratio
             delta_req = self.wake_delta_rms
-            if self.aec3 is not None and self.aec3.active and self.aec3.echo_reduction_db >= 6.0:
+            if self.aec3 is not None and self.aec3.active and self.aec3.echo_reduction_db >= 1.5:
                 snr_req = min(self.wake_snr_ratio, 1.01)
                 delta_req = min(self.wake_delta_rms, 8.0)
             if (
@@ -495,17 +498,20 @@ class ContinuousVoiceListener:
                         # is_silent is only used to allow Vosk to reset its recognizer state during
                         # quiet moments in the music, preventing state corruption from continuous audio.
                         if self.music_playing:
-                            # Force periodic reset so music lyrics don't corrupt Vosk state
+                            # Periodic reset during music playback so lyrics do not corrupt state,
+                            # but never reset while an utterance is actively in progress.
                             now = time.monotonic()
                             if (
                                 self._wake_music_reset_at is None
-                                or now - self._wake_music_reset_at >= self.wake_music_reset_sec
+                                or (
+                                    now - self._wake_music_reset_at >= self.wake_music_reset_sec
+                                    and not getattr(self.wake_spotter, "_has_active_partial", False)
+                                    and getattr(self.wake_spotter, "_partial_streak", 0) == 0
+                                )
                             ):
                                 self.wake_spotter.reset()
                                 self._wake_music_reset_at = now
-                            is_silent = wake_rms < max(
-                                self.wake_min_rms, self.wake_ambient_rms * 0.6
-                            )
+                            is_silent = wake_rms < max(18.0, self.wake_ambient_rms * 1.15)
                         else:
                             is_silent = wake_rms < max(self.min_threshold, self.wake_ambient_rms * 1.4)
                         hit = (

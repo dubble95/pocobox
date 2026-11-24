@@ -157,6 +157,7 @@ _WAKE_VARIANT_NORMALIZATIONS: tuple[tuple[str, str], ...] = (
 # Latin ASR confusions for the Korean wake phrase "포코야" -> "poco ya".
 _WAKE_LATIN_VARIANTS: dict[str, str] = {
     "boco": "poco",
+    "koko": "poco",
     "poko": "poco",
     "poco": "poco",
     "polco": "poco",
@@ -302,6 +303,13 @@ class VoskWakeWordSpotter:
             if collapsed and collapsed[-1] == t:
                 continue
             collapsed.append(t)
+
+        # Korean "포코야" / "포코아" commonly transcribed by English Vosk as "poco a"
+        # while keeping the Spanish decoy phrase "poco a poco" intact
+        if collapsed == ["poco", "a"]:
+            collapsed = ["poco", "ya"]
+        elif len(collapsed) > 2 and collapsed[0] == "poco" and collapsed[1] == "a" and collapsed[2] != "poco":
+            collapsed = ["poco", "ya"] + collapsed[2:]
 
         normalized = " ".join(collapsed)
         if normalized.startswith("poco ya "):
