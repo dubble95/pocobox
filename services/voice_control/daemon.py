@@ -65,6 +65,7 @@ from voice_control.feedback import (  # noqa: E402
 from voice_control.intent_schema import ExecutionResult, IntentAction, VoiceIntent  # noqa: E402
 from voice_control.background_verifier import BackgroundVerifier  # noqa: E402
 from voice_control.telemetry import VoiceTelemetryLogger, record_command_result, accuracy_summary  # noqa: E402
+from voice_control.wakeword import VoskWakeWordSpotter  # noqa: E402
 from voice_control.tts import (  # noqa: E402
     AVAILABLE_VOICES,
     VALID_VOICE_IDS,
@@ -1695,8 +1696,6 @@ class VoiceController:
 
         wake_hits: list[dict[str, Any]] = []
         if self.continuous_listener and self.continuous_listener.wake_spotter:
-            from .wakeword import VoskWakeWordSpotter
-
             spotter = VoskWakeWordSpotter()
             pcm = wav_bytes[44:]
             for offset in range(0, len(pcm), 3200):
