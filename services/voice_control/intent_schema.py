@@ -18,6 +18,7 @@ class IntentAction(str, Enum):
     RESUME = "resume"
     NEXT = "next"
     PREVIOUS = "previous"
+    QUEUE_NEXT = "queue_next"
     VOLUME_SET = "volume_set"
     VOLUME_UP = "volume_up"
     VOLUME_DOWN = "volume_down"
@@ -54,10 +55,13 @@ class VoiceIntent:
 
     def __post_init__(self) -> None:
         if isinstance(self.action, str):
-            try:
-                self.action = IntentAction(self.action)
-            except ValueError:
-                self.action = IntentAction.UNKNOWN
+            if self.action in ("play_next", "queue_next"):
+                self.action = IntentAction.QUEUE_NEXT
+            else:
+                try:
+                    self.action = IntentAction(self.action)
+                except ValueError:
+                    self.action = IntentAction.UNKNOWN
         if self.search_type not in VALID_SEARCH_TYPES:
             self.search_type = "any"
         if self.volume is not None:

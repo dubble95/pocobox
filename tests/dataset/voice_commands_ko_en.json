@@ -177,5 +177,18 @@
   {"id": "classic_part_02", "category": "classical_partitive", "text": "아니 호두까기 인형 중 트래팍", "expected_action": "play_search", "expected_query_contains": "Nutcracker Trepak", "expected_search_type": "track"},
   {"id": "classic_part_03", "category": "classical_partitive", "text": "포코야 트래팍", "expected_action": "play_search", "expected_query_contains": "Trepak", "expected_search_type": "track"},
   {"id": "classic_part_04", "category": "classical_partitive", "text": "호두까기 인형 중 트레팍", "expected_action": "play_search", "expected_query_contains": "Nutcracker Trepak", "expected_search_type": "track"},
-  {"id": "classic_part_05", "category": "classical_partitive", "text": "사계 중 봄", "expected_action": "play_search", "expected_query_contains": "Four Seasons Spring", "expected_search_type": "track"}
+  {"id": "classic_part_05", "category": "classical_partitive", "text": "사계 중 봄", "expected_action": "play_search", "expected_query_contains": "Four Seasons Spring", "expected_search_type": "track"},
+
+  {"id": "queue_01", "category": "queue_next_commands", "text": "다음곡으로 아이유 밤편지 틀어줘", "expected_action": "queue_next", "expected_query_contains": "Through the Night", "expected_fallback_contains": "밤편지", "expected_search_type": "track"},
+  {"id": "queue_02", "category": "queue_next_commands", "text": "다음 곡으로 뉴진스 하입보이 예약해줘", "expected_action": "queue_next", "expected_query_contains": "NewJeans Hype Boy", "expected_search_type": "track"},
+  {"id": "queue_03", "category": "queue_next_commands", "text": "아이유 밤편지 예약해줘", "expected_action": "queue_next", "expected_query_contains": "Through the Night", "expected_search_type": "track"},
+  {"id": "queue_04", "category": "queue_next_commands", "text": "아이유의 좋은 날 예약", "expected_action": "queue_next", "expected_query_contains": "Good Day", "expected_search_type": "track"},
+  {"id": "queue_05", "category": "queue_next_commands", "text": "뉴진스 디토 다음 곡으로 틀어줘", "expected_action": "queue_next", "expected_query_contains": "NewJeans Ditto", "expected_search_type": "track"},
+  {"id": "queue_06", "category": "queue_next_commands", "text": "다음에 콜드플레이 픽스 유 틀어줘", "expected_action": "queue_next", "expected_query_contains": "Coldplay Fix You", "expected_search_type": "track"},
+  {"id": "queue_07", "category": "queue_next_commands", "text": "포코야 다음곡으로 아이유 밤편지 틀어줘", "expected_action": "queue_next", "expected_query_contains": "Through the Night", "expected_wake": true},
+  {"id": "queue_08", "category": "queue_next_commands", "text": "Play Fix You next", "expected_action": "queue_next", "expected_query_contains": "Fix You"},
+  {"id": "queue_09", "category": "queue_next_commands", "text": "queue up Dynamite next", "expected_action": "queue_next", "expected_query_contains": "Dynamite"},
+  {"id": "queue_10", "category": "queue_next_commands", "text": "add Fix You to queue", "expected_action": "queue_next", "expected_query_contains": "Fix You"},
+  {"id": "queue_11", "category": "queue_next_commands", "text": "베토벤 교향곡 5번 예약해줘", "expected_action": "queue_next", "expected_query_contains": "Symphony No. 5", "expected_search_type": "classical"},
+  {"id": "queue_12", "category": "queue_next_commands", "text": "다음곡으로 틀어줘", "expected_action": "next"}
 ]

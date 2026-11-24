@@ -51,7 +51,7 @@ Listen to the audio (or read the text) and return ONLY a valid JSON object match
   "transcript": "<exact spoken words only; empty string if only instrumental/noise>",
   "is_music_only": false,
   "wake_word_detected": true,
-  "action": "play_search | play_mix | play_favorite | pause | resume | next | previous | volume_set | volume_up | volume_down | mute | unmute | now_playing | answer_qa | weather | start_quiz | stop_quiz | unknown",
+  "action": "play_search | play_mix | play_favorite | pause | resume | next | previous | queue_next | volume_set | volume_up | volume_down | mute | unmute | now_playing | answer_qa | weather | start_quiz | stop_quiz | unknown",
   "query": "<primary TIDAL-friendly search query for play_search, or requested city/region for weather (empty string for default device location), else empty string>",
   "display_query": "<for play_search ONLY: natural corrected Korean/spoken song or artist name to read aloud in confirmation (fixing obvious ASR typos like '잘코스키 피아노 협주 일번' -> '차이코프스키 피아노 협주곡 1번'), else empty string>",
   "fallback_queries": ["<alternative query 1>", "<original Korean query>"],
@@ -75,7 +75,7 @@ Rules:
 
 
 _LOCAL_SLM_GBNF = r'''root ::= "{" ws "\"action\":" ws action ("," ws "\"query\":" ws string)? ("," ws "\"answer\":" ws string)? ws "}"
-action ::= "\"play_search\"" | "\"play_mix\"" | "\"now_playing\"" | "\"pause\"" | "\"resume\"" | "\"next\"" | "\"previous\"" | "\"volume_up\"" | "\"volume_down\"" | "\"weather\"" | "\"answer_qa\"" | "\"unknown\""
+action ::= "\"play_search\"" | "\"play_mix\"" | "\"now_playing\"" | "\"pause\"" | "\"resume\"" | "\"next\"" | "\"previous\"" | "\"queue_next\"" | "\"volume_up\"" | "\"volume_down\"" | "\"weather\"" | "\"answer_qa\"" | "\"unknown\""
 string ::= "\"" ([^"\\] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]))* "\""
 ws ::= [ \t\n\r]*
 '''
@@ -145,11 +145,12 @@ def _intent_from_llm_payload(
         if not any(cue in transcript.lower() for cue in now_playing_cues):
             action_str = IntentAction.UNKNOWN.value
 
-    # Guard against SLM / LLM play_search hallucinations on random chatter
-    if action_str == IntentAction.PLAY_SEARCH.value:
+    # Guard against SLM / LLM play_search / queue_next hallucinations on random chatter
+    if action_str in (IntentAction.PLAY_SEARCH.value, IntentAction.QUEUE_NEXT.value):
         play_cues = (
             "틀어", "재생", "들려", "노래", "음악", "곡", "앨범", "아티스트", "가수", "플레이", "찾아", "선곡",
-            "play", "music", "song", "track", "album", "artist", "listen",
+            "예약", "다음곡", "다음 곡", "대기열", "큐",
+            "play", "music", "song", "track", "album", "artist", "listen", "queue", "reserve", "next",
             # Conversational correction and partitive phrasing cues
             "아니", "말고", "그게 아니라", "다른", "다시", "중", "중에", "에서",
         )
@@ -172,7 +173,7 @@ def _intent_from_llm_payload(
             action_str = IntentAction.UNKNOWN.value
 
     # Enrich with local alias expansion if query is Korean
-    if query and action_str == "play_search":
+    if query and action_str in (IntentAction.PLAY_SEARCH.value, IntentAction.QUEUE_NEXT.value):
         for extra in expand_tidal_queries(query):
             if extra.lower() != query.lower() and extra.lower() not in {f.lower() for f in fallbacks}:
                 fallbacks.append(extra)

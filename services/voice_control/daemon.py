@@ -1853,6 +1853,31 @@ class VoiceController:
                 latency_ms=round((time.monotonic() - t0) * 1000.0, 1),
             )
 
+        if act == IntentAction.QUEUE_NEXT:
+            if dry_run:
+                return ExecutionResult(ok=True, action=act, message="유튜브 다음 영상 예약 확인(dry-run)")
+            query = intent.query or intent.display_query or "kpop"
+            videos = search_youtube_videos(query, limit=5, lms_client=self.lms, player_id=self.player_name)
+            if not videos:
+                return ExecutionResult(ok=False, action=act, message=f"유튜브에서 '{query}' 영상을 찾지 못했습니다.")
+            video = videos[0]
+            pos = self.youtube.insert_next(video)
+            title = video.get("title", query)
+            self.events.publish({
+                "type": "youtube_queue_insert",
+                "video": video,
+                "position": pos,
+                "ts": time.time(),
+            })
+            return ExecutionResult(
+                ok=True,
+                action=act,
+                message=f"유튜브 '{title}' 영상을 다음 순서로 예약했습니다.",
+                intent=intent.to_dict(),
+                details={"video": video, "position": pos},
+                latency_ms=round((time.monotonic() - t0) * 1000.0, 1),
+            )
+
         if act == IntentAction.PAUSE:
             if dry_run:
                 return ExecutionResult(ok=True, action=act, message="유튜브 일시정지 확인(dry-run)")

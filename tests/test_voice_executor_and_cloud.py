@@ -170,6 +170,9 @@ class FakeLMSClient(LMSClient):
         if command[0] == "tidal" and command[1] == "playlist" and command[2] == "add":
             self.played_items.append(f"add:{command[3]}")
             return {}
+        if command[0] == "tidal" and command[1] == "playlist" and command[2] == "insert":
+            self.played_items.append(f"insert:{command[3]}")
+            return {}
         return {}
 
 
@@ -192,6 +195,77 @@ class TestVoiceExecutorAndCloud(unittest.TestCase):
         self.assertTrue(res.ok, res.message)
         self.assertEqual(res.details["category"], "artists")
         self.assertEqual(lms.played_items[-1], "item_id:7_cp.2.0.top")
+
+    def test_queue_next_command_parsing_and_execution(self) -> None:
+        lms = FakeLMSClient()
+        lms.mode = "play"
+        executor = VoiceExecutor(lms)
+
+        # 1. "다음곡으로 ... 틀어줘"
+        intent1 = parse_command("다음곡으로 아이유 밤편지 틀어줘")
+        self.assertEqual(intent1.action, IntentAction.QUEUE_NEXT)
+        self.assertIn("Through the Night", intent1.query)
+        self.assertEqual(format_command_ack(intent1), "네, 아이유 밤편지 다음 곡으로 예약해둘게요.")
+        res1 = executor.execute(intent1)
+        self.assertTrue(res1.ok, res1.message)
+        self.assertEqual(res1.action, "queue_next")
+        self.assertEqual(lms.played_items[-1], "insert:item_id:7_iu.4.1")
+
+        # 2. "아이유 밤편지 예약해줘"
+        intent2 = parse_command("아이유 밤편지 예약해줘")
+        self.assertEqual(intent2.action, IntentAction.QUEUE_NEXT)
+        self.assertEqual(format_command_ack(intent2), "네, 아이유 밤편지 다음 곡으로 예약해둘게요.")
+        res2 = executor.execute(intent2)
+        self.assertTrue(res2.ok, res2.message)
+        self.assertEqual(res2.action, "queue_next")
+        self.assertEqual(lms.played_items[-1], "insert:item_id:7_iu.4.1")
+
+        # 3. "다음 곡으로 뉴진스 하입보이 예약해줘"
+        intent3 = parse_command("다음 곡으로 뉴진스 하입보이 예약해줘")
+        self.assertEqual(intent3.action, IntentAction.QUEUE_NEXT)
+        self.assertIn("NewJeans Hype Boy", intent3.query)
+
+        # 4. "뉴진스 디토 다음 곡으로 틀어줘"
+        intent4 = parse_command("뉴진스 디토 다음 곡으로 틀어줘")
+        self.assertEqual(intent4.action, IntentAction.QUEUE_NEXT)
+        self.assertIn("NewJeans Ditto", intent4.query)
+
+        # 5. "아이유 좋은 날 예약"
+        intent5 = parse_command("아이유 좋은 날 예약")
+        self.assertEqual(intent5.action, IntentAction.QUEUE_NEXT)
+
+        # 6. "Play Fix You next"
+        intent6 = parse_command("Play Fix You next")
+        self.assertEqual(intent6.action, IntentAction.QUEUE_NEXT)
+        self.assertIn("Fix You", intent6.query)
+
+        # 7. "add Fix You to queue"
+        intent7 = parse_command("add Fix You to queue")
+        self.assertEqual(intent7.action, IntentAction.QUEUE_NEXT)
+        self.assertIn("Fix You", intent7.query)
+
+        # 8. "다음곡으로 틀어줘" (no song query) -> NEXT
+        intent8 = parse_command("다음곡으로 틀어줘")
+        self.assertEqual(intent8.action, IntentAction.NEXT)
+
+    def test_queue_next_classical_suite(self) -> None:
+        lms = FakeLMSClient()
+        lms.mode = "play"
+        executor = VoiceExecutor(lms)
+
+        intent = parse_command("베토벤 교향곡 5번 예약해줘")
+        self.assertEqual(intent.action, IntentAction.QUEUE_NEXT)
+        self.assertEqual(intent.search_type, "classical")
+
+        res = executor.execute(intent)
+        self.assertTrue(res.ok, res.message)
+        self.assertEqual(res.action, "queue_next")
+        # All 4 movements should have been inserted
+        inserted_items = [x for x in lms.played_items if x.startswith("insert:")]
+        self.assertEqual(len(inserted_items), 4)
+        # Because we insert in reversed order, final queue order is mvt 1, 2, 3, 4
+        # In LMS, last inserted ends up at cur_index + 1
+        self.assertEqual(inserted_items[-1], "insert:item_id:7_b5.0")
 
     def test_classical_movement_parser_and_work_detector(self) -> None:
         self.assertTrue(is_classical_movement_work("베토벤 교향곡 5번"))

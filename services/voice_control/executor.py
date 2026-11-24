@@ -56,7 +56,7 @@ def _korean_ro(n: int) -> str:
 
 
 def extract_spoken_play_target(intent: VoiceIntent) -> str:
-    """Extract a natural spoken target label from the user's utterance for PLAY_SEARCH confirmation."""
+    """Extract a natural spoken target label from the user's utterance for PLAY_SEARCH / QUEUE_NEXT confirmation."""
     display = (intent.display_query or "").strip()
     if display:
         return display
@@ -66,8 +66,22 @@ def extract_spoken_play_target(intent: VoiceIntent) -> str:
         cleaned, _ = strip_wake_prefix(cleaned)
         cleaned = cleaned.strip(" .!?,~\"'“”")
         cleaned = re.sub(r"^(?:타이달|tidal)에서\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"^(?:다음\s*(?:곡|노래|트랙)?\s*(?:으로|에|에는|로)|다음에|다음으로|다음에는)\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"^(?:please\s+)?(?:play\s+next|queue\s+next|queue\s+up\s+next|reserve)\s+", "", cleaned, flags=re.IGNORECASE)
         cleaned = _ACK_EN_PLAY_PREFIX_RE.sub("", cleaned)
+        cleaned = re.sub(r"\s+(?:next|to\s+(?:the\s+)?queue)$", "", cleaned, flags=re.IGNORECASE)
         cleaned = _ACK_EN_PLAY_SUFFIX_RE.sub("", cleaned)
+        cleaned = re.sub(
+            r"\s*(?:(?:다음\s*(?:곡|노래|트랙)?\s*(?:으로|에|에는|로)|다음에|다음으로|다음에는)\s*)?"
+            r"(?:예약\s*(?:해\s*줘|해\s*주세요|해\s*줄래|해|부탁해|걸어\s*줘|걸어|등록\s*해\s*줘|등록)?|"
+            r"대기열에\s*(?:추가\s*해\s*줘|추가|넣어\s*줘|넣어|담아\s*줘|담아)|"
+            r"큐에\s*(?:추가\s*해\s*줘|추가|넣어\s*줘|넣어|담아\s*줘|담아)|"
+            r"플레이리스트에\s*(?:추가\s*해\s*줘|추가|넣어\s*줘|넣어|담아\s*줘|담아))$",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(r"\s+(?:다음\s*(?:곡|노래|트랙)?\s*(?:으로|에|에는|로)|다음에|다음으로|다음에는)$", "", cleaned, flags=re.IGNORECASE)
         cleaned = _ACK_KO_PLAY_VERB_RE.sub("", cleaned)
         cleaned = re.sub(r"\s+(?:좀|한번|한 번|바로|지금|빨리|계속)$", "", cleaned).strip(" .!?,~\"'“”")
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
@@ -109,6 +123,9 @@ def format_command_ack(intent: VoiceIntent, is_dac_mode: bool = False) -> str | 
     if act == IntentAction.PLAY_SEARCH:
         target = extract_spoken_play_target(intent)
         return f"네, {target} 틀어드릴게요." if target else "네, 음악 틀어드릴게요."
+    if act == IntentAction.QUEUE_NEXT:
+        target = extract_spoken_play_target(intent)
+        return f"네, {target} 다음 곡으로 예약해둘게요." if target else "네, 다음 곡으로 예약해둘게요."
     if act == IntentAction.PLAY_MIX:
         low = (intent.raw_text or "").lower()
         if any(k in low for k in ("마이믹스", "마이 믹스", "my mix", "타이달 믹스", "tidal mix")):
@@ -414,6 +431,28 @@ class VoiceExecutor:
                     if res.get("category") != "classical_work":
                         self._schedule_tidal_track_radio(player_id)
                 verb = "검색 확인(dry-run)" if dry_run else "재생 시작"
+                return done(
+                    True,
+                    f"TIDAL [{res.get('category')}] '{res.get('title')}' {verb}",
+                    res,
+                )
+
+            if act == IntentAction.QUEUE_NEXT:
+                if self.is_youtube_active_fn() and self.youtube_handler is not None:
+                    return self.youtube_handler(intent, dry_run)
+                queries = intent.all_queries()
+                if not queries:
+                    return done(False, "예약할 곡명이나 가수명이 비어 있습니다.")
+                res = self.lms.tidal_search_and_play(
+                    player_id,
+                    queries=queries,
+                    search_type=intent.search_type,
+                    dry_run=dry_run,
+                    play_action="insert",
+                )
+                if not res.get("ok"):
+                    return done(False, f"TIDAL에서 '{queries[0]}' 검색 결과를 찾지 못했습니다.", res)
+                verb = "예약 확인(dry-run)" if dry_run else "다음 곡으로 예약 완료"
                 return done(
                     True,
                     f"TIDAL [{res.get('category')}] '{res.get('title')}' {verb}",

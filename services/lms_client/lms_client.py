@@ -511,6 +511,7 @@ class LMSClient:
         search_type: str = "any",
         dry_run: bool = False,
         limit: int = 10,
+        play_action: str = "play",
     ) -> dict[str, Any]:
         """Search TIDAL via LMS plugin using ordered query candidates and play the best match."""
         search_root_id = self._find_tidal_root_id(player_id, "search", item_type="search")
@@ -568,13 +569,22 @@ class LMSClient:
                         display_title = f"{display_title}{mvt_suffix}"
 
                     if not dry_run:
-                        self.tidal_play_item(player_id, str(track_1["id"]))
-                        for extra_t in suite[1:]:
-                            self.call(player_id, ["tidal", "playlist", "add", f"item_id:{extra_t['id']}"])
+                        st = self.player_status(player_id)
+                        is_playing = st.get("mode") == "play"
+                        tracks_count = int(st.get("playlist_tracks") or 0)
+                        if play_action in ("insert", "queue_next") and (is_playing or tracks_count > 0):
+                            for extra_t in reversed(suite):
+                                self.call(player_id, ["tidal", "playlist", "insert", f"item_id:{extra_t['id']}"])
+                        else:
+                            self.tidal_play_item(player_id, str(track_1["id"]))
+                            for extra_t in suite[1:]:
+                                self.call(player_id, ["tidal", "playlist", "add", f"item_id:{extra_t['id']}"])
 
                     return {
                         "ok": True,
-                        "played": not dry_run,
+                        "played": not dry_run and play_action not in ("insert", "queue_next"),
+                        "queued": not dry_run and play_action in ("insert", "queue_next"),
+                        "play_action": play_action,
                         "matched_query": q,
                         "category": "classical_work",
                         "item_id": str(track_1.get("id")),
@@ -636,11 +646,19 @@ class LMSClient:
                             break
 
                 if not dry_run:
-                    self.tidal_play_item(player_id, play_id)
+                    st = self.player_status(player_id)
+                    is_playing = st.get("mode") == "play"
+                    tracks_count = int(st.get("playlist_tracks") or 0)
+                    if play_action in ("insert", "queue_next") and (is_playing or tracks_count > 0):
+                        self.call(player_id, ["tidal", "playlist", "insert", f"item_id:{play_id}"])
+                    else:
+                        self.tidal_play_item(player_id, play_id)
 
                 return {
                     "ok": True,
-                    "played": not dry_run,
+                    "played": not dry_run and play_action not in ("insert", "queue_next"),
+                    "queued": not dry_run and play_action in ("insert", "queue_next"),
+                    "play_action": play_action,
                     "matched_query": q,
                     "category": cat_name,
                     "item_id": play_id,
@@ -815,6 +833,7 @@ def main() -> int:
     p_tpq.add_argument("queries", nargs="+", help="Ordered search query candidates")
     p_tpq.add_argument("--type", dest="search_type", default="any", choices=["any", "track", "artist", "album", "playlist"])
     p_tpq.add_argument("--dry-run", action="store_true")
+    p_tpq.add_argument("--next", action="store_true", help="Queue as next track instead of playing immediately")
 
     p_url = sub.add_parser("play-url", help="Play a direct stream or file URL")
     p_url.add_argument("url")
@@ -860,7 +879,13 @@ def main() -> int:
     elif args.cmd == "tidal-play":
         out = client.tidal_play_item(player_id, args.item_id)
     elif args.cmd == "tidal-play-query":
-        out = client.tidal_search_and_play(player_id, args.queries, search_type=args.search_type, dry_run=args.dry_run)
+        out = client.tidal_search_and_play(
+            player_id,
+            args.queries,
+            search_type=args.search_type,
+            dry_run=args.dry_run,
+            play_action="insert" if getattr(args, "next", False) else "play",
+        )
     elif args.cmd == "play-url":
         out = client.play_url(player_id, args.url)
     else:

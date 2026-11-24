@@ -94,6 +94,40 @@ _EN_PLAY_SUFFIX_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Queue / reservation phrasing (e.g. "다음곡으로 ... 틀어줘", "다음 곡으로 예약해줘", "... 예약해줘", "play ... next")
+_KO_QUEUE_PREFIX_RE = re.compile(
+    r"^(?:다음\s*(?:곡|노래|트랙)?\s*(?:으로|에|에는|로)|다음에|다음으로|다음에는)\s+",
+    re.IGNORECASE,
+)
+
+_KO_QUEUE_SUFFIX_RE = re.compile(
+    r"(?:"
+    r"\s+(?:다음\s*(?:곡|노래|트랙)?\s*(?:으로|에|에는|로)|다음에|다음으로|다음에는)"
+    r"(?:\s*(?:좀|한번|한 번|바로|지금|빨리|계속))?"
+    r"(?:\s*(?:노래|음악|곡|트랙|앨범|플레이리스트|믹스))?"
+    r"\s*(?:틀어\s*줘|틀어\s*주세요|틀어\s*줄래|틀어\s*줄래요|틀어|틀줘|틀어봐|틀어봐요|재생해\s*줘|재생해\s*주세요|재생해|재생|들려\s*줘|들려\s*주세요|들려|켜\s*줘|켜|넣어\s*줘|넣어|추가\s*해\s*줘|추가|예약\s*해\s*줘|예약\s*해\s*주세요|예약\s*해|예약|해\s*줘|해)"
+    r"|"
+    r"\s*(?:(?:다음\s*(?:곡|노래|트랙)?\s*(?:으로|에|에는|로)|다음에|다음으로|다음에는)\s*)?"
+    r"(?:\s*(?:좀|한번|한 번|바로|지금|빨리|계속))?"
+    r"(?:\s*(?:노래|음악|곡|트랙|앨범|플레이리스트|믹스))?"
+    r"\s*(?:예약\s*(?:해\s*줘|해\s*주세요|해\s*줄래|해\s*줄래요|해|부탁해|걸어\s*줘|걸어|등록\s*해\s*줘|등록|해)?|"
+    r"대기열에\s*(?:추가\s*해\s*줘|추가\s*해\s*주세요|추가|넣어\s*줘|넣어|담아\s*줘|담아)|"
+    r"큐에\s*(?:추가\s*해\s*줘|추가\s*해\s*주세요|추가|넣어\s*줘|넣어|담아\s*줘|담아)|"
+    r"플레이리스트에\s*(?:추가\s*해\s*줘|추가\s*해\s*주세요|추가|넣어\s*줘|넣어|담아\s*줘|담아))"
+    r")$",
+    re.IGNORECASE,
+)
+
+_EN_QUEUE_PREFIX_RE = re.compile(
+    r"^(?:please\s+)?(?:play\s+next|queue\s+next|queue\s+up\s+next|reserve)\s+",
+    re.IGNORECASE,
+)
+
+_EN_QUEUE_SUFFIX_RE = re.compile(
+    r"\s+(?:next|to\s+(?:the\s+)?queue)(?:\s+please)?$",
+    re.IGNORECASE,
+)
+
 
 def _detect_language(text: str) -> str:
     has_ko = bool(re.search(r"[가-힣]", text))
@@ -334,9 +368,15 @@ def parse_command(raw_text: str, context: Any | None = None) -> VoiceIntent:
         )
 
     # 4. NEXT / PREVIOUS track
-    if re.search(
-        r"(^(?:다음\s*(?:곡|노래|트랙|거)?|다음(?:으로)?)$|다음\s*(?:곡|노래|트랙|거)(?:\s*(?:틀어|재생|넘겨))?|넘겨\s*줘|넘겨|스킵|넥스트|^next(?:\s+(?:song|track))?$|^skip(?:\s+(?:this\s+)?(?:track|song))?$)",
-        low,
+    if (
+        re.fullmatch(
+            r"(?:다음\s*(?:곡|노래|트랙|거)?|다음(?:으로)?|넥스트|스킵(?:\s*해\s*줘|\s*해)?|넘겨(?:\s*줘|\s*주세요)?|"
+            r"다음\s*(?:곡|노래|트랙|거)?\s*(?:으로|에)?\s*(?:틀어(?:\s*줘|\s*주세요)?|재생(?:\s*해\s*줘|\s*해|\s*해\s*주세요)?|넘겨(?:\s*줘|\s*주세요)?|스킵)|"
+            r"다음으로\s*(?:넘겨(?:\s*줘|\s*주세요)?|틀어(?:\s*줘|\s*주세요)?)|"
+            r"next(?:\s+(?:song|track))?|skip(?:\s+(?:this\s+)?(?:track|song))?)",
+            low,
+        )
+        or re.fullmatch(r".*(?:스킵해줘|스킵해|넘겨줘)", low)
     ):
         return VoiceIntent(
             action=IntentAction.NEXT,
@@ -431,8 +471,14 @@ def parse_command(raw_text: str, context: Any | None = None) -> VoiceIntent:
         )
 
     # 8.5 YOUTUBE / K-POP MUSIC VIDEO ("유튜브 틀어줘", "kpop 뮤직비디오 틀어줘", "뉴진스 뮤비 틀어줘")
-    has_ko_play_intent = bool(_KO_PLAY_SUFFIX_RE.search(text))
-    has_en_play_intent = bool(_EN_PLAY_PREFIX_RE.search(text))
+    is_ko_queue_prefix = bool(_KO_QUEUE_PREFIX_RE.search(text))
+    is_ko_queue_suffix = bool(_KO_QUEUE_SUFFIX_RE.search(text))
+    is_en_queue_prefix = bool(_EN_QUEUE_PREFIX_RE.search(text))
+    is_en_queue_suffix = bool(_EN_QUEUE_SUFFIX_RE.search(text))
+    is_queue_next = is_ko_queue_prefix or is_ko_queue_suffix or is_en_queue_prefix or is_en_queue_suffix
+
+    has_ko_play_intent = bool(_KO_PLAY_SUFFIX_RE.search(text)) or is_ko_queue_suffix
+    has_en_play_intent = bool(_EN_PLAY_PREFIX_RE.search(text)) or is_en_queue_prefix or is_en_queue_suffix
     is_yt_explicit = bool(re.search(r"(유튜브|유투브|youtube)", low))
     is_mv_explicit = bool(re.search(r"(뮤직\s*비디오|뮤비|\bmv\b|music\s+video)", low))
 
@@ -440,13 +486,22 @@ def parse_command(raw_text: str, context: Any | None = None) -> VoiceIntent:
         if (
             has_ko_play_intent
             or has_en_play_intent
+            or is_queue_next
             or re.search(r"(틀어|재생|보여|들려|플레이|켜|play|watch|stream)", low)
             or is_mv_explicit
         ):
             extracted = text
+            if is_en_queue_prefix:
+                extracted = _EN_QUEUE_PREFIX_RE.sub("", extracted)
+            if is_en_queue_suffix:
+                extracted = _EN_QUEUE_SUFFIX_RE.sub("", extracted)
             if has_en_play_intent:
                 extracted = _EN_PLAY_PREFIX_RE.sub("", extracted)
                 extracted = _EN_PLAY_SUFFIX_RE.sub("", extracted)
+            if is_ko_queue_prefix:
+                extracted = _KO_QUEUE_PREFIX_RE.sub("", extracted)
+            if is_ko_queue_suffix:
+                extracted = _KO_QUEUE_SUFFIX_RE.sub("", extracted)
             if has_ko_play_intent:
                 extracted = _KO_PLAY_SUFFIX_RE.sub("", extracted)
             extracted = re.sub(r"^(?:유튜브|유투브|youtube)(?:에서|로|의)?\s*", "", extracted, flags=re.IGNORECASE).strip()
@@ -476,16 +531,17 @@ def parse_command(raw_text: str, context: Any | None = None) -> VoiceIntent:
                 disp_query = f"{extracted} 뮤직비디오"
 
             return VoiceIntent(
-                action=IntentAction.PLAY_YOUTUBE,
+                action=IntentAction.QUEUE_NEXT if is_queue_next else IntentAction.PLAY_YOUTUBE,
                 raw_text=raw_text,
                 query=yt_query,
                 display_query=disp_query,
                 confidence=0.98,
                 wake_word_detected=wake_detected,
                 language=lang,
+                provider="youtube" if is_queue_next else "rule",
             )
 
-    # 9. PLAY SEARCH (Korean or English music search command)
+    # 9. PLAY SEARCH or QUEUE NEXT (Korean or English music search/queue command)
     # 9.1 Partitive classical/album work structure (e.g. "호두까기 인형 중 트레팍", "사계 중 봄")
     m_part = _WORK_PARTITIVE_RE.match(text)
     if m_part:
@@ -502,7 +558,7 @@ def parse_command(raw_text: str, context: Any | None = None) -> VoiceIntent:
             primary = expanded[0] if expanded else f"{work_cand} {part_cand}"
             fallbacks = expanded[1:] if len(expanded) > 1 else []
             return VoiceIntent(
-                action=IntentAction.PLAY_SEARCH,
+                action=IntentAction.QUEUE_NEXT if is_queue_next else IntentAction.PLAY_SEARCH,
                 raw_text=raw_text,
                 query=primary,
                 fallback_queries=fallbacks,
@@ -517,7 +573,7 @@ def parse_command(raw_text: str, context: Any | None = None) -> VoiceIntent:
     if context is not None:
         if callable(getattr(context, "is_recent_music_playback", None)):
             has_recent_playback = context.is_recent_music_playback()
-        elif isinstance(context, dict) and context.get("last_action") in ("play_search", "play_mix", "play_favorite", "resume"):
+        elif isinstance(context, dict) and context.get("last_action") in ("play_search", "play_mix", "play_favorite", "resume", "queue_next"):
             has_recent_playback = True
 
     is_music_context = wake_detected or is_correction or has_recent_playback
@@ -525,7 +581,7 @@ def parse_command(raw_text: str, context: Any | None = None) -> VoiceIntent:
     # 9.2 Direct track / artist / classical work mention when awake or correcting
     if (
         is_music_context
-        and not (has_ko_play_intent or has_en_play_intent)
+        and not (has_ko_play_intent or has_en_play_intent or is_queue_next)
         and (
             text in TRACK_ALIASES
             or text in ARTIST_ALIASES
@@ -563,7 +619,7 @@ def parse_command(raw_text: str, context: Any | None = None) -> VoiceIntent:
             language=lang,
         )
 
-    if has_ko_play_intent or has_en_play_intent:
+    if has_ko_play_intent or has_en_play_intent or is_queue_next:
         # Infer search_type from phrasing BEFORE stripping descriptors
         search_type = "any"
         if re.search(r"(앨범|album)", low):
@@ -574,9 +630,17 @@ def parse_command(raw_text: str, context: Any | None = None) -> VoiceIntent:
             search_type = "artist"
 
         extracted = text
+        if is_en_queue_prefix:
+            extracted = _EN_QUEUE_PREFIX_RE.sub("", extracted)
+        if is_en_queue_suffix:
+            extracted = _EN_QUEUE_SUFFIX_RE.sub("", extracted)
         if has_en_play_intent:
             extracted = _EN_PLAY_PREFIX_RE.sub("", extracted)
             extracted = _EN_PLAY_SUFFIX_RE.sub("", extracted)
+        if is_ko_queue_prefix:
+            extracted = _KO_QUEUE_PREFIX_RE.sub("", extracted)
+        if is_ko_queue_suffix:
+            extracted = _KO_QUEUE_SUFFIX_RE.sub("", extracted)
         if has_ko_play_intent:
             # Strip explicit "타이달에서 " / "유튜브에서 " prefix if present
             extracted = re.sub(r"^(?:타이달|tidal)에서\s*", "", extracted, flags=re.IGNORECASE)
@@ -589,6 +653,22 @@ def parse_command(raw_text: str, context: Any | None = None) -> VoiceIntent:
         extracted = re.sub(r"([가-힣a-zA-Z0-9]+)의\s+", r"\1 ", extracted).strip()
 
         if not extracted:
+            if is_queue_next and is_ko_queue_prefix:
+                return VoiceIntent(
+                    action=IntentAction.NEXT,
+                    raw_text=raw_text,
+                    confidence=0.98,
+                    wake_word_detected=wake_detected,
+                    language=lang,
+                )
+            if is_queue_next:
+                return VoiceIntent(
+                    action=IntentAction.UNKNOWN,
+                    raw_text=raw_text,
+                    confidence=0.0,
+                    wake_word_detected=wake_detected,
+                    language=lang,
+                )
             return VoiceIntent(
                 action=IntentAction.RESUME,
                 raw_text=raw_text,
@@ -614,6 +694,8 @@ def parse_command(raw_text: str, context: Any | None = None) -> VoiceIntent:
             else:
                 search_type = "track"
 
+        target_action = IntentAction.QUEUE_NEXT if is_queue_next else IntentAction.PLAY_SEARCH
+
         # Contextual artist slot inheritance for track queries
         if (
             context is not None
@@ -634,7 +716,7 @@ def parse_command(raw_text: str, context: Any | None = None) -> VoiceIntent:
                 fallbacks = expanded[1:] if len(expanded) > 1 else []
                 resolved_to_tidal = not bool(re.search(r"[가-힣]", primary))
                 return VoiceIntent(
-                    action=IntentAction.PLAY_SEARCH,
+                    action=target_action,
                     raw_text=raw_text,
                     query=primary,
                     fallback_queries=fallbacks,
@@ -652,12 +734,20 @@ def parse_command(raw_text: str, context: Any | None = None) -> VoiceIntent:
         # If primary query still contains unresolved Hangul (unknown song/artist or SenseVoice ASR typo),
         # keep confidence < 0.9 so HybridVoiceInterpreter can optionally refine via fast text-only LLM.
         resolved_to_tidal = not bool(re.search(r"[가-힣]", primary))
+        disp_q = ""
+        if is_queue_next:
+            disp_q = extracted
+            if extracted in TRACK_ALIASES and TRACK_ALIASES[extracted]:
+                disp_q = TRACK_ALIASES[extracted][-1]
+        elif extracted in TRACK_ALIASES and TRACK_ALIASES[extracted]:
+            disp_q = TRACK_ALIASES[extracted][-1]
 
         return VoiceIntent(
-            action=IntentAction.PLAY_SEARCH,
+            action=target_action,
             raw_text=raw_text,
             query=primary,
             fallback_queries=fallbacks,
+            display_query=disp_q,
             search_type=search_type,
             confidence=0.94 if resolved_to_tidal else 0.85,
             wake_word_detected=wake_detected or is_correction,

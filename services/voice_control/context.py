@@ -143,7 +143,7 @@ class ConversationContext:
     def is_recent_music_playback(self) -> bool:
         if not self.is_active():
             return False
-        return self.last_action in ("play_search", "play_mix", "play_favorite", "resume")
+        return self.last_action in ("play_search", "play_mix", "play_favorite", "resume", "queue_next")
 
     def resolve_contextual_followup(self, raw_text: str) -> VoiceIntent | None:
         """Resolve a follow-up or correction utterance using conversation slot inheritance.

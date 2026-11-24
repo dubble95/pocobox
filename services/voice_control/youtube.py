@@ -751,6 +751,15 @@ class YouTubePlaybackManager:
         self.active = False
         self.playing = False
 
+    def insert_next(self, video: dict[str, Any]) -> int:
+        """Insert a video immediately after the current video in queue (or at end)."""
+        pos = (self.index + 1) if (self.active and self.queue) else len(self.queue)
+        self.queue.insert(pos, video)
+        if not self.active:
+            self.active = True
+            self.index = 0
+        return pos
+
     def to_dict(self) -> dict[str, Any]:
         cur = self.current_video()
         return {
