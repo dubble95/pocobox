@@ -36,6 +36,29 @@ SUBCHUNKS_PER_CHUNK = max(1, CHUNK_MS // SUBCHUNK_MS)  # 5 x 20ms = 100ms
 SUBCHUNK_48K_STEREO_BYTES = (RNNOISE_SAMPLE_RATE * SUBCHUNK_MS // 1000) * 4  # 3840 bytes
 SUBCHUNK_16K_FRAMES = SAMPLE_RATE * SUBCHUNK_MS // 1000  # 320 frames
 
+# Flexible Korean phonetic pattern for '포코야' / 'poco ya' variants
+# Syllable 1 (optional): [포코뽀보모뭐카파바호]
+# Syllable 2 (required): [코꼬고구꾸쿠]
+# Syllable 3 (required): [야요양향아]
+_KOREAN_POCO_REGEX = re.compile(
+    r"(?:^|[\s.,!?~:;\-_])"
+    r"(?:"
+    r"(?:포|코|뽀|보|모|뭐|카|파|바|호)?"
+    r"[코꼬고구꾸쿠]"
+    r"[야요양향아]"
+    r"|"
+    r"(?:헤이|오케이|안녕)\s*(?:포코|코코|뽀코|보코)"
+    r"|"
+    r"(?:hey|ok|hello)\s*poco"
+    r"|"
+    r"poco\s*(?:ya|box)?"
+    r"|"
+    r"pocobox"
+    r")"
+    r"(?:$|[\s.,!?~:;\-_])",
+    re.IGNORECASE,
+)
+
 
 class LocalWakeVerifier:
     """Fast non-blocking local SenseVoice INT8 wake-word spotter for Korean/English during music.
@@ -43,39 +66,9 @@ class LocalWakeVerifier:
     Runs in a dedicated background daemon thread. When an audio slice containing a candidate
     speech burst is submitted, it transcribes with local SenseVoice INT8 on cores 4-7
     (taking ~200ms) with ZERO cloud calls. Checks both AEC3-cancelled audio and raw bandpassed
-    audio. If wake phrases ("포코야", "코코야", "헤이 포코", "고야", "hey poco", etc.)
+    audio. If wake phrases ("포코야", "코코야", "카고야", "바꾸요", "고야", "hey poco", etc.)
     are matched, it invokes the wake callback immediately.
     """
-
-    WAKE_KEYWORDS: tuple[str, ...] = (
-        "포코야",
-        "코코야",
-        "포코향",
-        "포코아",
-        "포코양",
-        "뽀코야",
-        "뽀코",
-        "포코",
-        "포고야",
-        "포고향",
-        "포고",
-        "보코야",
-        "보코",
-        "모코야",
-        "뭐코야",
-        "헤이포코",
-        "헤이 포코",
-        "오케이포코",
-        "오케이 포코",
-        "안녕포코",
-        "안녕 포코",
-        "hey poco",
-        "poco ya",
-        "poco box",
-        "pocobox",
-        "고야",
-        "고양",
-    )
 
     def __init__(
         self,
@@ -104,16 +97,9 @@ class LocalWakeVerifier:
     def match_wake_phrase(cls, text: str) -> str | None:
         if not text:
             return None
-        cleaned = re.sub(r"[\s.,!?~:;\-_]+", "", text.lower())
-        for kw in cls.WAKE_KEYWORDS:
-            ckw = re.sub(r"[\s.,!?~:;\-_]+", "", kw.lower())
-            if ckw in ("고야", "고양"):
-                # Short phonetic variants match when spoken as an isolated wake call or with a short filler
-                if cleaned in ("고야", "고양", "그고야", "하고야", "어고야", "응고야"):
-                    return "poco ya"
-            else:
-                if ckw in cleaned:
-                    return "poco ya" if any(k in kw for k in ("포코", "코코", "뽀코", "보코", "포고", "모코", "뭐코", "poco")) else kw
+        stripped = re.sub(r"^(?:그|어|아|응|음|네)\s+", "", text.strip())
+        if _KOREAN_POCO_REGEX.search(stripped):
+            return "poco ya"
         return None
 
     def submit(
@@ -195,6 +181,16 @@ class LocalWakeVerifier:
 
                     stt_ms = (time.monotonic() - t0) * 1000.0
                     matched = self.match_wake_phrase(text)
+                    if text:
+                        log.info(
+                            "Local STT candidate [%s]: %r -> matched=%s (stt=%.1fms peak=%.1f amb=%.1f)",
+                            source_tag,
+                            text,
+                            matched,
+                            stt_ms,
+                            peak_rms,
+                            amb_rms,
+                        )
                     if matched and self.on_wake is not None:
                         log.info(
                             "Local SenseVoice wake triggered (%s): phrase='%s' text=%r (stt=%.1fms peak=%.1f amb=%.1f)",
