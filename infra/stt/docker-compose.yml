@@ -16,7 +16,9 @@ services:
       - STT_LANG=ko
       - STT_USE_ITN=1
       - STT_THREADS=4
+      - STT_ENGINE=sensevoice
       - STT_MODEL_DIR=/models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17
+      - QWEN3_ASR_MODEL_DIR=/models/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25
       - TTS_MODEL_DIR=/models/kokoro-int8-en-v0_19
       - TTS_KO_MODEL_DIR=/models/sherpa-onnx-supertonic-3-tts-int8-2026-05-11
     volumes:

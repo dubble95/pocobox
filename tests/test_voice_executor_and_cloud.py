@@ -928,6 +928,105 @@ class TestGeminiOptimizationAndTelemetry(unittest.TestCase):
             self.assertEqual(contents[1]["parts"][0]["text"], "TIDAL [songs] 'Big Moe' 재생 시작")
             self.assertEqual(contents[2]["parts"][0]["text"], "아니 호두까기 인형 중 트래팍")
 
+    def test_transcribe_local_audio_engine_parameter(self) -> None:
+        """Verify engine selection in transcribe_local_audio."""
+        interp = HybridVoiceInterpreter(
+            provider="local",
+            local_stt_url="http://127.0.0.1:8766",
+            local_stt_engine="sensevoice",
+        )
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"ok": True, "text": "테스트", "engine": "qwen3-asr"}
+        mock_session = MagicMock()
+        mock_session.post.return_value = mock_resp
+        interp._session = mock_session
+
+        res = interp.transcribe_local_audio(b"fake-wav", engine="qwen3")
+        self.assertEqual(res["text"], "테스트")
+        called_url = mock_session.post.call_args[0][0]
+        self.assertIn("engine=qwen3", called_url)
+        self.assertIn("language=ko", called_url)
+
+    def test_stt_server_qwen3_routing(self) -> None:
+        """Verify stt_server handler properly routes between SenseVoice and Qwen3-ASR."""
+        from infra.stt.stt_server import build_handler
+        import io
+
+        mock_sense = MagicMock()
+        mock_sense.model_dir = "/models/sensevoice"
+        mock_sense.default_language = "ko"
+        mock_sense.num_threads = 4
+        mock_sense.load_sec = 0.5
+        mock_sense.transcribe_wav.return_value = {
+            "ok": True,
+            "text": "센스보이스 결과",
+            "lang": "ko",
+            "event": "Speech",
+            "emotion": "NEUTRAL",
+            "is_music_only": False,
+            "duration_sec": 1.0,
+            "latency_ms": 150.0,
+        }
+
+        mock_qwen = MagicMock()
+        mock_qwen.available = True
+        mock_qwen.model_dir = "/models/qwen3"
+        mock_qwen.load_sec = 1.2
+        mock_qwen.transcribe_wav.return_value = {
+            "ok": True,
+            "text": "Qwen3 결과",
+            "lang": "ko",
+            "event": "Speech",
+            "emotion": "NEUTRAL",
+            "is_music_only": False,
+            "duration_sec": 1.0,
+            "latency_ms": 1200.0,
+            "engine": "qwen3-asr",
+        }
+
+        handler_cls = build_handler(
+            engine=mock_sense,
+            qwen3_engine=mock_qwen,
+            default_stt_engine="sensevoice",
+        )
+
+        # 1. Test GET /health
+        class DummyRequest:
+            def makefile(self, *args, **kwargs):
+                return io.BytesIO()
+
+        h = handler_cls.__new__(handler_cls)
+        h.path = "/health"
+        h.headers = {}
+        sent_payloads = []
+
+        def fake_send_json(code, payload):
+            sent_payloads.append((code, payload))
+
+        h._send_json = fake_send_json
+        h.do_GET()
+
+        self.assertEqual(len(sent_payloads), 1)
+        code, health_info = sent_payloads[0]
+        self.assertEqual(code, 200)
+        self.assertTrue(health_info["qwen3_available"])
+        self.assertIn("qwen3", health_info["available_stt_engines"])
+
+        # 2. Test POST /transcribe?engine=qwen3
+        h.path = "/transcribe?engine=qwen3"
+        h.headers = {"Content-Length": "4"}
+        h.rfile = io.BytesIO(b"test")
+        sent_payloads.clear()
+        h.do_POST()
+
+        self.assertEqual(len(sent_payloads), 1)
+        code, transcribe_info = sent_payloads[0]
+        self.assertEqual(code, 200)
+        self.assertEqual(transcribe_info["text"], "Qwen3 결과")
+        mock_qwen.transcribe_wav.assert_called_once()
+        mock_sense.transcribe_wav.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -15,8 +15,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-import sherpa_onnx
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore[assignment]
+
+try:
+    import sherpa_onnx
+except ImportError:
+    sherpa_onnx = None  # type: ignore[assignment]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -150,6 +157,108 @@ class SenseVoiceEngine:
             "is_music_only": is_music_only,
             "duration_sec": round(duration_sec, 3),
             "latency_ms": latency_ms,
+        }
+
+
+class Qwen3AsrEngine:
+    """Thread-safe wrapper around sherpa-onnx Qwen3-ASR OfflineRecognizer (2026 SOTA)."""
+
+    def __init__(
+        self,
+        model_dir: str,
+        *,
+        num_threads: int = 4,
+        max_new_tokens: int = 48,
+        hotwords: str = "",
+    ) -> None:
+        self.model_dir = Path(model_dir)
+        self.num_threads = max(1, num_threads)
+        self.max_new_tokens = max(1, max_new_tokens)
+        self.hotwords = hotwords
+        self._lock = threading.Lock()
+        self._rec: sherpa_onnx.OfflineRecognizer | None = None
+        self.available = False
+        self.load_sec = 0.0
+
+        if not self.model_dir.is_dir():
+            log.info("Qwen3-ASR model directory %s does not exist (disabled)", self.model_dir)
+            return
+
+        conv_file = self.model_dir / "conv_frontend.onnx"
+        enc_file = self.model_dir / "encoder.int8.onnx"
+        if not enc_file.is_file():
+            enc_file = self.model_dir / "encoder.onnx"
+        dec_file = self.model_dir / "decoder.int8.onnx"
+        if not dec_file.is_file():
+            dec_file = self.model_dir / "decoder.onnx"
+        tok_dir = self.model_dir / "tokenizer"
+        if not tok_dir.is_dir():
+            tok_dir = self.model_dir
+
+        if not (conv_file.is_file() and enc_file.is_file() and dec_file.is_file()):
+            log.info("Qwen3-ASR ONNX models not found in %s (disabled)", self.model_dir)
+            return
+
+        try:
+            t0 = time.perf_counter()
+            self._rec = sherpa_onnx.OfflineRecognizer.from_qwen3_asr(
+                conv_frontend=str(conv_file),
+                encoder=str(enc_file),
+                decoder=str(dec_file),
+                tokenizer=str(tok_dir),
+                num_threads=self.num_threads,
+                max_new_tokens=self.max_new_tokens,
+                hotwords=self.hotwords,
+            )
+            self.load_sec = round(time.perf_counter() - t0, 3)
+            self.available = True
+            log.info(
+                "Loaded Qwen3-ASR (%s, threads=%d, max_tokens=%d) in %.2fs",
+                self.model_dir.name,
+                self.num_threads,
+                self.max_new_tokens,
+                self.load_sec,
+            )
+        except Exception as exc:
+            log.warning("Failed to initialize Qwen3-ASR from %s: %s", self.model_dir, exc)
+
+    def transcribe_wav(self, wav_bytes: bytes) -> dict[str, Any]:
+        if not self.available or self._rec is None:
+            raise RuntimeError("Qwen3-ASR engine is not available")
+        samples, sample_rate = _load_wav_mono_float32(wav_bytes)
+        duration_sec = len(samples) / float(sample_rate) if sample_rate else 0.0
+        if len(samples) == 0:
+            return {
+                "ok": True,
+                "text": "",
+                "lang": "ko",
+                "event": "",
+                "emotion": "",
+                "is_music_only": False,
+                "duration_sec": 0.0,
+                "latency_ms": 0.0,
+                "engine": "qwen3-asr",
+            }
+
+        t0 = time.perf_counter()
+        with self._lock:
+            stream = self._rec.create_stream()
+            stream.accept_waveform(sample_rate, samples)
+            self._rec.decode_stream(stream)
+            res = stream.result
+        latency_ms = round((time.perf_counter() - t0) * 1000.0, 1)
+
+        text = str(getattr(res, "text", "") or "").strip()
+        return {
+            "ok": True,
+            "text": text,
+            "lang": "ko",
+            "event": "Speech" if text else "",
+            "emotion": "NEUTRAL",
+            "is_music_only": False,
+            "duration_sec": round(duration_sec, 3),
+            "latency_ms": latency_ms,
+            "engine": "qwen3-asr",
         }
 
 
@@ -325,6 +434,8 @@ def build_handler(
     engine: SenseVoiceEngine,
     tts_engine: SherpaTtsEngine | None = None,
     tts_ko_engine: SherpaTtsEngine | None = None,
+    qwen3_engine: Qwen3AsrEngine | None = None,
+    default_stt_engine: str = "sensevoice",
 ) -> type[BaseHTTPRequestHandler]:
     class STTHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -347,13 +458,21 @@ def build_handler(
                 info: dict[str, Any] = {
                     "ok": True,
                     "engine": "sensevoice-int8",
+                    "default_stt_engine": default_stt_engine,
                     "model_dir": str(engine.model_dir),
                     "default_language": engine.default_language,
                     "num_threads": engine.num_threads,
                     "load_sec": engine.load_sec,
+                    "qwen3_available": bool(qwen3_engine and qwen3_engine.available),
                     "tts_available": bool(tts_engine and tts_engine.available),
                     "tts_ko_available": bool(tts_ko_engine and tts_ko_engine.available),
                 }
+                avail_engines = ["sensevoice"]
+                if qwen3_engine and qwen3_engine.available:
+                    info["qwen3_model_dir"] = str(qwen3_engine.model_dir)
+                    info["qwen3_load_sec"] = qwen3_engine.load_sec
+                    avail_engines.append("qwen3")
+                info["available_stt_engines"] = avail_engines
                 if tts_engine and tts_engine.available:
                     info["tts_engine"] = tts_engine.engine_type
                     info["tts_model_dir"] = str(tts_engine.model_dir)
@@ -407,12 +526,19 @@ def build_handler(
                 wav_bytes = self.rfile.read(length) if length > 0 else b""
                 qs = urllib.parse.parse_qs(parsed.query)
                 lang = (qs.get("language", [""])[0] or "").strip() or None
-                out = engine.transcribe_wav(wav_bytes, language=lang)
+                req_engine = (qs.get("engine", [""])[0] or default_stt_engine).strip().lower()
+
+                if req_engine.startswith("qwen") and qwen3_engine and qwen3_engine.available:
+                    out = qwen3_engine.transcribe_wav(wav_bytes)
+                else:
+                    out = engine.transcribe_wav(wav_bytes, language=lang)
+                    out["engine"] = "sensevoice"
                 log.info(
-                    "STT (%.2fs, lang=%s event=%s) -> %.0fms %r",
+                    "STT [%s] (%.2fs, lang=%s event=%s) -> %.0fms %r",
+                    out.get("engine", "sensevoice"),
                     out["duration_sec"],
-                    out["lang"] or lang or engine.default_language,
-                    out["event"] or "-",
+                    out.get("lang") or lang or engine.default_language,
+                    out.get("event") or "-",
                     out["latency_ms"],
                     out["text"],
                 )
@@ -434,6 +560,18 @@ def main() -> None:
     language = os.environ.get("STT_LANG", "ko")
     use_itn = os.environ.get("STT_USE_ITN", "1").strip().lower() not in ("0", "false", "no")
     threads = int(os.environ.get("STT_THREADS", "4"))
+    default_stt_engine = os.environ.get("STT_ENGINE", "sensevoice").strip().lower()
+
+    qwen3_model_dir = os.environ.get(
+        "QWEN3_ASR_MODEL_DIR",
+        "/models/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25",
+    )
+    qwen3_hotwords = os.environ.get(
+        "QWEN3_HOTWORDS",
+        "포코야,볼륨,다음 곡,이전 곡,재생,멈춰,아이유,밤편지,콜드플레이,재즈,마이믹스,날씨,시간,Radiohead,Coldplay",
+    )
+    qwen3_max_new_tokens = int(os.environ.get("QWEN3_MAX_NEW_TOKENS", "48"))
+
     tts_model_dir = os.environ.get("TTS_MODEL_DIR", "/models/kokoro-int8-en-v0_19")
     tts_ko_model_dir = os.environ.get(
         "TTS_KO_MODEL_DIR",
@@ -446,14 +584,33 @@ def main() -> None:
         use_itn=use_itn,
         num_threads=threads,
     )
+    qwen3_engine = (
+        Qwen3AsrEngine(
+            qwen3_model_dir,
+            num_threads=threads,
+            max_new_tokens=qwen3_max_new_tokens,
+            hotwords=qwen3_hotwords,
+        )
+        if Path(qwen3_model_dir).is_dir()
+        else None
+    )
     tts_engine = SherpaTtsEngine(tts_model_dir, num_threads=threads, engine_name="kokoro-int8-en")
     tts_ko_engine = (
         SherpaTtsEngine(tts_ko_model_dir, num_threads=threads, engine_name="supertonic-ko")
         if Path(tts_ko_model_dir).is_dir()
         else None
     )
-    server = ThreadingHTTPServer((host, port), build_handler(engine, tts_engine, tts_ko_engine))
-    log.info("PocoBox SenseVoice local STT + Sherpa TTS server listening on http://%s:%d", host, port)
+    server = ThreadingHTTPServer(
+        (host, port),
+        build_handler(
+            engine,
+            tts_engine=tts_engine,
+            tts_ko_engine=tts_ko_engine,
+            qwen3_engine=qwen3_engine,
+            default_stt_engine=default_stt_engine,
+        ),
+    )
+    log.info("PocoBox local STT (SenseVoice/Qwen3) + Sherpa TTS server listening on http://%s:%d", host, port)
     server.serve_forever()
 
 

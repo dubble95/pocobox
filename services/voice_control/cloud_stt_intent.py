@@ -428,6 +428,7 @@ class HybridVoiceInterpreter:
         local_stt_url: str | None = None,
         local_stt_language: str | None = None,
         local_stt_timeout: float | None = None,
+        local_stt_engine: str | None = None,
         local_llm_url: str | None = None,
         enable_local_llm: bool | None = None,
         local_llm_timeout: float | None = None,
@@ -461,6 +462,9 @@ class HybridVoiceInterpreter:
             if local_stt_timeout is not None
             else float(os.environ.get("LOCAL_STT_TIMEOUT", "5.0"))
         )
+        self.local_stt_engine = (
+            local_stt_engine if local_stt_engine is not None else os.environ.get("LOCAL_STT_ENGINE", "")
+        ).strip().lower()
         raw_local_llm = local_llm_url if local_llm_url is not None else os.environ.get("LOCAL_LLM_URL", "http://127.0.0.1:8767")
         self.local_llm_url = raw_local_llm.strip().rstrip("/")
         if enable_local_llm is not None:
@@ -671,12 +675,22 @@ class HybridVoiceInterpreter:
             log.debug("Local SLM intent parsing failed (%s): %s", text, exc)
         return None
 
-    def transcribe_local_audio(self, wav_bytes: bytes, *, language: str | None = None) -> dict[str, Any]:
-        """Transcribe WAV bytes via the local SenseVoice-Small INT8 HTTP server (~0.15-0.35s)."""
+    def transcribe_local_audio(
+        self,
+        wav_bytes: bytes,
+        *,
+        language: str | None = None,
+        engine: str | None = None,
+    ) -> dict[str, Any]:
+        """Transcribe WAV bytes via the local SenseVoice-Small / Qwen3-ASR HTTP server."""
         if not self.local_stt_url:
             raise RuntimeError("LOCAL_STT_URL is not configured.")
         lang = (language or self.local_stt_language or "ko").strip().lower()
-        url = f"{self.local_stt_url}/transcribe?{urllib.parse.urlencode({'language': lang})}"
+        active_engine = (engine or self.local_stt_engine or "").strip().lower()
+        params: dict[str, str] = {"language": lang}
+        if active_engine:
+            params["engine"] = active_engine
+        url = f"{self.local_stt_url}/transcribe?{urllib.parse.urlencode(params)}"
         headers = {"Content-Type": "audio/wav"}
         if self._session is not None:
             resp = self._session.post(url, data=wav_bytes, headers=headers, timeout=self.local_stt_timeout)

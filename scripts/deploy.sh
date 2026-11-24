@@ -9,7 +9,7 @@ echo "==> Deploying PocoBox full stack (Phases 1-4) to ${HOST}..."
 ssh "${HOST}" 'mkdir -p /tmp/pocobox-deploy/voice_control /tmp/pocobox-deploy/stt'
 
 scp "${REPO_DIR}/infra/lms/docker-compose.yml" "${HOST}:/tmp/pocobox-deploy/"
-scp "${REPO_DIR}"/infra/stt/* "${HOST}:/tmp/pocobox-deploy/stt/"
+scp -r "${REPO_DIR}"/infra/stt/* "${HOST}:/tmp/pocobox-deploy/stt/"
 scp "${REPO_DIR}/infra/audio/pocobox-pulseaudio.service" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/audio/pocobox_aec3.cpp" "${HOST}:/tmp/pocobox-deploy/"
 scp "${REPO_DIR}/infra/audio/build-aec3.sh" "${HOST}:/tmp/pocobox-deploy/"
