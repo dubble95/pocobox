@@ -42,8 +42,9 @@ class LocalWakeVerifier:
 
     Runs in a dedicated background daemon thread. When an audio slice containing a candidate
     speech burst is submitted, it transcribes with local SenseVoice INT8 on cores 4-7
-    (taking ~200ms) with ZERO cloud calls. If wake phrases ("포코야", "코코야", "헤이 포코",
-    "hey poco", etc.) are matched, it invokes the wake callback immediately.
+    (taking ~200ms) with ZERO cloud calls. Checks both AEC3-cancelled audio and raw bandpassed
+    audio. If wake phrases ("포코야", "코코야", "헤이 포코", "고야", "hey poco", etc.)
+    are matched, it invokes the wake callback immediately.
     """
 
     WAKE_KEYWORDS: tuple[str, ...] = (
@@ -51,9 +52,17 @@ class LocalWakeVerifier:
         "코코야",
         "포코향",
         "포코아",
+        "포코양",
         "뽀코야",
         "뽀코",
         "포코",
+        "포고야",
+        "포고향",
+        "포고",
+        "보코야",
+        "보코",
+        "모코야",
+        "뭐코야",
         "헤이포코",
         "헤이 포코",
         "오케이포코",
@@ -64,6 +73,8 @@ class LocalWakeVerifier:
         "poco ya",
         "poco box",
         "pocobox",
+        "고야",
+        "고양",
     )
 
     def __init__(
@@ -76,7 +87,7 @@ class LocalWakeVerifier:
         self.stt_url = raw_url.rstrip("/") if raw_url else ""
         self.enabled = enabled and bool(self.stt_url)
         self.on_wake = on_wake
-        self._queue: queue.Queue[tuple[bytes, float, float]] = queue.Queue(maxsize=1)
+        self._queue: queue.Queue[tuple[bytes, bytes, float, float]] = queue.Queue(maxsize=1)
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._verifying = False
@@ -96,16 +107,27 @@ class LocalWakeVerifier:
         cleaned = re.sub(r"[\s.,!?~:;\-_]+", "", text.lower())
         for kw in cls.WAKE_KEYWORDS:
             ckw = re.sub(r"[\s.,!?~:;\-_]+", "", kw.lower())
-            if ckw in cleaned:
-                return "poco ya" if any(k in kw for k in ("포코", "코코", "뽀코", "poco")) else kw
+            if ckw in ("고야", "고양"):
+                # Short phonetic variants match when spoken as an isolated wake call or with a short filler
+                if cleaned in ("고야", "고양", "그고야", "하고야", "어고야", "응고야"):
+                    return "poco ya"
+            else:
+                if ckw in cleaned:
+                    return "poco ya" if any(k in kw for k in ("포코", "코코", "뽀코", "보코", "포고", "모코", "뭐코", "poco")) else kw
         return None
 
-    def submit(self, pcm_bytes: bytes, peak_rms: float, ambient_rms: float) -> bool:
+    def submit(
+        self,
+        raw_pcm: bytes,
+        clean_pcm: bytes | None = None,
+        peak_rms: float = 0.0,
+        ambient_rms: float = 0.0,
+    ) -> bool:
         """Submit candidate speech audio for local STT verification without blocking the audio loop."""
-        if not self.enabled or self._stop_event.is_set() or not pcm_bytes:
+        if not self.enabled or self._stop_event.is_set() or (not raw_pcm and not clean_pcm):
             return False
         try:
-            self._queue.put_nowait((pcm_bytes, peak_rms, ambient_rms))
+            self._queue.put_nowait((raw_pcm, clean_pcm or b"", peak_rms, ambient_rms))
             return True
         except queue.Full:
             return False
@@ -113,7 +135,7 @@ class LocalWakeVerifier:
     def close(self) -> None:
         self._stop_event.set()
         try:
-            self._queue.put_nowait((b"", 0.0, 0.0))
+            self._queue.put_nowait((b"", b"", 0.0, 0.0))
         except queue.Full:
             pass
         if self._thread and self._thread.is_alive():
@@ -121,38 +143,70 @@ class LocalWakeVerifier:
         self._thread = None
 
     def _worker_loop(self) -> None:
+        session = None
+        try:
+            import requests
+            session = requests.Session()
+        except ImportError:
+            pass
+
         while not self._stop_event.is_set():
             try:
-                pcm_bytes, peak_rms, amb_rms = self._queue.get(timeout=0.5)
+                raw_pcm, clean_pcm, peak_rms, amb_rms = self._queue.get(timeout=0.5)
             except queue.Empty:
                 continue
-            if self._stop_event.is_set() or not pcm_bytes:
+            if self._stop_event.is_set() or (not raw_pcm and not clean_pcm):
                 break
 
             self._verifying = True
             try:
-                wav_bytes = build_wav_bytes(pcm_bytes, sample_rate=SAMPLE_RATE, channels=1)
-                req = urllib.request.Request(
-                    f"{self.stt_url}/transcribe?language=ko",
-                    data=wav_bytes,
-                    headers={"Content-Type": "audio/wav"},
-                )
-                t0 = time.monotonic()
-                with urllib.request.urlopen(req, timeout=2.5) as resp:
-                    res = json.loads(resp.read().decode("utf-8"))
-                stt_ms = (time.monotonic() - t0) * 1000.0
-                text = str(res.get("text", "")).strip()
-                matched = self.match_wake_phrase(text)
-                if matched and self.on_wake is not None:
-                    log.info(
-                        "Local SenseVoice wake triggered: phrase='%s' text=%r (stt=%.1fms peak=%.1f amb=%.1f)",
-                        matched,
-                        text,
-                        stt_ms,
-                        peak_rms,
-                        amb_rms,
-                    )
-                    self.on_wake(matched, text, stt_ms, peak_rms, amb_rms)
+                candidates: list[tuple[str, bytes]] = []
+                if clean_pcm:
+                    candidates.append(("clean_aec", clean_pcm))
+                if raw_pcm:
+                    candidates.append(("raw_bandpass", raw_pcm))
+
+                for source_tag, pcm_data in candidates:
+                    wav_bytes = build_wav_bytes(pcm_data, sample_rate=SAMPLE_RATE, channels=1)
+                    t0 = time.monotonic()
+                    text = ""
+                    if session is not None:
+                        try:
+                            resp = session.post(
+                                f"{self.stt_url}/transcribe?language=ko",
+                                data=wav_bytes,
+                                headers={"Content-Type": "audio/wav"},
+                                timeout=2.0,
+                            )
+                            if resp.status_code == 200:
+                                res = resp.json()
+                                text = str(res.get("text", "")).strip()
+                        except Exception as exc:
+                            log.debug("Session transcribe error (%s): %s", source_tag, exc)
+                    if not text:
+                        req = urllib.request.Request(
+                            f"{self.stt_url}/transcribe?language=ko",
+                            data=wav_bytes,
+                            headers={"Content-Type": "audio/wav"},
+                        )
+                        with urllib.request.urlopen(req, timeout=2.0) as resp:
+                            res = json.loads(resp.read().decode("utf-8"))
+                            text = str(res.get("text", "")).strip()
+
+                    stt_ms = (time.monotonic() - t0) * 1000.0
+                    matched = self.match_wake_phrase(text)
+                    if matched and self.on_wake is not None:
+                        log.info(
+                            "Local SenseVoice wake triggered (%s): phrase='%s' text=%r (stt=%.1fms peak=%.1f amb=%.1f)",
+                            source_tag,
+                            matched,
+                            text,
+                            stt_ms,
+                            peak_rms,
+                            amb_rms,
+                        )
+                        self.on_wake(matched, text, stt_ms, peak_rms, amb_rms)
+                        break
             except Exception as exc:
                 log.debug("Local wake verifier STT notice: %s", exc)
             finally:
@@ -724,20 +778,25 @@ class ContinuousVoiceListener:
 
                         # Candidate speech detection for local STT wake verifier during music
                         if self.music_playing and self.local_wake_verifier is not None:
-                            speech_floor = max(self.wake_min_rms, self.wake_ambient_rms * 1.60)
-                            if rms >= speech_floor:
+                            # Use wake_rms (AEC3 echo-cancelled signal) so room music doesn't continuously trigger STT.
+                            # When human speech occurs during music, wake_rms rises prominently above residual echo.
+                            speech_floor = max(self.wake_min_rms, self.wake_ambient_rms * 1.35, self.wake_ambient_rms + 40.0)
+                            if wake_rms >= speech_floor:
                                 self._speech_streak += 1
                                 self._silence_streak = 0
-                                if rms > self._candidate_peak:
-                                    self._candidate_peak = rms
+                                if wake_rms > self._candidate_peak:
+                                    self._candidate_peak = wake_rms
                             else:
                                 if self._speech_streak > 0:
                                     self._silence_streak += 1
 
+                            # An utterance burst typically lasts 2 to 12 chunks (200ms - 1.2s).
+                            # When speech pauses for 2 chunks (200ms) or reaches max streak (12 chunks):
                             if self._speech_streak >= 2 and (self._silence_streak >= 2 or self._speech_streak >= 12):
                                 slice_len = min(len(self._stt_ring), self._speech_streak + 6)
-                                pcm_slice = b"".join(list(self._stt_ring)[-slice_len:])
-                                self.local_wake_verifier.submit(pcm_slice, self._candidate_peak, self.wake_ambient_rms)
+                                raw_slice = b"".join(list(self._stt_ring)[-slice_len:])
+                                wake_slice = b"".join(list(self._wake_clip_ring)[-slice_len:])
+                                self.local_wake_verifier.submit(raw_slice, wake_slice, self._candidate_peak, self.wake_ambient_rms)
                                 self._speech_streak = 0
                                 self._silence_streak = 0
                                 self._candidate_peak = 0.0
