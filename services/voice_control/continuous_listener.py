@@ -267,8 +267,8 @@ class ContinuousVoiceListener:
         self.source = os.environ.get("VOICE_PULSE_SOURCE") or None
 
         # DSP, decoupled AEC3 & local wake-word configuration
-        # Default to primary bottom talk microphone ('left', DEC0 104) with +16dB voice pickup
-        self.mic_channel = os.environ.get("VOICE_MIC_CHANNEL", "left").strip().lower()
+        # Default to dual-mic broadside beamformer ('both': coherent L+R sum with +3dB voice gain)
+        self.mic_channel = os.environ.get("VOICE_MIC_CHANNEL", "both").strip().lower()
         self.use_rnnoise = _env_bool("VOICE_USE_RNNOISE", True)
         self.rnnoise_on_wake = _env_bool("VOICE_RNNOISE_ON_WAKE", False)
         self.use_bandpass = _env_bool("VOICE_USE_BANDPASS", True)
@@ -361,7 +361,11 @@ class ContinuousVoiceListener:
 
     @property
     def _use_48k_stereo(self) -> bool:
-        return self.rnnoise_active or self.aec3_available or self.mic_channel in ("left", "right")
+        return (
+            self.rnnoise_active
+            or self.aec3_available
+            or self.mic_channel in ("left", "right", "both", "beam", "sum", "diff", "stereo")
+        )
 
     def _set_state(self, new_state: str, rms: float = 0.0) -> None:
         changed = new_state != self.state

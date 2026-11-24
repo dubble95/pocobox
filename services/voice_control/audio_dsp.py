@@ -147,21 +147,83 @@ def filter_wav_speech_band(
     return buf.getvalue()
 
 
-def extract_mono_channel(stereo_pcm: bytes, channel: str = "right") -> bytes:
-    """Extract left, right, or averaged mono 16-bit PCM from interleaved 2ch s16le bytes."""
+def extract_mono_channel(stereo_pcm: bytes, channel: str = "both") -> bytes:
+    """Extract left, right, beamformed, or averaged mono 16-bit PCM from interleaved 2ch s16le bytes.
+
+    Supported channel modes:
+      - 'both' / 'beam' / 'sum': Broadside coherent beamformer: (L + R) * 1/sqrt(2).
+        For far-field broadside speech, coherent summation adds +3.0 dB of voice signal
+        power while diffuse ambient/room noise adds incoherently (+0 dB), boosting SNR by ~3 dB.
+      - 'left': Left channel only (DEC0 talk mic on POCO F1, bottom primary).
+      - 'right': Right channel only (DEC7 secondary mic on POCO F1, top).
+      - 'diff' / 'differential': Near-field smartphone differential: (L - R).
+        Cancels far-field speech; suitable only when held right at the mouth.
+      - 'mono' / 'avg' / 'average': Standard linear average (L + R) // 2.
+    """
     n_samples = len(stereo_pcm) // 2
     if n_samples < 2:
         return b""
+    ch = channel.strip().lower()
+
+    try:
+        import numpy as np  # type: ignore
+
+        arr = np.frombuffer(stereo_pcm[: (n_samples // 2) * 4], dtype=np.int16).reshape(-1, 2)
+        if ch == "left":
+            return arr[:, 0].tobytes()
+        if ch == "right":
+            return arr[:, 1].tobytes()
+        if ch in ("both", "beam", "sum"):
+            # Coherent broadside beamformer: (L + R) * 1/sqrt(2) ≈ 0.70710678
+            beam = np.clip(
+                np.rint((arr[:, 0].astype(np.float32) + arr[:, 1].astype(np.float32)) * 0.70710678),
+                -32768,
+                32767,
+            ).astype(np.int16)
+            return beam.tobytes()
+        if ch in ("diff", "differential"):
+            diff = np.clip(
+                arr[:, 0].astype(np.int32) - arr[:, 1].astype(np.int32),
+                -32768,
+                32767,
+            ).astype(np.int16)
+            return diff.tobytes()
+        # Default: linear average
+        avg = ((arr[:, 0].astype(np.int32) + arr[:, 1].astype(np.int32)) // 2).astype(np.int16)
+        return avg.tobytes()
+    except Exception:
+        pass
+
     samples = array.array("h")
     samples.frombytes(stereo_pcm[: (n_samples // 2) * 4])
-    ch = channel.strip().lower()
     if ch == "left":
         return samples[0::2].tobytes()
     if ch == "right":
         return samples[1::2].tobytes()
-    # Average L + R
+
     n_frames = len(samples) // 2
     out = array.array("h", [0] * n_frames)
+    if ch in ("both", "beam", "sum"):
+        scale = 0.70710678
+        for i in range(n_frames):
+            val = int(round((samples[2 * i] + samples[2 * i + 1]) * scale))
+            if val > 32767:
+                val = 32767
+            elif val < -32768:
+                val = -32768
+            out[i] = val
+        return out.tobytes()
+    if ch in ("diff", "differential"):
+        for i in range(n_frames):
+            val = samples[2 * i] - samples[2 * i + 1]
+            if val > 32767:
+                val = 32767
+            elif val < -32768:
+                val = -32768
+            out[i] = val
+        return out.tobytes()
+
+    # Default: linear average
     for i in range(n_frames):
         out[i] = (samples[2 * i] + samples[2 * i + 1]) // 2
     return out.tobytes()

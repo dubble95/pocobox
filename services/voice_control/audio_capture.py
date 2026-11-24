@@ -138,7 +138,7 @@ def record_utterance_wav(
     env.setdefault("XDG_RUNTIME_DIR", "/run/user/10000")
     env.setdefault("PULSE_SERVER", "unix:/run/user/10000/pulse/native")
 
-    mic_channel = os.environ.get("VOICE_MIC_CHANNEL", "right").strip().lower()
+    mic_channel = os.environ.get("VOICE_MIC_CHANNEL", "both").strip().lower()
     use_rnnoise = os.environ.get("VOICE_USE_RNNOISE", "1").strip().lower() not in ("0", "false", "no")
     use_bandpass = os.environ.get("VOICE_USE_BANDPASS", "1").strip().lower() not in ("0", "false", "no")
     bp_low = float(os.environ.get("VOICE_BANDPASS_LOW_HZ", "150.0"))
@@ -146,7 +146,10 @@ def record_utterance_wav(
     rnnoise = RNNoiseProcessor() if use_rnnoise else None
     decimator = AntiAliasDecimator48kTo16k()
     bandpass = SpeechBandpassFilter(sample_rate=SAMPLE_RATE, low_hz=bp_low, high_hz=bp_high) if use_bandpass else None
-    use_48k_stereo = bool((rnnoise and rnnoise.available) or mic_channel in ("left", "right"))
+    use_48k_stereo = bool(
+        (rnnoise and rnnoise.available)
+        or mic_channel in ("left", "right", "both", "beam", "sum", "diff", "stereo")
+    )
 
     rate = RNNOISE_SAMPLE_RATE if use_48k_stereo else SAMPLE_RATE
     channels = 2 if use_48k_stereo else CHANNELS

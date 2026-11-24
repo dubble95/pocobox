@@ -99,9 +99,15 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
         left = extract_mono_channel(interleaved, "left")
         right = extract_mono_channel(interleaved, "right")
         mono = extract_mono_channel(interleaved, "mono")
+        both = extract_mono_channel(interleaved, "both")
+        diff = extract_mono_channel(interleaved, "diff")
         self.assertEqual(struct.unpack("<6h", left), (100,) * 6)
         self.assertEqual(struct.unpack("<6h", right), (3000,) * 6)
         self.assertEqual(struct.unpack("<6h", mono), (1550,) * 6)
+        # (100 + 3000) * 0.70710678 = 2192
+        self.assertEqual(struct.unpack("<6h", both), (2192,) * 6)
+        # 100 - 3000 = -2900
+        self.assertEqual(struct.unpack("<6h", diff), (-2900,) * 6)
 
         dec = decimate_48k_to_16k(right)
         self.assertEqual(struct.unpack("<2h", dec), (3000, 3000))
