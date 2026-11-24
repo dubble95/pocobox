@@ -176,7 +176,7 @@ class LocalWakeVerifier:
                                 f"{self.stt_url}/transcribe?language=ko",
                                 data=wav_bytes,
                                 headers={"Content-Type": "audio/wav"},
-                                timeout=2.0,
+                                timeout=3.5,
                             )
                             if resp.status_code == 200:
                                 res = resp.json()
@@ -189,7 +189,7 @@ class LocalWakeVerifier:
                             data=wav_bytes,
                             headers={"Content-Type": "audio/wav"},
                         )
-                        with urllib.request.urlopen(req, timeout=2.0) as resp:
+                        with urllib.request.urlopen(req, timeout=3.5) as resp:
                             res = json.loads(resp.read().decode("utf-8"))
                             text = str(res.get("text", "")).strip()
 
