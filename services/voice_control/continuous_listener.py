@@ -467,6 +467,7 @@ class ContinuousVoiceListener:
             "listening_state": self.state,
             "music_playing": self.music_playing,
             "ambient_rms": round(self.ambient_rms, 1),
+            "wake_ambient_rms": round(self.wake_ambient_rms, 1),
             "current_rms": round(self.current_rms, 1),
             "active_threshold": round(self.current_threshold(), 1),
             "quiet_threshold": self.min_threshold,
@@ -709,6 +710,12 @@ class ContinuousVoiceListener:
                     self._wake_rms_window.append(wake_rms)
                     self._wake_clip_ring.append(wake_data)
                     self._stt_ring.append(stt_data)
+
+                    # Continuous tracking of AEC-cancelled background floor
+                    if not wake_mode and not recording:
+                        wcap = min(wake_rms, 2500.0)
+                        walpha = 0.03 if wcap > self.wake_ambient_rms else 0.08
+                        self.wake_ambient_rms = self.wake_ambient_rms * (1.0 - walpha) + wcap * walpha
 
                     # During cooldown, keep tracking ambient_rms cleanly
                     if now < cooldown_until:
