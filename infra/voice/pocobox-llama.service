@@ -10,21 +10,22 @@ Group=user
 CPUAffinity=4-7
 
 # Model Profiles on PocoBox (5.4GB RAM / 3.5GB Available):
-# 1. Profile Default (Ultra-fast Intent & QA, ~0.6-1.1s, RAM ~550MB):
+# 1. Profile Default (Ultra-fast Intent & QA, 18.7 t/s, ~0.6-1.1s, RAM ~470MB, Recommended):
 #    MemoryMax=800M
-#    ExecStart=/usr/bin/llama-server -m /srv/pocobox/models/qwen2.5-0.5b-instruct-q4_k_m.gguf --device none --no-op-offload --host 127.0.0.1 --port 8767 -c 1024 -t 4 --parallel 1 --temp 0.0 --no-warmup
-# 2. Profile Quality (Enhanced Bilingual Korean/English Fluency, ~1.8-2.6s, RAM ~1.3GB):
+#    ExecStart=/usr/bin/llama-server -m /srv/pocobox/models/qwen2.5-0.5b-instruct-q4_k_m.gguf --device none --no-op-offload --host 127.0.0.1 --port 8767 -c 1024 -t 4 --parallel 1 --temp 0.0 --no-warmup --reasoning off
+# 2. Profile Korean-Specialized (LG EXAONE 4.0 1.2B, Best Korean Nuance, ~1.8-2.5s, RAM ~850MB):
+#    MemoryMax=1200M
+#    ExecStart=/usr/bin/llama-server -m /srv/pocobox/models/EXAONE-4.0-1.2B-Q4_K_M.gguf --device none --no-op-offload --host 127.0.0.1 --port 8767 -c 1024 -t 4 --parallel 1 --temp 0.0 --no-warmup --reasoning off
+# 3. Profile Hybrid Next-Gen (Liquid AI LFM3-1.7B, Conv+Sliding Attention, ~1.9-2.8s, RAM ~1.1GB):
 #    MemoryMax=1500M
-#    ExecStart=/usr/bin/llama-server -m /srv/pocobox/models/qwen2.5-1.5b-instruct-q4_k_m.gguf --device none --no-op-offload --host 127.0.0.1 --port 8767 -c 1024 -t 4 --parallel 1 --temp 0.0 --no-warmup
-# 3. Profile Korean-Specialized (LG EXAONE 3.5, Best Korean Nuance, ~2.8-3.5s, RAM ~1.9GB):
-#    MemoryMax=2200M
-#    ExecStart=/usr/bin/llama-server -m /srv/pocobox/models/EXAONE-3.5-2.4B-Instruct-Q4_K_M.gguf --device none --no-op-offload --host 127.0.0.1 --port 8767 -c 1024 -t 4 --parallel 1 --temp 0.0 --no-warmup
-# 4. Profile Ultra-Light (SmolLM2-360M, Instant Command Classification, ~0.4s, RAM ~350MB):
-#    MemoryMax=500M
-#    ExecStart=/usr/bin/llama-server -m /srv/pocobox/models/SmolLM2-360M-Instruct-Q4_K_M.gguf --device none --no-op-offload --host 127.0.0.1 --port 8767 -c 1024 -t 4 --parallel 1 --temp 0.0 --no-warmup
+#    ExecStart=/usr/bin/llama-server -m /srv/pocobox/models/LFM3-1.7B-Q4_K_M.gguf --device none --no-op-offload --host 127.0.0.1 --port 8767 -c 1024 -t 4 --parallel 1 --temp 0.0 --no-warmup --reasoning off
+# 4. Profile Quality Dense (Qwen2.5-1.5B, High Fluency, ~1.8-2.6s, RAM ~1.3GB):
+#    MemoryMax=1500M
+#    ExecStart=/usr/bin/llama-server -m /srv/pocobox/models/qwen2.5-1.5b-instruct-q4_k_m.gguf --device none --no-op-offload --host 127.0.0.1 --port 8767 -c 1024 -t 4 --parallel 1 --temp 0.0 --no-warmup --reasoning off
+# 5. [WARNING] Qwen3.5-0.8B: Gated DeltaNet linear attention has severe ARMv8 CPU emulation bottleneck (0.5 t/s); NOT recommended on SD845.
 
 MemoryMax=800M
-ExecStart=/usr/bin/llama-server -m /srv/pocobox/models/qwen2.5-0.5b-instruct-q4_k_m.gguf --device none --no-op-offload --host 127.0.0.1 --port 8767 -c 1024 -t 4 --parallel 1 --temp 0.0 --no-warmup
+ExecStart=/usr/bin/llama-server -m /srv/pocobox/models/qwen2.5-0.5b-instruct-q4_k_m.gguf --device none --no-op-offload --host 127.0.0.1 --port 8767 -c 1024 -t 4 --parallel 1 --temp 0.0 --no-warmup --reasoning off
 Restart=always
 RestartSec=3
 

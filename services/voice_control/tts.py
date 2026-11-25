@@ -472,12 +472,19 @@ def fetch_local_tts_wav(
     sid: int = 0,
     speed: float = 1.0,
     lang: str = "en",
+    num_steps: int = 5,
     url: str | None = None,
     timeout: float = 15.0,
 ) -> bytes:
     """Synthesize 24kHz mono PCM16 WAV audio via local TTS microservice (127.0.0.1:8766/tts)."""
     endpoint = url or os.environ.get("LOCAL_TTS_URL", "http://127.0.0.1:8766/tts")
-    payload = json.dumps({"text": text, "sid": sid, "speed": speed, "lang": lang}).encode("utf-8")
+    payload = json.dumps({
+        "text": text,
+        "sid": sid,
+        "speed": speed,
+        "lang": lang,
+        "num_steps": num_steps,
+    }).encode("utf-8")
     req = urllib.request.Request(
         endpoint,
         data=payload,
@@ -549,7 +556,7 @@ def synthesize_pcm(
 
     if voice in ("local-ko", "supertonic-ko") or voice.startswith("local-") or voice.startswith("supertonic"):
         try:
-            wav_bytes = fetch_local_tts_wav(text, lang="ko")
+            wav_bytes = fetch_local_tts_wav(text, lang="ko", num_steps=5)
             if wav_bytes:
                 pcm = _decode_wav_pcm16_bytes(wav_bytes)
                 if pcm:

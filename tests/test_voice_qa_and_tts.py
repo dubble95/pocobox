@@ -602,7 +602,7 @@ class TestVoiceQAAndTTS(unittest.TestCase):
         # Local Korean TTS case
         with mock.patch("voice_control.tts.fetch_local_tts_wav", return_value=valid_wav) as mock_local:
             pcm_ko = synthesize_pcm("안녕하세요", lang="ko", voice="local-ko", rate_pct=0, pitch_hz=0)
-            mock_local.assert_called_once_with("안녕하세요", lang="ko")
+            mock_local.assert_called_once_with("안녕하세요", lang="ko", num_steps=5)
             self.assertEqual(len(pcm_ko), 240 * 2)
 
         # Local Korean TTS fallback case

@@ -397,6 +397,8 @@ class SherpaTtsEngine:
         *,
         sid: int = 0,
         speed: float = 1.0,
+        lang: str = "ko",
+        num_steps: int = 5,
         target_sample_rate: int = 24000,
     ) -> bytes:
         if not self.available or self._tts is None:
@@ -405,7 +407,15 @@ class SherpaTtsEngine:
         if not cleaned:
             return b""
         with self._lock:
-            audio = self._tts.generate(cleaned, sid=sid, speed=speed)
+            if self.engine_type == "supertonic" or "supertonic" in str(self.model_dir):
+                gen_cfg = sherpa_onnx.GenerationConfig()
+                gen_cfg.sid = sid
+                gen_cfg.speed = speed
+                gen_cfg.num_steps = max(3, min(20, num_steps))
+                gen_cfg.extra = {"lang": lang or "ko"}
+                audio = self._tts.generate(cleaned, gen_cfg)
+            else:
+                audio = self._tts.generate(cleaned, sid=sid, speed=speed)
         samples = np.array(audio.samples, dtype=np.float32)
         sr = int(getattr(audio, "sample_rate", 24000))
         if target_sample_rate > 0 and sr != target_sample_rate and len(samples) > 0:
@@ -496,6 +506,7 @@ def build_handler(
                     sid = int(data.get("sid", 0))
                     speed = float(data.get("speed", 1.0))
                     lang = str(data.get("lang", "en")).strip().lower()
+                    num_steps = int(data.get("num_steps", 5))
 
                     active_engine = tts_ko_engine if (lang == "ko" and tts_ko_engine and tts_ko_engine.available) else tts_engine
                     if not active_engine or not active_engine.available:
@@ -503,7 +514,7 @@ def build_handler(
                         return
 
                     t0 = time.perf_counter()
-                    wav_bytes = active_engine.generate_wav(text, sid=sid, speed=speed)
+                    wav_bytes = active_engine.generate_wav(text, sid=sid, speed=speed, lang=lang, num_steps=num_steps)
                     gen_ms = round((time.perf_counter() - t0) * 1000.0, 1)
                     log.info("%s TTS (%.0fms, %d bytes) -> %r", active_engine.engine_type, gen_ms, len(wav_bytes), text[:40])
                     self.send_response(200)
@@ -513,9 +524,14 @@ def build_handler(
                     self.send_header("Connection", "keep-alive")
                     self.end_headers()
                     self.wfile.write(wav_bytes)
+                except (BrokenPipeError, ConnectionResetError):
+                    log.debug("Local TTS client disconnected before playback transfer completed")
                 except Exception as exc:
                     log.warning("Local TTS error: %s", exc)
-                    self._send_json(400, {"ok": False, "error": str(exc)})
+                    try:
+                        self._send_json(400, {"ok": False, "error": str(exc)})
+                    except Exception:
+                        pass
                 return
 
             if parsed.path != "/transcribe":
