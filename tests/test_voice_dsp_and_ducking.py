@@ -215,6 +215,34 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
             self.assertEqual(fake_lms.volume, 100)
             self.assertEqual(fake_lms.volume_history, [18, 100])
 
+    def test_auto_duck_watchdog_restores_volume_on_timeout(self) -> None:
+        """When an unhandled error or hang occurs after wake, watchdog timer forces volume restoration."""
+        with mock.patch.dict(os.environ, {"CONTINUOUS_LISTEN": "0", "VOICE_DUCK_ENABLED": "1", "VOICE_DUCK_VOLUME": "18", "ENABLE_CHIME": "0"}):
+            ctrl = VoiceController()
+        fake_lms = _FakeLMS(mode="play", volume=90)
+        ctrl.lms = fake_lms  # type: ignore[assignment]
+
+        self.assertTrue(ctrl._begin_duck())
+        self.assertEqual(fake_lms.volume, 18)
+        self.assertIsNotNone(ctrl._duck_watchdog)
+
+        # Trigger watchdog timeout directly
+        ctrl._on_duck_watchdog_timeout()
+        self.assertEqual(fake_lms.volume, 90)
+        self.assertIsNone(ctrl._duck_saved)
+
+    def test_dac_mode_stuck_duck_volume_safety_recovery(self) -> None:
+        """If DAC volume was stuck at duck volume with no saved state, restore_duck safely recovers to 100%."""
+        with mock.patch.dict(os.environ, {"CONTINUOUS_LISTEN": "0", "VOICE_DUCK_ENABLED": "1", "ENABLE_CHIME": "0"}):
+            ctrl = VoiceController()
+        fake_lms = _FakeLMS(mode="play", volume=18)
+        ctrl.lms = fake_lms  # type: ignore[assignment]
+        ctrl._duck_saved = None
+
+        with mock.patch.object(ctrl, "is_dac_mode", return_value=True):
+            ctrl._restore_duck(skip_restore=False)
+            self.assertEqual(fake_lms.volume, 100)
+
     def test_bare_wake_word_triggers_followup_listen_once(self) -> None:
         with mock.patch.dict(os.environ, {"CONTINUOUS_LISTEN": "0", "VOICE_DUCK_ENABLED": "1", "ENABLE_CHIME": "0"}):
             ctrl = VoiceController()

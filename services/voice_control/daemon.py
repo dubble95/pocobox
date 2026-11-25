@@ -395,8 +395,9 @@ class VoiceController:
         self._quiz_paused_lms: str | None = None
 
         self._listen_lock = threading.Lock()
-        self._duck_lock = threading.Lock()
+        self._duck_lock = threading.RLock()
         self._duck_saved: tuple[str, int] | None = None
+        self._duck_watchdog: threading.Timer | None = None
         self._manual_busy = False
         self._tts_speaking = False
         self._display_wake_until = 0.0
@@ -508,6 +509,34 @@ class VoiceController:
     def is_dac_mode(self) -> bool:
         return is_dac_mode(AUDIO_STATE_FILE)
 
+    def _start_duck_watchdog(self, timeout_sec: float = 10.0) -> None:
+        """Start a safety watchdog timer to ensure ducked volume is ALWAYS restored even on unhandled errors."""
+        with self._duck_lock:
+            if self._duck_watchdog is not None:
+                try:
+                    self._duck_watchdog.cancel()
+                except Exception:
+                    pass
+            timer = threading.Timer(timeout_sec, self._on_duck_watchdog_timeout)
+            timer.daemon = True
+            self._duck_watchdog = timer
+            timer.start()
+
+    def _cancel_duck_watchdog(self) -> None:
+        """Cancel the duck safety watchdog timer."""
+        with self._duck_lock:
+            if self._duck_watchdog is not None:
+                try:
+                    self._duck_watchdog.cancel()
+                except Exception:
+                    pass
+                self._duck_watchdog = None
+
+    def _on_duck_watchdog_timeout(self) -> None:
+        """Safety watchdog handler: auto-unduck if listening/processing took too long or failed to restore."""
+        log.warning("Auto-duck safety watchdog triggered (10s timeout); ensuring volume restored to pre-duck/100%%")
+        self._restore_duck(skip_restore=False)
+
     def _begin_duck(self) -> bool:
         """Immediately lower LMS music or YouTube volume while listening so 2-3m voice is crystal clear."""
         if self.youtube.active:
@@ -518,6 +547,7 @@ class VoiceController:
             return False
         with self._duck_lock:
             if self._duck_saved is not None:
+                self._start_duck_watchdog(timeout_sec=10.0)
                 return True
             try:
                 pid = self.lms.resolve_player_id(self.player_name)
@@ -526,10 +556,14 @@ class VoiceController:
                     return False
                 cur_vol = int(float(st.get("mixer volume", 0)))
                 if cur_vol <= self.duck_volume:
-                    return False
+                    if self.is_dac_mode() and cur_vol < 100:
+                        cur_vol = 100
+                    else:
+                        return False
                 self._duck_saved = (pid, cur_vol)
                 self.lms.set_volume(pid, self.duck_volume)
                 log.info("Auto-ducked LMS volume %d%% -> %d%%", cur_vol, self.duck_volume)
+                self._start_duck_watchdog(timeout_sec=10.0)
                 return True
             except Exception as exc:
                 log.debug("Auto-duck skipped: %s", exc)
@@ -538,19 +572,51 @@ class VoiceController:
 
     def _restore_duck(self, skip_restore: bool = False) -> None:
         """Restore pre-duck LMS volume unless the user explicitly changed volume."""
+        self._cancel_duck_watchdog()
         if self.youtube.active:
             self.events.publish({"type": "youtube_duck", "duck": False})
+
+        # In DAC mode, software volume must ALWAYS be 100% (unity gain / bit-perfect).
+        # Never skip restore in DAC mode, and always target 100% volume.
+        in_dac = self.is_dac_mode()
+        if in_dac:
+            skip_restore = False
+
         with self._duck_lock:
             saved = self._duck_saved
             self._duck_saved = None
-        if saved is None or skip_restore:
+
+        if saved is None:
+            # Safety recovery for DAC mode: if volume was left stuck at duck volume, force restore to 100%
+            if in_dac and not skip_restore:
+                try:
+                    pid = self.lms.resolve_player_id(self.player_name)
+                    st = self.lms.player_status(pid)
+                    cur_vol = int(float(st.get("mixer volume", 0)))
+                    if cur_vol <= (self.duck_volume + 5):
+                        self.lms.set_volume(pid, 100)
+                        log.info("DAC mode safety recovery: restored stuck volume %d%% -> 100%%", cur_vol)
+                except Exception as exc:
+                    log.debug("DAC mode stuck volume recovery skipped: %s", exc)
             return
+
+        if skip_restore:
+            return
+
         pid, prev_vol = saved
-        try:
-            self.lms.set_volume(pid, prev_vol)
-            log.info("Restored LMS volume to %d%%", prev_vol)
-        except Exception as exc:
-            log.warning("Failed to restore ducked volume to %d%%: %s", prev_vol, exc)
+        if in_dac:
+            prev_vol = 100
+
+        for attempt in range(2):
+            try:
+                self.lms.set_volume(pid, prev_vol)
+                log.info("Restored LMS volume to %d%%", prev_vol)
+                break
+            except Exception as exc:
+                if attempt == 0:
+                    time.sleep(0.15)
+                else:
+                    log.warning("Failed to restore ducked volume to %d%%: %s", prev_vol, exc)
 
     def _wake_display(self, duration_sec: float = 15.0) -> None:
         if duration_sec <= 0:

@@ -694,6 +694,11 @@ class ContinuousVoiceListener:
                 while not self._stop_event.is_set():
                     raw_data, wake_data, stt_data = self._read_clean_16k_chunk(proc)
                     if not wake_data:
+                        if wake_mode and self.on_wake_utterance is not None:
+                            try:
+                                self.on_wake_utterance(None, wake_phrase)
+                            except Exception as exc:
+                                log.error("Wake utterance cleanup error on stream EOF: %s", exc)
                         break
 
                     if self.rolling_recorder is not None and self.rolling_recorder.enabled:
@@ -706,11 +711,18 @@ class ContinuousVoiceListener:
 
                     if self.is_paused_fn():
                         self._set_state("paused")
+                        was_wake = wake_mode
+                        phrase_to_clean = wake_phrase
                         recording = False
                         wake_mode = False
                         captured.clear()
                         consecutive_speech = 0
                         preroll.clear()
+                        if was_wake and self.on_wake_utterance is not None:
+                            try:
+                                self.on_wake_utterance(None, phrase_to_clean)
+                            except Exception as exc:
+                                log.error("Wake utterance cleanup error on pause: %s", exc)
                         continue
 
                     now = time.monotonic()
