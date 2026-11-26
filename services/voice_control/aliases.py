@@ -168,6 +168,13 @@ ASR_NORMALIZATIONS: tuple[tuple[str, str], ...] = (
     ("틀어 주", "틀어줘"),
     ("재생 해 주", "재생해줘"),
     ("들려 주", "들려줘"),
+    # SenseVoice ASR mis-hearings: "들어줘" heard instead of "틀어줘", spaced "틀 줘"
+    ("들어줘", "틀어줘"),
+    ("들어 줘", "틀어줘"),
+    ("틀 줘", "틀어줘"),
+    # Classical work ASR mis-hearings
+    ("옆주곡", "협주곡"),
+    ("옆 주곡", "협주곡"),
     # Common K-pop / Western artist ASR mis-hearings & spacing
     ("뉴 진느", "뉴진스"),
     ("블랙 핑느", "블랙핑크"),
@@ -830,7 +837,7 @@ def expand_tidal_queries(query: str) -> list[str]:
     else:
         # Phonetic fuzzy Jamo matching for slightly misrecognized artist or track names
         try:
-            from .jamo_util import match_alias_with_jamo
+            from .jamo_util import match_alias_with_jamo, find_best_jamo_match
             jamo_thresh = 0.80 if len(q) <= 2 else 0.68
             best_artist_key, best_artist_vals, a_score = match_alias_with_jamo(q, ARTIST_ALIASES, threshold=jamo_thresh)
             if best_artist_key is not None and best_artist_vals:
@@ -842,6 +849,22 @@ def expand_tidal_queries(query: str) -> list[str]:
                     for tv in best_track_vals:
                         add(tv)
 
+            # Partial word matching: try the first token (likely artist name) against aliases
+            # Helps when only the artist name is misrecognized (e.g. "모차트" → "모차르트")
+            # Uses a higher threshold (0.75) to avoid over-matching on unknown names.
+            q_tokens = [t for t in q.split() if len(t) >= 2]
+            if q_tokens:
+                first_tok = q_tokens[0]
+                bk, bv, bs = match_alias_with_jamo(first_tok, ARTIST_ALIASES, threshold=0.75)
+                if bk is not None and bv:
+                    for av in bv:
+                        add(av)
+                else:
+                    bk, bv, bs = match_alias_with_jamo(first_tok, TRACK_ALIASES, threshold=0.75)
+                    if bk is not None and bv:
+                        for tv in bv:
+                            add(tv)
+
             # Check dynamic user library catalog (LMS favorites/recent playback)
             from .dynamic_catalog import get_dynamic_catalog
             d_cat = get_dynamic_catalog()
@@ -850,6 +873,13 @@ def expand_tidal_queries(query: str) -> list[str]:
                 if d_type == "track" and d_meta.get("artist"):
                     add(f"{d_meta['artist']} {d_name}")
                 add(d_name)
+            # Also try dynamic catalog with first token if full query didn't match
+            if not d_name and q_tokens:
+                d_name2, d_type2, d_meta2, d_score2 = d_cat.match_entity(q_tokens[0], threshold=0.70)
+                if d_name2:
+                    if d_type2 == "track" and d_meta2.get("artist"):
+                        add(f"{d_meta2['artist']} {d_name2}")
+                    add(d_name2)
         except Exception:
             pass
 

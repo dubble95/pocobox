@@ -122,7 +122,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div class="row">
         <button class="primary" onclick="triggerListen()">🎙 지금 바로 1회 듣기 (호출어 불필요)</button>
         <button onclick="resetFloor()">배경 기준 리셋</button>
+        <button onclick="runWakeDiagnostic()">🔍 호출어 진단 (최근 30초 분석)</button>
       </div>
+      <div id="wakeDiagResult" style="margin-top:8px; font-size:12px; color:var(--muted); max-height:120px; overflow-y:auto"></div>
     </div>
 
     <div class="card">
@@ -308,6 +310,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div class="stat"><div class="label">정밀도</div><div id="statPrec" class="val">-</div></div>
     </div>
     <div id="statRec" style="margin-top:10px; font-size:12.5px; color:var(--muted)">통계 데이터 수집 대기 중...</div>
+    <div id="statByPhrase" style="margin-top:10px; font-size:12px; color:var(--muted); max-height:140px; overflow-y:auto"></div>
   </div>
 
   <div class="card">
@@ -326,6 +329,18 @@ DASHBOARD_HTML = r"""<!doctype html>
     </div>
     <div id="accByAction" style="margin-top:10px; font-size:12px; color:var(--muted); max-height:160px; overflow-y:auto"></div>
     <div id="accRec" style="margin-top:8px; font-size:12.5px; color:var(--muted)">인식 정확도 데이터 수집 대기 중...</div>
+  </div>
+
+  <div class="card">
+    <h2>🎵 음악 매칭 성공률 (TIDAL 검색) <button onclick="pollMusicMatch()" style="padding:4px 10px; font-size:11px">새로고침</button></h2>
+    <div class="kv" style="grid-template-columns: repeat(4, 1fr)">
+      <div class="stat"><div class="label">매칭 성공률</div><div id="mmSuccess" class="val">-</div></div>
+      <div class="stat"><div class="label">성공 건수</div><div id="mmOk" class="val">0</div></div>
+      <div class="stat"><div class="label">실패 건수</div><div id="mmFail" class="val">0</div></div>
+      <div class="stat"><div class="label">총 시도</div><div id="mmTotal" class="val">0</div></div>
+    </div>
+    <div id="mmFailedQueries" style="margin-top:10px; font-size:12px; color:var(--muted); max-height:160px; overflow-y:auto"></div>
+    <div id="mmRec" style="margin-top:8px; font-size:12.5px; color:var(--muted)">음악 매칭 데이터 수집 대기 중...</div>
   </div>
 
   <div class="card">
@@ -600,6 +615,46 @@ DASHBOARD_HTML = r"""<!doctype html>
     addLog(j.ok ? "OK" : "ERR", (j.intent && j.intent.raw_text ? `“${j.intent.raw_text}” → ` : "") + (j.message || ""), j.ok ? "b-ok" : "b-rec");
   }
 
+  async function runWakeDiagnostic() {
+    const btn = event.currentTarget;
+    const origText = btn.textContent;
+    btn.textContent = "분석 중...";
+    btn.disabled = true;
+    try {
+      const r = await fetch("/voice/wake_diagnostic", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({seconds: 30})
+      });
+      const j = await r.json();
+      const el = document.getElementById("wakeDiagResult");
+      if (!j.ok) {
+        el.innerHTML = `<div style="color:var(--rec)">진단 실패: ${j.error || j.message || "알 수 없음"}</div>`;
+        addLog("WAKE_DIAG", `진단 실패: ${j.error || j.message}`, "b-rec");
+        return;
+      }
+      const lines = [];
+      lines.push(`<div style="color:var(--ok)">✓ 호출어 진단 완료 (최근 ${j.seconds}초 분석)</div>`);
+      lines.push(`<div>청크 분석: ${j.chunks_analyzed}개, 음성 감지: ${j.speech_chunks}개</div>`);
+      lines.push(`<div>음악 재생: ${j.music_playing ? "예" : "아니오"}, 배경 RMS: ${j.ambient_rms}, 최대 RMS: ${j.max_rms}, 최대 SNR: ${j.max_snr}</div>`);
+      lines.push(`<div>에너지 게이트 차단: ${j.gate_blocks}회, 신뢰도 차단: ${j.conf_rejections}회</div>`);
+      if (j.would_trigger) {
+        lines.push(`<div style="color:var(--ok)">호출어 '${j.would_trigger}'가 ${j.trigger_chunk}번째 청크에서 감지되었습니다.</div>`);
+      } else {
+        lines.push(`<div style="color:var(--rec)">호출어가 감지되지 않았습니다.</div>`);
+      }
+      lines.push(`<div style="margin-top:4px; font-size:11.5px">${j.diagnosis}</div>`);
+      el.innerHTML = lines.join("");
+      addLog("WAKE_DIAG", `진단 완료: ${j.diagnosis}`, j.would_trigger ? "b-ok" : "b-muted");
+    } catch (e) {
+      document.getElementById("wakeDiagResult").innerHTML = `<div style="color:var(--rec)">네트워크 오류: ${e}</div>`;
+      addLog("WAKE_DIAG", `네트워크 오류: ${e}`, "b-rec");
+    } finally {
+      btn.textContent = origText;
+      btn.disabled = false;
+    }
+  }
+
   async function sendText() {
     const inp = document.getElementById("cmdInput");
     const text = inp.value.trim();
@@ -779,6 +834,59 @@ DASHBOARD_HTML = r"""<!doctype html>
           : "-";
       const recs = (t.recommendations || []).join(" · ");
       document.getElementById("statRec").textContent = recs || "특이 사항 없음";
+
+      // Per-phrase wake precision breakdown
+      const byPhrase = t.by_phrase || {};
+      const phraseRows = Object.entries(byPhrase).map(([phrase, st]) => {
+        const pct = st.precision !== null && st.precision !== undefined ? (st.precision * 100).toFixed(0) + "%" : "-";
+        return `<div style="display:flex; justify-content:space-between; padding:2px 0; border-bottom:1px solid rgba(255,255,255,0.04); font-size:11.5px">
+          <span style="color:var(--muted); white-space:nowrap">${phrase}</span>
+          <span style="font-variant-numeric:tabular-nums">정탐 ${st.tp} / 오탐 ${st.fp} = <strong>${pct}</strong></span>
+        </div>`;
+      }).join("");
+      const byPhraseEl = document.getElementById("statByPhrase");
+      if (byPhraseEl) {
+        byPhraseEl.innerHTML = phraseRows || '<div style="color:var(--muted); font-size:11.5px">호출어별 데이터 없음</div>';
+      }
+    } catch (_) {}
+  }
+
+  async function pollMusicMatch() {
+    try {
+      const r = await fetch("/telemetry/stats?hours=24", {cache: "no-store"});
+      const t = await r.json();
+      const counts = t.event_counts || {};
+      const mmOk = counts.wake_command_ok ?? 0;          // successful wake+command
+      const mmFail = counts.music_match_failed ?? 0;     // TIDAL search failures
+      const mmTotal = mmOk + mmFail;
+      const successRate = mmTotal > 0 ? (mmOk / mmTotal * 100).toFixed(1) : "-";
+
+      document.getElementById("mmSuccess").textContent = successRate === "-" ? "-" : successRate + "%";
+      document.getElementById("mmOk").textContent = mmOk;
+      document.getElementById("mmFail").textContent = mmFail;
+      document.getElementById("mmTotal").textContent = mmTotal;
+
+      // Read recent events to list failed queries
+      const r2 = await fetch("/telemetry/recent?limit=200", {cache: "no-store"});
+      const j2 = await r2.json();
+      const events = j2.events || [];
+      const failed = events.filter(e => e.event === "music_match_failed");
+      const rows = failed.map(e => {
+        const q = e.query || "";
+        const st = e.search_type || "any";
+        const ts = e.ts ? new Date(e.ts * 1000).toTimeString().slice(0, 8) : "";
+        return `<div style="display:flex; justify-content:space-between; padding:2px 0; border-bottom:1px solid rgba(255,255,255,0.04); font-size:11.5px">
+          <span style="color:var(--muted); white-space:nowrap">${ts} [${st}]</span>
+          <span style="color:var(--rec); white-space:nowrap">“${q}”</span>
+        </div>`;
+      }).join("");
+      const mmFailedEl = document.getElementById("mmFailedQueries");
+      if (mmFailedEl) {
+        mmFailedEl.innerHTML = rows || '<div style="color:var(--muted); font-size:11.5px">실패한 음악 검색 쿼리 없음</div>';
+      }
+      document.getElementById("mmRec").textContent = mmTotal > 0
+        ? `최근 24시간 기준 음악 매칭 성공률 ${successRate === "-" ? "0" : successRate}%`
+        : "음악 매칭 데이터 수집 대기 중...";
     } catch (_) {}
   }
 
@@ -910,11 +1018,13 @@ DASHBOARD_HTML = r"""<!doctype html>
   connectSSE();
   pollMetrics();
   pollTelemetry();
+  pollMusicMatch();
   pollAccuracy();
   pollVerifier();
   pollLearningEntries();
   setInterval(pollMetrics, 200);
   setInterval(pollTelemetry, 10000);
+  setInterval(pollMusicMatch, 10000);
   setInterval(pollAccuracy, 10000);
   setInterval(pollVerifier, 10000);
   setInterval(pollLearningEntries, 10000);

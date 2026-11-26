@@ -128,7 +128,7 @@ def boost_hardware_mic_preamp() -> None:
         ("ADC2 Volume", "20"),   # +5 dB analog preamp max
         ("ADC3 Volume", "20"),   # +5 dB analog preamp max
         ("DEC0 Volume", "104"),  # +20 dB digital decimator (L channel)
-        ("DEC7 Volume", "88"),   # +4 dB digital decimator (R far-field mic; prevents 32768 clipping during loud music)
+        ("DEC7 Volume", "83"),   # -5 dB vs 88; reduces WCD9340 mic clipping (571 clips/7d measured) while preserving far-field pickup
     ]
     for name, val in controls:
         try:

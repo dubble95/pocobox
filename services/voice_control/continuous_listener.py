@@ -871,22 +871,45 @@ class ContinuousVoiceListener:
                             self.false_wake_rejected_count += 1
                             if self.telemetry is not None:
                                 meta = self._build_wake_telemetry_meta(str(wake_ev.get("phrase", "")), recent_peak, wake_ev)
+                                meta["snr_ratio"] = round(recent_peak / max(self.wake_ambient_rms, 1.0), 3)
                                 clip_wav = pcm_to_wav_bytes(b"".join(self._wake_clip_ring))
                                 clip_path = self.telemetry.save_wake_clip(clip_wav, "rejected", {**meta, "reject_reason": "conf"})
                                 self.telemetry.record("wake_rejected_conf", clip_path=clip_path, **meta)
+
+                        # Wake near-miss: audio had speech-like energy but Vosk did not fire.
+                        # Helps diagnose why "포코야" was not recognized (music masking, low SNR, etc.)
+                        if (
+                            hit is None
+                            and self.music_playing
+                            and recent_peak >= self.wake_min_rms
+                            and not self.passes_wake_energy_gate(recent_peak)
+                        ):
+                            self.telemetry.record(
+                                "wake_near_miss",
+                                phrase="",
+                                music_playing=True,
+                                wake_peak_rms=round(recent_peak, 1),
+                                wake_ambient_rms=round(self.wake_ambient_rms, 1),
+                                snr_ratio=round(recent_peak / max(self.wake_ambient_rms, 1.0), 3),
+                                aec3_reduction_db=round(self.aec3.echo_reduction_db, 1) if self.aec3 else 0.0,
+                                aec3_active=bool(self.aec3 and self.aec3.active),
+                                reason="energy_gate_blocked",
+                            )
 
                         if hit and self.on_wake_utterance is not None:
                             if not self.passes_wake_energy_gate(recent_peak):
                                 self.false_wake_rejected_count += 1
                                 log.info(
-                                    "Rejected weak wake false-positive '%s' (peak=%.1f wake_amb=%.1f music=%s)",
+                                    "Rejected weak wake false-positive '%s' (peak=%.1f wake_amb=%.1f music=%s snr=%.2f)",
                                     hit,
                                     recent_peak,
                                     self.wake_ambient_rms,
                                     self.music_playing,
+                                    recent_peak / max(self.wake_ambient_rms, 1.0),
                                 )
                                 if self.telemetry is not None:
                                     meta = self._build_wake_telemetry_meta(hit, recent_peak, wake_ev)
+                                    meta["snr_ratio"] = round(recent_peak / max(self.wake_ambient_rms, 1.0), 3)
                                     clip_wav = pcm_to_wav_bytes(b"".join(self._wake_clip_ring))
                                     clip_path = self.telemetry.save_wake_clip(clip_wav, "rejected", {**meta, "reject_reason": "energy"})
                                     self.telemetry.record("wake_rejected_energy", clip_path=clip_path, **meta)
@@ -948,15 +971,16 @@ class ContinuousVoiceListener:
                             walpha = 0.12 if wcap > self.wake_ambient_rms else 0.06
                             self.wake_ambient_rms = self.wake_ambient_rms * (1.0 - walpha) + wcap * walpha
                     else:
+                        if wake_mode and self.is_chime_playing_fn():
+                            # Prompt chime is playing out of internal speaker adjacent to mic.
+                            # Skip chime-corrupted chunks for VAD but PRESERVE captured audio
+                            # (preroll + any user speech before/during chime) so the leading
+                            # syllable of a continuous utterance ("포코야 음악 틀어줘") is not lost.
+                            # Chime is ~200ms; dropping those chunks keeps STT clean without
+                            # throwing away the user's command that may overlap the chime.
+                            continue
                         captured.append(stt_data)
                         if wake_mode:
-                            if self.is_chime_playing_fn():
-                                # Prompt chime is playing out of internal speaker adjacent to mic.
-                                # Discard chime chunks from command capture so STT and VAD are not corrupted.
-                                captured.clear()
-                                wake_speech_seen = False
-                                consecutive_silence = 0
-                                continue
 
                             # Dynamic post-duck command VAD: adapts to actual ducked room/speaker floor
                             # so utterances end cleanly ~0.7s after speech instead of hitting 4.8s max.

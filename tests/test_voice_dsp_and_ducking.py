@@ -116,8 +116,9 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
         with mock.patch.dict(os.environ, {"VOICE_WAKE_ENGINE": "off"}):
             spotter = VoskWakeWordSpotter()
         self.assertFalse(spotter.available)
-        self.assertEqual(spotter._match_text("hey poco [unk]"), "hey poco")
+        # Default: only "poco ya" triggers; "hey poco" is a decoy (low precision)
         self.assertEqual(spotter._match_text("poco ya"), "poco ya")
+        self.assertIsNone(spotter._match_text("hey poco [unk]"))
         self.assertIsNone(spotter._match_text("coco ya"))
         self.assertIsNone(spotter._match_text("boko ya"))
         self.assertIsNone(spotter._match_text("[unk] [unk]"))
@@ -299,7 +300,10 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
             def Reset(self) -> None:
                 self.resets += 1
 
-        with mock.patch.dict(os.environ, {"VOICE_WAKE_ENGINE": "off"}):
+        with mock.patch.dict(
+            os.environ,
+            {"VOICE_WAKE_ENGINE": "off", "VOICE_WAKE_TRIGGER_PHRASES": "hey poco,poco ya,poco box"},
+        ):
             spotter = VoskWakeWordSpotter(music_confirm_chunks=2, music_min_confidence=0.6)
 
         # Bare 2-syllable 'poco' ignored in both quiet and music to prevent false-triggers
@@ -322,8 +326,12 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
         self.assertIsNone(spotter.accept_pcm16k(chunk, music_playing=True))
         self.assertEqual(spotter.accept_pcm16k(chunk, music_playing=True), "poco ya")
 
-        # Stricter 4-chunk requirement for vocal-prone 'hey poco' during music playback
-        spotter2 = VoskWakeWordSpotter(music_confirm_chunks=3, music_min_confidence=0.70)
+        # Stricter confirmation for vocal-prone 'hey poco' during music playback
+        spotter2 = VoskWakeWordSpotter(
+            music_confirm_chunks=3,
+            music_min_confidence=0.70,
+            trigger_phrases=("hey poco", "poco ya", "poco box"),
+        )
         spotter2.available = True
         spotter2._last_trigger_time = 0.0  # Reset anti-spam cooldown for test
         spotter2._rec = _FakeRec([
@@ -348,7 +356,9 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
 
     def test_wake_korean_variants_normalize_to_poco_ya(self) -> None:
         with mock.patch.dict(os.environ, {"VOICE_WAKE_ENGINE": "off"}):
-            spotter = VoskWakeWordSpotter()
+            spotter = VoskWakeWordSpotter(
+                trigger_phrases=("hey poco", "poco ya", "poco box")
+            )
         ya_variants = [
             "포코야",
             "포코 야",
@@ -477,13 +487,12 @@ class TestVoiceDSPAndDucking(unittest.TestCase):
     def test_decoy_phrases_rejected_and_wake_energy_gate_blocks_reverb(self) -> None:
         with mock.patch.dict(os.environ, {"VOICE_WAKE_ENGINE": "off"}):
             spotter = VoskWakeWordSpotter()
-        # False-positive magnets must NEVER trigger
-        for decoy in ("boko ya", "coco ya", "ok coco", "hey coco", "coco box", "poker ya", "okay", "vocal", "local"):
+        # False-positive magnets must NEVER trigger (incl. low-precision 'hey poco' / 'poco box' kept as decoys)
+        for decoy in ("boko ya", "coco ya", "ok coco", "hey coco", "coco box", "poker ya", "okay", "vocal", "local", "hey poco", "poco box"):
             self.assertIsNone(spotter._match_text(decoy, music_playing=True), f"decoy should not match: {decoy}")
             self.assertIsNone(spotter._match_text(decoy, music_playing=False), f"decoy should not match: {decoy}")
-        # Legitimate wake phrases still match
+        # Legitimate wake phrase still matches
         self.assertEqual(spotter._match_text("poco ya", music_playing=True), "poco ya")
-        self.assertEqual(spotter._match_text("hey poco", music_playing=True), "hey poco")
         # Korean '포코야' / '포코아' transcribed as 'poco a' matches 'poco ya', while 'poco a poco' remains a decoy
         self.assertEqual(spotter._match_text("poco a", music_playing=True), "poco ya")
         self.assertIsNone(spotter._match_text("poco a poco", music_playing=True))

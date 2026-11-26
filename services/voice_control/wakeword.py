@@ -23,19 +23,28 @@ log = logging.getLogger("pocobox-voice.wakeword")
 
 DEFAULT_MODEL_DIR = "/srv/pocobox/models/vosk-model-small-en-us-0.15"
 
-# Clean trigger phrases verified for Korean ("포코야", "포코박스", "헤이 포코") and English ("Hey Poco")
+# Clean trigger phrases verified for Korean ("포코야") and English ("Hey Poco")
 # Note: single-word "poco" alone is intentionally excluded from triggers to prevent high false-positives
-# during quiet/paused conversation; use "poco ya" ("포코야"), "hey poco", or "poco box".
-DEFAULT_TRIGGER_PHRASES: tuple[str, ...] = (
-    "hey poco",
-    "poco ya",
-    "poco box",
-)
+# during quiet/paused conversation; "poco ya" ("포코야") is the default sole trigger.
+# "hey poco" and "poco box" showed low precision (14% / 24%) on-device and are kept as grammar
+# decoys only (recognized but not triggered). Re-enable via VOICE_WAKE_TRIGGER_PHRASES env var.
 
-# Competing non-trigger decoy words in the Kaldi grammar so non-wake speech/singing
-# maps here instead of being forced into wake phrases.
+def _env_trigger_phrases() -> tuple[str, ...]:
+    raw = os.environ.get("VOICE_WAKE_TRIGGER_PHRASES", "").strip()
+    if not raw:
+        return ("poco ya",)
+    return tuple(p.strip().lower() for p in raw.split(",") if p.strip())
+
+
+DEFAULT_TRIGGER_PHRASES: tuple[str, ...] = _env_trigger_phrases()
+
+# Decoy phrases absorbed by the Kaldi grammar so non-wake speech/singing maps here
+# instead of being forced into wake phrases. Includes low-precision triggers that are
+# recognized but deliberately do not fire (hey poco, poco box).
 DEFAULT_DECOY_PHRASES: tuple[str, ...] = (
     "poco",  # Decoy: bare "poco" alone does not trigger without "hey" / "ya" / "box"
+    "hey poco",  # Low precision (14%) — kept as decoy only, not a trigger
+    "poco box",  # Low precision (24%) — kept as decoy only, not a trigger
     "okay",
     "hey",
     "hello",

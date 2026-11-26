@@ -1178,6 +1178,17 @@ class VoiceController:
                 self._speak_answer(res.message, keep_awake_after_sec=15.0)
             elif res.ok and not res.details.get("ack_spoken"):
                 self._play_chime("ok")
+            elif not res.ok and res.action in (
+                IntentAction.PLAY_SEARCH.value,
+                IntentAction.QUEUE_NEXT.value,
+                IntentAction.PLAY_FAVORITE.value,
+            ):
+                # Speak failure with "did you mean" suggestions from dynamic catalog
+                suggestions = res.details.get("did_you_mean", []) if res.details else []
+                msg = res.message
+                if suggestions:
+                    msg += f". 비슷한 곡: {', '.join(suggestions)}"
+                self._speak_answer(msg, keep_awake_after_sec=10.0)
         finally:
             self._restore_duck(skip_restore=skip_restore)
 
@@ -1303,6 +1314,27 @@ class VoiceController:
                 duration_sec=0.0,
                 input_type="text",
             )
+
+            # Record dedicated music match failure event for dashboard analytics (text input path)
+            if (
+                not res.ok
+                and res.action
+                in (
+                    IntentAction.PLAY_SEARCH.value,
+                    IntentAction.QUEUE_NEXT.value,
+                    IntentAction.PLAY_FAVORITE.value,
+                )
+                and res.details
+            ):
+                tried = res.details.get("tried_queries", [])
+                self.telemetry.record(
+                    "music_match_failed",
+                    query=intent.query or "",
+                    tried_queries=tried,
+                    search_type=intent.search_type,
+                    music_playing=False,
+                    wake_word_detected=intent.wake_word_detected,
+                )
         if not dry_run and res.ok and (self._is_spoken_action(res.action) or res.details.get("spoken")):
             threading.Thread(
                 target=self._speak_answer,
@@ -1548,6 +1580,27 @@ class VoiceController:
                 duration_sec=metrics.duration_sec,
             )
 
+            # Record dedicated music match failure event for dashboard analytics
+            if (
+                not res.ok
+                and res.action
+                in (
+                    IntentAction.PLAY_SEARCH.value,
+                    IntentAction.QUEUE_NEXT.value,
+                    IntentAction.PLAY_FAVORITE.value,
+                )
+                and res.details
+            ):
+                tried = res.details.get("tried_queries", [])
+                self.telemetry.record(
+                    "music_match_failed",
+                    query=intent.query or "",
+                    tried_queries=tried,
+                    search_type=intent.search_type,
+                    music_playing=bool(self.continuous_listener.music_playing) if self.continuous_listener else False,
+                    wake_word_detected=intent.wake_word_detected,
+                )
+
         self.last_result = res.to_dict()
         self.events.publish({
             "type": "result",
@@ -1657,6 +1710,200 @@ class VoiceController:
             self._manual_busy = False
             self.events.publish({"type": "state", "state": "waiting", "rms": 0.0, "ts": time.time()})
             self._listen_lock.release()
+
+    def _get_diagnostic_spotter(self):
+        """Lazily create a dedicated VoskWakeWordSpotter for wake diagnostics.
+
+        Reusing the live listener's recognizer from an HTTP thread is unsafe
+        (Vosk KaldiRecognizer is not thread-safe), so diagnostics run on a
+        separate model instance with its own recognizer.
+        """
+        cached = getattr(self, "_diag_spotter", None)
+        if cached is not None:
+            return cached if cached.available else None
+        try:
+            from voice_control.wakeword import VoskWakeWordSpotter
+
+            spotter = VoskWakeWordSpotter(sample_rate=16000)
+            self._diag_spotter = spotter
+            return spotter if spotter.available else None
+        except Exception as exc:
+            log.warning("Failed to create diagnostic wake spotter: %s", exc)
+            return None
+
+    def announce_startup(self) -> None:
+        """Speak a startup greeting including the current build number (UI_VERSION)."""
+        if not _env_bool("VOICE_STARTUP_GREETING", True):
+            return
+        if not self.enable_tts:
+            return
+        greeting = f"안녕하세요, 포코박스 {UI_VERSION}입니다."
+        try:
+            self.events.publish({"type": "transcript", "text": f"🔊 {greeting}", "wake": False, "ts": time.time()})
+            self._speak_answer(greeting, keep_awake_after_sec=5.0)
+            log.info("Startup greeting spoken: %s", greeting)
+        except Exception as exc:
+            log.warning("Startup greeting failed: %s", exc)
+
+    def wake_diagnostic(self, seconds: float = 30.0) -> dict[str, Any]:
+        """Replay recent rolling audio through the wake-word spotter to diagnose
+        why '포코야' was not recognized. Returns per-chunk analysis: RMS, SNR,
+        energy gate pass/fail, and whether Vosk would have fired.
+
+        Requires VOICE_ROLLING_RECORDER=1 and a Vosk wake-word model.
+        """
+        if not self.continuous_listener or not self.continuous_listener.rolling_recorder:
+            return {
+                "ok": False,
+                "error": "rolling_recorder_not_available",
+                "message": "상시녹음기가 활성화되지 않았습니다. VOICE_ROLLING_RECORDER=1로 설정 후 재시작하세요.",
+            }
+
+        recorder = self.continuous_listener.rolling_recorder
+        if not recorder.enabled:
+            return {
+                "ok": False,
+                "error": "rolling_recorder_disabled",
+                "message": "상시녹음기가 비활성화되어 있습니다.",
+            }
+
+        spotter = self.continuous_listener.wake_spotter
+        if not spotter.available:
+            return {
+                "ok": False,
+                "error": "wake_model_not_available",
+                "message": "Vosk 호출어 모델이 로드되지 않았습니다.",
+            }
+
+        # Use a DEDICATED spotter instance for diagnosis. The live listener's
+        # KaldiRecognizer is not thread-safe: feeding it from this HTTP thread
+        # while the listener loop is running corrupts its state and aborts Vosk.
+        diag_spotter = self._get_diagnostic_spotter()
+        if diag_spotter is None:
+            return {
+                "ok": False,
+                "error": "wake_model_not_available",
+                "message": "진단용 Vosk 모델 로드에 실패했습니다.",
+            }
+
+        # Fetch recent clean (AEC3 + bandpass) audio channel
+        wav_bytes = recorder.get_recent_wav(seconds=seconds, channel="clean")
+        if not wav_bytes:
+            return {"ok": False, "error": "no_audio", "message": "분석할 오디오가 없습니다."}
+
+        import wave
+        import io
+
+        try:
+            with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+                if wf.getframerate() != 16000 or wf.getnchannels() != 1 or wf.getsampwidth() != 2:
+                    return {
+                        "ok": False,
+                        "error": "unsupported_format",
+                        "message": f"지원하지 않는 오디오 포맷: {wf.getparams()}",
+                    }
+                pcm = wf.readframes(wf.getnframes())
+        except Exception as exc:
+            return {"ok": False, "error": "wav_parse_error", "message": str(exc)}
+
+        # Replay chunk-by-chunk through the diagnostic spotter (separate instance)
+        diag_spotter.reset()
+        from voice_control.audio_capture import CHUNK_BYTES, chunk_rms
+
+        chunks_analyzed = 0
+        speech_chunks = 0
+        gate_blocks = 0
+        conf_rejections = 0
+        would_trigger = None
+        trigger_chunk = None
+        max_rms = 0.0
+        max_snr = 0.0
+        ambient_rms = self.continuous_listener.wake_ambient_rms
+        music_playing = self.continuous_listener.music_playing
+
+        for offset in range(0, len(pcm), CHUNK_BYTES):
+            chunk = pcm[offset : offset + CHUNK_BYTES]
+            if len(chunk) < 320:
+                continue
+            rms = chunk_rms(chunk)
+            max_rms = max(max_rms, rms)
+            chunks_analyzed += 1
+
+            is_silent = rms < max(40.0, ambient_rms * 1.4)
+            if not is_silent:
+                speech_chunks += 1
+
+            hit = diag_spotter.accept_pcm16k(
+                chunk, is_silent=is_silent, music_playing=music_playing
+            )
+
+            # Check energy gate status
+            gate_pass = self.continuous_listener.passes_wake_energy_gate(rms)
+            if not gate_pass and rms >= self.continuous_listener.wake_min_rms:
+                gate_blocks += 1
+
+            # Check confidence rejection
+            wake_ev = diag_spotter.last_event
+            if wake_ev and wake_ev.get("status") == "rejected_conf":
+                conf_rejections += 1
+
+            snr = rms / max(ambient_rms, 1.0)
+            max_snr = max(max_snr, snr)
+
+            if hit and would_trigger is None:
+                would_trigger = hit
+                trigger_chunk = offset // CHUNK_BYTES
+
+        return {
+            "ok": True,
+            "seconds": seconds,
+            "chunks_analyzed": chunks_analyzed,
+            "speech_chunks": speech_chunks,
+            "music_playing": music_playing,
+            "ambient_rms": round(ambient_rms, 1),
+            "max_rms": round(max_rms, 1),
+            "max_snr": round(max_snr, 2),
+            "gate_blocks": gate_blocks,
+            "conf_rejections": conf_rejections,
+            "would_trigger": would_trigger,
+            "trigger_chunk": trigger_chunk,
+            "wake_engine": "vosk",
+            "diagnosis": self._diagnose_wake_failure(
+                would_trigger, gate_blocks, conf_rejections, max_rms, max_snr, music_playing
+            ),
+        }
+
+    @staticmethod
+    def _diagnose_wake_failure(
+        would_trigger: str | None,
+        gate_blocks: int,
+        conf_rejections: int,
+        max_rms: float,
+        max_snr: float,
+        music_playing: bool,
+    ) -> str:
+        """Human-readable diagnosis of why wake word was not recognized."""
+        if would_trigger:
+            return f"호출어 '{would_trigger}'가 감지되었습니다. 명령어 녹음이 정상적으로 진행되었는지 확인하세요."
+
+        if max_rms < 40.0:
+            return "음성 에너지가 너무 낮습니다. 마이크에 가까이 대고 말씀해 주세요."
+
+        if music_playing:
+            if gate_blocks > 0:
+                return (
+                    f"음악 재생 중 에너지 게이트가 {gate_blocks}회 호출어를 차단했습니다. "
+                    f"최대 SNR {max_snr:.2f}로 음악 소리에 가려 호출어가 인식되지 않았습니다. "
+                    f"볼륨을 낮추거나 더 크게 말씀해 주세요."
+                )
+            if conf_rejections > 0:
+                return f"호출어가 부분적으로 감지되었으나 신뢰도가 부족해 차단되었습니다 ({conf_rejections}회). 다시 말씀해 주세요."
+            return "음악 재생 중 호출어가 감지되지 않았습니다. 음악 볼륨을 낮추고 '포코야'라고 말씀해 주세요."
+
+        if conf_rejections > 0:
+            return f"호출어가 부분적으로 감지되었으나 신뢰도가 부족해 차단되었습니다 ({conf_rejections}회)."
+
+        return "호출어가 감지되지 않았습니다. '포코야'라고 명확하게 말씀해 주세요."
 
     def update_runtime_config(self, data: dict[str, Any]) -> dict[str, Any]:
         if data.get("reset_defaults"):
@@ -2798,6 +3045,17 @@ def make_handler(controller: VoiceController) -> type[BaseHTTPRequestHandler]:
                 self._send_json(200, res)
                 return
 
+            if path == "/voice/wake_diagnostic":
+                try:
+                    data = json.loads(body.decode("utf-8")) if body else {}
+                except json.JSONDecodeError:
+                    data = {}
+                seconds = float(data.get("seconds", 30.0))
+                seconds = max(5.0, min(60.0, seconds))
+                res = controller.wake_diagnostic(seconds=seconds)
+                self._send_json(200 if res.get("ok") else 422, res)
+                return
+
             if path == "/quiz/start":
                 try:
                     data = json.loads(body.decode("utf-8")) if body else {}
@@ -2906,6 +3164,8 @@ def main() -> int:
     controller = VoiceController()
     controller.start_background_listeners()
     start_hw_button_watcher(controller)
+    # Speak startup greeting with build number once the audio stack is ready
+    threading.Timer(6.0, controller.announce_startup, daemon=True).start()
     server = ThreadingHTTPServer((host, port), make_handler(controller))
     log.info(
         "PocoBox Voice & Display daemon on http://%s:%d (provider=%s local_stt=%s continuous=%s wake_required=%s)",

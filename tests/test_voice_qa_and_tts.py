@@ -803,6 +803,67 @@ class TestVoiceQAAndTTS(unittest.TestCase):
             self.assertTrue(health["available"])
             self.assertEqual(health["model"], "qwen2.5-1.5b-instruct")
 
+    def test_asr_normalization_들어줘_틀줘_옆주곡(self) -> None:
+            from voice_control.aliases import normalize_asr_text
+
+            # SenseVoice frequently hears "들어줘" instead of "틀어줘"
+            self.assertEqual(normalize_asr_text("들어줘"), "틀어줘")
+            self.assertEqual(normalize_asr_text("들어 줘"), "틀어줘")
+            # Spaced "틀 줘" should normalize to "틀어줘"
+            self.assertEqual(normalize_asr_text("틀 줘"), "틀어줘")
+            # Classical work mis-hearing "옆주곡" -> "협주곡"
+            self.assertEqual(normalize_asr_text("옆주곡"), "협주곡")
+            self.assertEqual(normalize_asr_text("옆 주곡"), "협주곡")
+            # Full utterance normalization preserves surrounding context
+            self.assertEqual(
+                normalize_asr_text("라흐마니노프 옆주곡 틀어줘"),
+                "라흐마니노프 협주곡 틀어줘",
+            )
+            self.assertEqual(
+                normalize_asr_text("음악 들어줘"),
+                "음악 틀어줘",
+            )
+
+    def test_rule_parser_play_verbs_들어줘_틀줘(self) -> None:
+            from voice_control.rule_parser import parse_command
+            from voice_control.intent_schema import IntentAction
+
+            # "들어줘" (ASR mis-hearing of "틀어줘") should route to play_search
+            intent = parse_command("아이유 밤편지 들어줘")
+            self.assertEqual(intent.action, IntentAction.PLAY_SEARCH)
+
+            # "틀 줘" (spaced variant) should route to play_search
+            intent = parse_command("아이유 밤편지 틀 줘")
+            self.assertEqual(intent.action, IntentAction.PLAY_SEARCH)
+
+            # "들어 줘" with space + generic "음악" resumes playback (no specific query)
+            intent = parse_command("음악 들어 줘")
+            self.assertEqual(intent.action, IntentAction.RESUME)
+
+    def test_wake_triggers_default_poco_ya_only(self) -> None:
+            from voice_control.wakeword import DEFAULT_TRIGGER_PHRASES
+
+            # Default should be only "poco ya" (hey poco / poco box removed due to low precision)
+            self.assertEqual(DEFAULT_TRIGGER_PHRASES, ("poco ya",))
+
+    def test_wake_triggers_env_override(self) -> None:
+            import os
+            import importlib
+            import voice_control.wakeword as ww
+
+            os.environ["VOICE_WAKE_TRIGGER_PHRASES"] = "hey poco,poco ya,poco box"
+            importlib.reload(ww)
+            self.assertEqual(
+                ww.DEFAULT_TRIGGER_PHRASES,
+                ("hey poco", "poco ya", "poco box"),
+            )
+            # hey poco and poco box remain as decoys (recognized but not triggered) when not in triggers
+            os.environ["VOICE_WAKE_TRIGGER_PHRASES"] = "poco ya"
+            importlib.reload(ww)
+            self.assertEqual(ww.DEFAULT_TRIGGER_PHRASES, ("poco ya",))
+            self.assertIn("hey poco", ww.DEFAULT_DECOY_PHRASES)
+            self.assertIn("poco box", ww.DEFAULT_DECOY_PHRASES)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -426,7 +426,26 @@ class VoiceExecutor:
                     dry_run=dry_run,
                 )
                 if not res.get("ok"):
-                    return done(False, f"TIDAL에서 '{queries[0]}' 검색 결과를 찾지 못했습니다.", res)
+                    failed_query = queries[0] if queries else ""
+                    # Add "did you mean" suggestions from dynamic catalog
+                    suggestions: list[str] = []
+                    try:
+                        from .dynamic_catalog import get_dynamic_catalog
+                        d_cat = get_dynamic_catalog()
+                        for tok in [t for t in failed_query.split() if len(t) >= 2]:
+                            d_name, d_type, d_meta, d_score = d_cat.match_entity(tok, threshold=0.60)
+                            if d_name:
+                                if d_type == "track" and d_meta.get("artist"):
+                                    suggestions.append(f"{d_meta['artist']} {d_name}")
+                                else:
+                                    suggestions.append(d_name)
+                                if len(suggestions) >= 3:
+                                    break
+                    except Exception:
+                        pass
+                    if suggestions:
+                        res["did_you_mean"] = suggestions
+                    return done(False, f"TIDAL에서 '{failed_query}' 검색 결과를 찾지 못했습니다.", res)
                 if not dry_run:
                     if res.get("category") != "classical_work":
                         self._schedule_tidal_track_radio(player_id)
@@ -451,7 +470,25 @@ class VoiceExecutor:
                     play_action="insert",
                 )
                 if not res.get("ok"):
-                    return done(False, f"TIDAL에서 '{queries[0]}' 검색 결과를 찾지 못했습니다.", res)
+                    failed_query = queries[0] if queries else ""
+                    suggestions: list[str] = []
+                    try:
+                        from .dynamic_catalog import get_dynamic_catalog
+                        d_cat = get_dynamic_catalog()
+                        for tok in [t for t in failed_query.split() if len(t) >= 2]:
+                            d_name, d_type, d_meta, d_score = d_cat.match_entity(tok, threshold=0.60)
+                            if d_name:
+                                if d_type == "track" and d_meta.get("artist"):
+                                    suggestions.append(f"{d_meta['artist']} {d_name}")
+                                else:
+                                    suggestions.append(d_name)
+                                if len(suggestions) >= 3:
+                                    break
+                    except Exception:
+                        pass
+                    if suggestions:
+                        res["did_you_mean"] = suggestions
+                    return done(False, f"TIDAL에서 '{failed_query}' 검색 결과를 찾지 못했습니다.", res)
                 verb = "예약 확인(dry-run)" if dry_run else "다음 곡으로 예약 완료"
                 return done(
                     True,

@@ -425,7 +425,7 @@ class HybridVoiceInterpreter:
         openai_api_key: str | None = None,
         openai_stt_model: str | None = None,
         openai_chat_model: str | None = None,
-        timeout: float = 15.0,
+        timeout: float | None = None,
         local_stt_url: str | None = None,
         local_stt_language: str | None = None,
         local_stt_timeout: float | None = None,
@@ -446,7 +446,11 @@ class HybridVoiceInterpreter:
         self.openai_api_key = openai_api_key if openai_api_key is not None else os.environ.get("OPENAI_API_KEY", "").strip()
         self.openai_stt_model = openai_stt_model or os.environ.get("OPENAI_STT_MODEL", "gpt-4o-mini-transcribe")
         self.openai_chat_model = openai_chat_model or os.environ.get("OPENAI_CHAT_MODEL", "gpt-4o-mini")
-        self.timeout = timeout
+        self.timeout = (
+            float(timeout)
+            if timeout is not None
+            else float(os.environ.get("VOICE_CLOUD_TIMEOUT", "8.0"))
+        )
 
         self.quota_tracker = GeminiQuotaTracker(daily_limit=gemini_daily_limit, max_rpm=gemini_max_rpm)
         self.intent_cache = IntentTTLCache(ttl_sec=cache_ttl_sec or 1800.0)

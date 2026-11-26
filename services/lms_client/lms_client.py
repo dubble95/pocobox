@@ -49,7 +49,7 @@ def _tokenize(text: str) -> set[str]:
     return {t for t in re.findall(r"[0-9a-zA-Z가-힣]+", text.lower()) if len(t) >= 1}
 
 
-def _score_candidate(item: dict[str, Any], query: str) -> float:
+def _score_candidate(item: dict[str, Any], query: str, *, is_classical: bool = False) -> float:
     name = str(item.get("name", "")).strip()
     if not name:
         return -1.0
@@ -67,13 +67,21 @@ def _score_candidate(item: dict[str, Any], query: str) -> float:
         score += overlap * 40.0
     if item.get("isaudio"):
         score += 5.0
-    # Penalize karaoke / instrumental / tribute / cover versions unless explicitly requested
-    for noise in (
-        "karaoke", "instrumental", "tribute", "lullaby", "ringtone",
+    # Penalize karaoke / instrumental / tribute / cover versions unless explicitly requested.
+    # For classical music, "orchestral" and "piano version" are legitimate (not noise),
+    # so they are not penalized in classical mode.
+    noise_terms = (
+        "karaoke", "tribute", "lullaby", "ringtone",
         "originally perf", "made famous", "in the style of",
-        "orchestral", "music box", "piano version", "8-bit", "(cover)",
+        "music box", "8-bit", "(cover)",
         "transcribed", "transcription", "arranged", "arrangement",
-    ):
+    )
+    if is_classical:
+        # Classical works are inherently orchestral; piano versions are also valid.
+        noise_terms = noise_terms + ("instrumental",)
+    else:
+        noise_terms = noise_terms + ("instrumental", "orchestral", "piano version")
+    for noise in noise_terms:
         if noise in name_l and noise not in query_l:
             score -= 35.0
     return score
@@ -487,10 +495,10 @@ class LMSClient:
         if not albums:
             return None
 
-        scored = sorted(albums, key=lambda alb: _score_candidate(alb, query), reverse=True)
+        scored = sorted(albums, key=lambda alb: _score_candidate(alb, query, is_classical=True), reverse=True)
 
         for alb in scored[:5]:
-            if _score_candidate(alb, query) <= 0:
+            if _score_candidate(alb, query, is_classical=True) <= 0:
                 continue
             aid = str(alb.get("id"))
             tracks_res = self.tidal_items(player_id, item_id=aid, limit=60)
@@ -622,7 +630,7 @@ class LMSClient:
                     continue
 
                 # Prefer playable audio/playlist items when scoring
-                ranked = sorted(items, key=lambda it: _score_candidate(it, q), reverse=True)
+                ranked = sorted(items, key=lambda it: _score_candidate(it, q, is_classical=is_classical_req), reverse=True)
                 best = ranked[0]
                 if is_classical_req and cat_name == "songs":
                     target_mvt = parse_movement_number(q) or 1
