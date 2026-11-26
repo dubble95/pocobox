@@ -3165,7 +3165,9 @@ def main() -> int:
     controller.start_background_listeners()
     start_hw_button_watcher(controller)
     # Speak startup greeting with build number once the audio stack is ready
-    threading.Timer(6.0, controller.announce_startup, daemon=True).start()
+    greeting_timer = threading.Timer(6.0, controller.announce_startup)
+    greeting_timer.daemon = True
+    greeting_timer.start()
     server = ThreadingHTTPServer((host, port), make_handler(controller))
     log.info(
         "PocoBox Voice & Display daemon on http://%s:%d (provider=%s local_stt=%s continuous=%s wake_required=%s)",
