@@ -1841,6 +1841,12 @@ class VoiceController:
                 return {"ok": False, "error": "DAC 모드에서는 볼륨이 100%로 고정되어 있습니다.", "fixed": True}
             delta = 5 if action == "vol_up" else -5
             self.lms.adjust_volume(player_id, delta)
+        elif action == "screen_off":
+            # Force the display to sleep: clear the wake timer so the backlight
+            # controller can power off the screen when nothing else (music/quiz/voice)
+            # is keeping it awake. Does NOT re-arm _display_wake_until.
+            self._clear_display_wake()
+            return {"ok": True, "action": "screen_off", "keep_awake": self.display_state()["display"]["keep_awake"]}
         else:
             return {"ok": False, "error": f"Unknown control action: {action}"}
         self._wake_display(15.0)

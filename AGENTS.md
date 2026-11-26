@@ -132,4 +132,4 @@ ssh pocobox 'docker logs --tail 50 pocobox-stt'
 - Prefer Python standard library where practical on the host (`pocobox` Python 3.14); keep optional third-party imports (`requests`, `vosk`, `edge_tts`) gracefully guarded.
 - Follow **Conventional Commits** matching git history: `feat(voice): ...`, `fix(audio): ...`, `feat(quiz): ...`, `docs: ...`.
 - Add unit tests in `tests/` for any new parser rules, STT routing, VAD logic, or quiz behavior, and verify `python3 -m unittest discover -s tests -p "test_*.py" -v` passes 100% before committing or deploying.
-- **Always commit and push after completing each feature or fix unit** (once tests pass), keeping each commit focused on one logical unit of work.
+- **Always commit, push, and deploy after completing each feature or fix unit** (once tests pass), keeping each commit focused on one logical unit of work. Run `./scripts/deploy.sh pocobox` after pushing so the device always runs the latest tested code.

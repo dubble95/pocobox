@@ -662,6 +662,7 @@ DISPLAY_HTML = r"""<!doctype html>
       <button class="hud-btn" id="ytMvBtn" onclick="startKpopMv('all')" title="K-POP 뮤직비디오">📺 K-POP MV</button>
       <button class="hud-btn" id="rotateBtn" onclick="rotateDisplay(event)" title="화면 회전">↻ 회전</button>
       <button class="hud-btn" id="fsBtn" onclick="toggleFullscreen(event)" title="전체 화면">⛶ 전체화면</button>
+      <button class="hud-btn" id="screenOffBtn" onclick="screenOff(event)" title="화면 끄기">🔌 화면 끄기</button>
       <a class="hud-btn" id="dashLink" href="/dashboard" target="_self">설정</a>
       <a class="hud-btn" id="lmsLink" href="http://127.0.0.1:9000/material/" target="_self">LMS</a>
     </div>
@@ -1154,6 +1155,18 @@ DISPLAY_HTML = r"""<!doctype html>
       }
     } catch (_) {}
     updateFullscreenButton();
+    hideHud();
+  }
+
+  async function screenOff(ev) {
+    if (ev) ev.stopPropagation();
+    try {
+      await fetch("/display/control", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({action: "screen_off"})
+      });
+    } catch (_) {}
     hideHud();
   }
 

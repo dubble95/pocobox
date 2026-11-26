@@ -348,6 +348,37 @@ class DisplayBacklightTests(unittest.TestCase):
         ctrl._update_display_wake_for_action("pause")
         self.assertLessEqual(ctrl.display_state()["display"]["wake_remaining_sec"], 3.1)
 
+    def test_display_control_screen_off_clears_wake_timer(self) -> None:
+        from voice_control.daemon import VoiceController
+
+        with mock.patch.dict(os.environ, {"CONTINUOUS_LISTEN": "0", "LOCAL_STT_URL": ""}, clear=False):
+            with mock.patch("voice_control.daemon.get_internal_speaker_volume", return_value=85):
+                ctrl = VoiceController()
+
+        ctrl.lms = mock.MagicMock()
+        ctrl.lms.resolve_player_id.return_value = "02:70:6f:63:6f:01"
+        ctrl.lms.now_playing.return_value = {"mode": "pause", "title": "Test"}
+
+        # Idle paused state starts with keep_awake False
+        self.assertFalse(ctrl.display_state()["display"]["keep_awake"])
+
+        # A recent interaction arms a long wake timer -> keep_awake True
+        ctrl._wake_display(60.0)
+        self.assertTrue(ctrl.display_state()["display"]["keep_awake"])
+        self.assertGreater(ctrl.display_state()["display"]["wake_remaining_sec"], 0.0)
+
+        # screen_off clears the wake timer so the backlight can power off the screen
+        res = ctrl.display_control("screen_off")
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["action"], "screen_off")
+        self.assertFalse(ctrl.display_state()["display"]["keep_awake"])
+        self.assertEqual(ctrl.display_state()["display"]["wake_remaining_sec"], 0.0)
+
+        # Unknown action still errors
+        res_bad = ctrl.display_control("not_a_real_action")
+        self.assertFalse(res_bad["ok"])
+        self.assertIn("Unknown control action", res_bad["error"])
+
 
 if __name__ == "__main__":
     unittest.main()
