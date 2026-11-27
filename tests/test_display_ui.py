@@ -195,6 +195,45 @@ class DisplayUITests(unittest.TestCase):
         res = mod.query_current_orientation()
         self.assertTrue(res is None or isinstance(res, str))
 
+    def test_autorotate_restores_persisted_rotation_lock(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "pocobox_autorotate",
+            str(REPO_ROOT / "infra" / "display" / "pocobox-autorotate.py"),
+        )
+        assert spec and spec.loader
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            persist = Path(tmp) / "display-rotation"
+            lock_file = run_dir / "pocobox-rotation-lock"
+
+            # No persisted lock -> nothing restored
+            with mock.patch.dict(os.environ, {"DISPLAY_ROTATION_PERSIST": str(persist)}):
+                mod.restore_persistent_rotation(lock_file)
+            self.assertFalse(lock_file.exists())
+
+            # Valid persisted lock -> restored into runtime lock
+            persist.write_text("270", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"DISPLAY_ROTATION_PERSIST": str(persist)}):
+                mod.restore_persistent_rotation(lock_file)
+            self.assertEqual(lock_file.read_text(encoding="utf-8"), "270")
+
+            # Existing runtime lock is never overwritten
+            lock_file.write_text("90", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"DISPLAY_ROTATION_PERSIST": str(persist)}):
+                mod.restore_persistent_rotation(lock_file)
+            self.assertEqual(lock_file.read_text(encoding="utf-8"), "90")
+
+            # Invalid persisted values are ignored
+            lock_file.unlink()
+            persist.write_text("bogus", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"DISPLAY_ROTATION_PERSIST": str(persist)}):
+                mod.restore_persistent_rotation(lock_file)
+            self.assertFalse(lock_file.exists())
+
 
 def _load_backlight_module():
     spec = importlib.util.spec_from_file_location(
@@ -378,6 +417,48 @@ class DisplayBacklightTests(unittest.TestCase):
         res_bad = ctrl.display_control("not_a_real_action")
         self.assertFalse(res_bad["ok"])
         self.assertIn("Unknown control action", res_bad["error"])
+
+
+    def test_rotate_display_persists_lock_across_reboots(self) -> None:
+        """UI rotation must persist to a non-tmpfs lock so it survives reboots."""
+        from voice_control.daemon import VoiceController
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            (run_dir / "wayland-0").write_bytes(b"")  # fake Wayland socket
+            persist = Path(tmp) / "display-rotation"
+
+            def fake_wlr(*args, **kwargs):
+                m = mock.MagicMock()
+                m.returncode = 0
+                m.stdout = json.dumps([{"name": "DSI-1", "transform": "normal"}])
+                m.stderr = ""
+                return m
+
+            with mock.patch.dict(
+                os.environ,
+                {"XDG_RUNTIME_DIR": str(run_dir), "DISPLAY_ROTATION_PERSIST": str(persist)},
+            ), mock.patch("voice_control.daemon.shutil.which", return_value="/usr/bin/wlr-randr"),                 mock.patch("voice_control.daemon.subprocess.run", side_effect=fake_wlr):
+                ctrl = VoiceController()
+                res = ctrl.rotate_display("270")
+
+            self.assertTrue(res["ok"], res)
+            self.assertEqual(res["transform"], "270")
+            # Runtime lock written for immediate autorotate pickup...
+            self.assertEqual((run_dir / "pocobox-rotation-lock").read_text(encoding="utf-8"), "270")
+            # ...and persisted lock written for reboot restoration
+            self.assertEqual(persist.read_text(encoding="utf-8"), "270")
+
+            # auto mode clears both locks
+            with mock.patch.dict(
+                os.environ,
+                {"XDG_RUNTIME_DIR": str(run_dir), "DISPLAY_ROTATION_PERSIST": str(persist)},
+            ):
+                res_auto = ctrl.rotate_display("auto")
+            self.assertTrue(res_auto["ok"])
+            self.assertFalse((run_dir / "pocobox-rotation-lock").exists())
+            self.assertFalse(persist.exists())
 
 
 if __name__ == "__main__":

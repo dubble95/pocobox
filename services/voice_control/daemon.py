@@ -2451,6 +2451,9 @@ class VoiceController:
 
     def rotate_display(self, mode: str = "next") -> dict[str, Any]:
         """Rotate local Wayland kiosk output via wlr-randr (or re-enable sensor auto-rotate)."""
+        # Persisted below so the chosen orientation survives reboots:
+        # /run is tmpfs, so the runtime-only lock is wiped on every boot.
+        persist_path = Path(os.environ.get("DISPLAY_ROTATION_PERSIST", "/var/lib/pocobox/display-rotation"))
         self._wake_display(15.0)
         valid_transforms = ("normal", "90", "180", "270")
         req_mode = (mode or "next").strip().lower()
@@ -2460,6 +2463,10 @@ class VoiceController:
         if req_mode == "auto":
             try:
                 lock_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            try:
+                persist_path.unlink(missing_ok=True)
             except OSError:
                 pass
             return {"ok": True, "mode": "auto"}
@@ -2514,6 +2521,11 @@ class VoiceController:
                 return {"ok": False, "error": res.stderr.strip() or "wlr-randr failed"}
             try:
                 lock_file.write_text(target, encoding="utf-8")
+            except OSError:
+                pass
+            try:
+                persist_path.parent.mkdir(parents=True, exist_ok=True)
+                persist_path.write_text(target, encoding="utf-8")
             except OSError:
                 pass
             return {"ok": True, "output": out_name, "transform": target}

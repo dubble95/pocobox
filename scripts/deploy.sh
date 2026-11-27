@@ -51,7 +51,8 @@ SSH_TTY_OPT=""
 ssh ${SSH_TTY_OPT} "${HOST}" 'sudo sh -c "
 set -eu
 SRC=/tmp/pocobox-deploy
-mkdir -p /srv/pocobox/lms/config /srv/pocobox/lms/music /srv/pocobox/lms/playlist /srv/pocobox/stt /srv/pocobox/bin/voice_control /srv/pocobox/logs/wake_clips /srv/pocobox/logs/command_clips /etc/pocobox /etc/NetworkManager/conf.d /etc/systemd/sleep.conf.d /etc/systemd/system/greetd.service.d /home/user/.local/share/applications
+mkdir -p /srv/pocobox/lms/config /srv/pocobox/lms/music /srv/pocobox/lms/playlist /srv/pocobox/stt /srv/pocobox/bin/voice_control /srv/pocobox/logs/wake_clips /srv/pocobox/logs/command_clips /etc/pocobox /var/lib/pocobox /etc/NetworkManager/conf.d /etc/systemd/sleep.conf.d /etc/systemd/system/greetd.service.d /home/user/.local/share/applications
+chown user:user /var/lib/pocobox
 
 install -m 0644 \$SRC/docker-compose.yml /srv/pocobox/lms/docker-compose.yml
 install -m 0644 \$SRC/stt/Dockerfile /srv/pocobox/stt/Dockerfile

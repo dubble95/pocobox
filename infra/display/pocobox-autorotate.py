@@ -134,6 +134,31 @@ def _socket_id(sock: Path) -> tuple[int, int] | None:
         return None
 
 
+def restore_persistent_rotation(lock_file: Path) -> None:
+    """Restore the persisted rotation lock (survives reboots) into the runtime lock.
+
+    /run/user is tmpfs, so a UI-locked orientation would otherwise be lost on
+    every reboot and the kiosk would boot portrait.
+    """
+    if lock_file.exists():
+        return
+    persist = Path(os.environ.get("DISPLAY_ROTATION_PERSIST", "/var/lib/pocobox/display-rotation"))
+    try:
+        val = persist.read_text(encoding="utf-8").strip().lower()
+    except OSError:
+        return
+    if val not in ORIENTATION_TO_TRANSFORM.values():
+        return
+    try:
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+        lock_file.write_text(val, encoding="utf-8")
+        # Voice daemon (uid 10000) must be able to overwrite/clear this lock later.
+        os.chown(lock_file, 10000, 10000)
+        log.info("Restored persisted rotation lock: %s", val)
+    except OSError:
+        pass
+
+
 def main() -> int:
     rot_mode = os.environ.get("DISPLAY_ROTATION", "auto").strip().lower()
     kiosk_uid = os.environ.get("KIOSK_UID", "10000").strip()
@@ -150,6 +175,8 @@ def main() -> int:
 
     signal.signal(signal.SIGTERM, _handle_sig)
     signal.signal(signal.SIGINT, _handle_sig)
+
+    restore_persistent_rotation(lock_file)
 
     # Fixed rotation mode if explicitly configured
     if rot_mode in ("normal", "90", "180", "270"):
