@@ -90,6 +90,15 @@ class TestDynamicMusicCatalog(unittest.TestCase):
         expanded = expand_tidal_queries("검정치마")
         self.assertTrue(any("검정치마" in c for c in expanded))
 
+    def test_expand_tidal_queries_erlkönig_for_마왕(self) -> None:
+        # "슈베르트의 마왕" (Schubert's Erlkönig) must expand to the canonical
+        # TIDAL title so the Korean-only title is not a dead end on search.
+        expanded = expand_tidal_queries("슈베르트의 마왕")
+        self.assertTrue(expanded, "expansion must not be empty")
+        self.assertEqual(expanded[0], "Schubert Erlkönig")
+        self.assertIn("Erlkönig", expanded)
+        self.assertIn("Schubert", expanded)
+
 
 if __name__ == "__main__":
     unittest.main()

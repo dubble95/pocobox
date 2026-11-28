@@ -622,8 +622,10 @@ TRACK_ALIASES: dict[str, list[str]] = {
     "백조의 호수": ["Swan Lake", "Tchaikovsky Swan Lake"],
     "하바네라": ["Habanera", "Bizet Carmen Habanera"],
     "투우사의 노래": ["Toreador Song", "Bizet Carmen Toreador"],
+    # Schubert's art song "Erlkönig" (가곡 '마왕'). 한국어 제목만으로는 TIDAL 검색에
+    # 걸리지 않으므로 정식 영어 제목과 음역 변형을 후보로 등록한다.
+    "마왕": ["Erlkönig", "Erlkonig", "Schubert Erlkönig", "마왕"],
 }
-
 # Korean mood/genre -> TIDAL friendly search keywords
 GENRE_MOOD_ALIASES: dict[str, list[str]] = {
     "재즈": ["Jazz", "Chill Jazz"],

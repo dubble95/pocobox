@@ -294,6 +294,60 @@ class VoiceExecutor:
         except Exception as exc:
             log.debug("Pre-next TIDAL radio check skipped: %s", exc)
 
+    def _tidal_artist_top_tracks_recovery(
+        self,
+        player_id: str,
+        failed_query: str,
+        intent: VoiceIntent,
+        dry_run: bool = False,
+    ) -> ExecutionResult | None:
+        """If a TIDAL track/work search returns nothing, recover by playing the named
+        artist's top tracks instead of failing outright.
+
+        Returns an ExecutionResult when recovery succeeds, or None when no artist can be
+        recovered from the utterance or the artist lookup also fails. Fully automatic;
+        no user choice is required.
+        """
+        from .aliases import ARTIST_ALIASES
+
+        low = (intent.raw_text or "").strip()
+        artist_name: str | None = None
+        for ko, vals in ARTIST_ALIASES.items():
+            if ko and ko in low:
+                artist_name = vals[0]
+                break
+        if not artist_name:
+            return None
+        if artist_name == (failed_query or "").strip():
+            return None
+        try:
+            res = self.lms.tidal_search_and_play(
+                player_id,
+                queries=[artist_name],
+                search_type="artist",
+                dry_run=dry_run,
+            )
+        except Exception as exc:
+            log.warning("TIDAL artist recovery failed for %s: %s", artist_name, exc)
+            return None
+        if not res.get("ok"):
+            return None
+        verb = "검색 확인(dry-run)" if dry_run else "대표곡 재생 시작"
+        return ExecutionResult(
+            ok=True,
+            action=IntentAction.PLAY_SEARCH.value,
+            message=f"'{failed_query}'를(을) 찾지 못해 {artist_name} 대표곡을 {verb}.",
+            intent=intent.to_dict(),
+            details={
+                **res,
+                "recovery": "artist_top_tracks",
+                "original_query": failed_query,
+                "artist": artist_name,
+                "spoken": True,
+            },
+            latency_ms=0.0,
+        )
+
     def execute(self, intent: VoiceIntent, dry_run: bool = False) -> ExecutionResult:
         t0 = time.monotonic()
 
@@ -445,6 +499,15 @@ class VoiceExecutor:
                         pass
                     if suggestions:
                         res["did_you_mean"] = suggestions
+                    # Graceful artist-level recovery: when the specific track/work is not
+                    # found on TIDAL but the utterance names a known artist, play the
+                    # artist's top tracks instead of failing outright. Fully automatic;
+                    # no user choice is required.
+                    recovery = self._tidal_artist_top_tracks_recovery(
+                        player_id, failed_query, intent, dry_run
+                    )
+                    if recovery is not None:
+                        return recovery
                     return done(False, f"TIDAL에서 '{failed_query}' 검색 결과를 찾지 못했습니다.", res)
                 if not dry_run:
                     if res.get("category") != "classical_work":

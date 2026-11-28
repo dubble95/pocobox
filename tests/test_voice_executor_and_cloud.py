@@ -162,6 +162,19 @@ class FakeLMSClient(LMSClient):
                         {"id": "7_r2.2", "name": "Piano Concerto No. 2 in C Minor, Op. 18: III. Allegro scherzando", "isaudio": 1, "type": "audio"},
                     ]
                 }
+            # Simulate Schubert artist -> Top Tracks (used by artist-level recovery).
+            # Track searches for "Schubert Erlkönig"/"Erlkönig"/"Schubert 마왕" return no hits,
+            # while a direct artist lookup for "Schubert" resolves to Top Tracks.
+            if item_id == "7_Schubert.2":
+                return {
+                    "loop_loop": [
+                        {"id": "7_schubert_artist", "name": "Schubert", "isaudio": 0, "hasitems": 1}
+                    ]
+                }
+            if item_id == "7_schubert_artist":
+                return {
+                    "loop_loop": [{"id": "7_schubert.2.top", "name": "Top Tracks", "isaudio": 1}]
+                }
             return {"loop_loop": []}
         if command[0] == "tidal" and command[1] == "playlist" and command[2] == "play":
             self.played_items.append(command[3])
@@ -195,6 +208,65 @@ class TestVoiceExecutorAndCloud(unittest.TestCase):
         self.assertTrue(res.ok, res.message)
         self.assertEqual(res.details["category"], "artists")
         self.assertEqual(lms.played_items[-1], "item_id:7_cp.2.0.top")
+
+    def test_parse_command_schubert_erlkönig_uses_canonical_query(self) -> None:
+        # "슈베르트의 마왕 틀어줘" must resolve to the canonical TIDAL title
+        # "Schubert Erlkönig" instead of failing on the Korean-only title.
+        intent = parse_command("슈베르트의 마왕 틀어줘")
+        self.assertEqual(intent.action, IntentAction.PLAY_SEARCH)
+        self.assertEqual(intent.query, "Schubert Erlkönig")
+        self.assertIn("Erlkönig", intent.all_queries())
+
+    def test_tidal_artist_recovery_plays_top_tracks_when_track_not_found(self) -> None:
+        lms = FakeLMSClient()
+        executor = VoiceExecutor(lms)
+        intent = VoiceIntent(
+            action=IntentAction.PLAY_SEARCH,
+            raw_text="슈베르트의 마왕 틀어줘",
+            query="Schubert Erlkönig",
+            fallback_queries=["Erlkönig", "Schubert 마왕", "Schubert"],
+            display_query="마왕",
+            search_type="track",
+            confidence=0.9,
+        )
+        res = executor._tidal_artist_top_tracks_recovery(
+            "02:70:6f:63:6f:01", "Schubert Erlkönig", intent, dry_run=False
+        )
+        self.assertIsNotNone(res)
+        self.assertTrue(res.ok, res.message)
+        self.assertEqual(res.details["recovery"], "artist_top_tracks")
+        self.assertEqual(res.details["artist"], "Schubert")
+        self.assertEqual(res.details["original_query"], "Schubert Erlkönig")
+        self.assertIn("대표곡", res.message)
+        self.assertEqual(lms.played_items[-1], "item_id:7_schubert.2.top")
+
+    def test_tidal_artist_recovery_skipped_when_no_artist_named(self) -> None:
+        lms = FakeLMSClient()
+        executor = VoiceExecutor(lms)
+        intent = VoiceIntent(
+            action=IntentAction.PLAY_SEARCH,
+            raw_text="존재하지 않는 가수 미상곡 틀어줘",
+            query="존재하지 않는 가수 미상곡",
+            fallback_queries=[],
+            display_query="존재하지 않는 가수 미상곡",
+            search_type="track",
+            confidence=0.5,
+        )
+        res = executor._tidal_artist_top_tracks_recovery(
+            "02:70:6f:63:6f:01", "존재하지 않는 가수 미상곡", intent, dry_run=False
+        )
+        self.assertIsNone(res)
+
+    def test_tidal_search_failure_is_graceful_without_crash(self) -> None:
+        lms = FakeLMSClient()
+        executor = VoiceExecutor(lms)
+        intent = parse_command("존재하지 않는 가수 미상곡 틀어줘")
+        self.assertEqual(intent.action, IntentAction.PLAY_SEARCH)
+        res = executor.execute(intent)
+        self.assertFalse(res.ok)
+        self.assertIn("검색 결과를 찾지 못했습니다", res.message)
+        # No exception and no spurious playback
+        self.assertFalse(any("play" in str(c) for c in lms.played_items))
 
     def test_queue_next_command_parsing_and_execution(self) -> None:
         lms = FakeLMSClient()
